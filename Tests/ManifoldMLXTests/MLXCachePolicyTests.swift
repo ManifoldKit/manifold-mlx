@@ -1,6 +1,6 @@
 import XCTest
-@_spi(Testing) import ManifoldMLXKit
-import ManifoldMLXKit
+@_spi(Testing) import ManifoldMLX
+import ManifoldMLX
 
 /// Pure-logic tests for `MLXCachePolicy.resolvedBytes()`.
 ///

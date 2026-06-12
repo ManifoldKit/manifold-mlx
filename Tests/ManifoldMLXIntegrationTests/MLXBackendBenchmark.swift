@@ -1,7 +1,7 @@
 import XCTest
 import ManifoldInference
 import ManifoldTestSupport
-import ManifoldMLXKit
+import ManifoldMLX
 
 /// MLX throughput benchmark — local developer use only.
 ///

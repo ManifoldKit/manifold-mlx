@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 import ManifoldInference
 import Hub
 import MLX
-import FluxSwiftKit
+import FluxSwift
 
 // MARK: - Errors
 

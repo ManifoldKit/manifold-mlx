@@ -1,6 +1,6 @@
 import XCTest
-import ManifoldMLXKit
-@_spi(Testing) import ManifoldMLXKit
+import ManifoldMLX
+@_spi(Testing) import ManifoldMLX
 import ManifoldInference
 
 /// Unit tests for ``MLXModelProbe/produceManifest(at:detectedThinkingMarkers:supportsVision:)``.

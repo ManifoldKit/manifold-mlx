@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# scripts/test-mlx-integration.sh — Run ManifoldMLXKitIntegrationTests with the
+# scripts/test-mlx-integration.sh — Run ManifoldMLXIntegrationTests with the
 # discovery env vars properly forwarded to the xctest runner.
 #
 # Why this exists
 # ---------------
-# `ManifoldMLXKitIntegrationTests` requires real MLX model files on disk (Apple
+# `ManifoldMLXIntegrationTests` requires real MLX model files on disk (Apple
 # Silicon + Metal + a HuggingFace-style snapshot dir with config.json,
 # tokenizer.json, and *.safetensors weights). The discovery helper
 # `HardwareRequirements.findMLXModelDirectory()` is opt-out — it returns nil
@@ -20,7 +20,7 @@
 #   1. `xcodebuild build-for-testing` to produce the test bundle and an
 #      `.xctestrun` plist.
 #   2. PlistBuddy-edit the `.xctestrun` to add `EnvironmentVariables` to the
-#      `ManifoldMLXKitIntegrationTests` target's dict.
+#      `ManifoldMLXIntegrationTests` target's dict.
 #   3. `xcodebuild test-without-building -xctestrun <patched>` to execute
 #      with the injected env.
 #
@@ -34,7 +34,7 @@
 #   scripts/test-mlx-integration.sh --only <Class>    # run just one test class
 #
 # `--only <Class>` narrows the run to a single test class
-# (`-only-testing ManifoldMLXKitIntegrationTests/<Class>`). It is applied only at
+# (`-only-testing ManifoldMLXIntegrationTests/<Class>`). It is applied only at
 # the `test-without-building` step, so the cached test bundle under
 # `.build/mlx-integration-test-derived` stays reusable across different `--only`
 # runs without a rebuild. Combine with a model hint, e.g.
@@ -48,7 +48,7 @@
 
 set -euo pipefail
 
-# NOTE(C2): the test target is temporarily named ManifoldMLXKitIntegrationTests
+# NOTE(C2): the test target is temporarily named ManifoldMLXIntegrationTests
 # (core still declares a ManifoldMLXIntegrationTests target until the C2 removal
 # PR merges). Rename back alongside the Package.swift NOTE(C2) flip.
 
@@ -94,9 +94,9 @@ done
 
 # Narrow the run to a single class when --only is given. Applied only at the
 # test-without-building step (below) so the cached build bundle stays reusable.
-ONLY_TESTING_RUN="ManifoldMLXKitIntegrationTests"
+ONLY_TESTING_RUN="ManifoldMLXIntegrationTests"
 if [[ -n "$ONLY_CLASS" ]]; then
-    ONLY_TESTING_RUN="ManifoldMLXKitIntegrationTests/$ONLY_CLASS"
+    ONLY_TESTING_RUN="ManifoldMLXIntegrationTests/$ONLY_CLASS"
 fi
 
 DERIVED="$REPO_ROOT/.build/mlx-integration-test-derived"
@@ -106,7 +106,7 @@ if [[ "$REBUILD" -eq 1 || ! -d "$DERIVED" ]]; then
     rm -rf "$DERIVED"
     xcodebuild build-for-testing \
         -scheme manifold-mlx-Package \
-        -only-testing ManifoldMLXKitIntegrationTests \
+        -only-testing ManifoldMLXIntegrationTests \
         -destination 'platform=macOS' \
         -derivedDataPath "$DERIVED" \
         -quiet
@@ -118,19 +118,19 @@ if [[ -z "$RUNFILE" ]]; then
     exit 1
 fi
 
-# Find the ManifoldMLXKitIntegrationTests target index in the TestTargets array.
+# Find the ManifoldMLXIntegrationTests target index in the TestTargets array.
 TARGET_INDEX=""
 TOTAL=$(/usr/libexec/PlistBuddy -c "Print :TestConfigurations:0:TestTargets" "$RUNFILE" 2>/dev/null | grep -c "BlueprintName")
 for ((i = 0; i < TOTAL; i++)); do
     name=$(/usr/libexec/PlistBuddy -c "Print :TestConfigurations:0:TestTargets:$i:BlueprintName" "$RUNFILE" 2>/dev/null || true)
-    if [[ "$name" == "ManifoldMLXKitIntegrationTests" ]]; then
+    if [[ "$name" == "ManifoldMLXIntegrationTests" ]]; then
         TARGET_INDEX=$i
         break
     fi
 done
 
 if [[ -z "$TARGET_INDEX" ]]; then
-    echo "ERROR: ManifoldMLXKitIntegrationTests target not found in $RUNFILE" >&2
+    echo "ERROR: ManifoldMLXIntegrationTests target not found in $RUNFILE" >&2
     exit 1
 fi
 

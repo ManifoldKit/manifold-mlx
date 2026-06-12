@@ -1,6 +1,6 @@
 import XCTest
-import ManifoldMLXKit
-@_spi(Testing) import ManifoldMLXKit
+import ManifoldMLX
+@_spi(Testing) import ManifoldMLX
 
 /// Unit tests for ``MLXResourceArbiter`` — the per-instance cache-claim
 /// accounting that prevents multi-MLX hosts from trampling each other's

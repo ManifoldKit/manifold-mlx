@@ -1,20 +1,12 @@
 // swift-tools-version: 6.1
 import PackageDescription
 
-// NOTE(C2): targets/products/modules are TEMPORARILY named `ManifoldMLXKit`,
-// `FluxSwiftKit`, `StableDiffusionKit`, `ManifoldMLXKitIntegrationTests`.
-// Core (roryford/ManifoldKit) still declares targets named `ManifoldMLX`,
-// `FluxSwift`, `StableDiffusion`, and `ManifoldMLXIntegrationTests` until the
-// C2 removal PR merges, and SwiftPM requires target names to be unique across
-// the package graph — module aliasing cannot dissolve a root-vs-dependency
-// conflict (verified empirically at C1 bootstrap).
-// The moment C2 lands on core main, flip in ONE commit, before any 0.1.0 tag:
-//   1. drop the `Kit` suffix from all four target/product names here
-//   2. sed the `import ManifoldMLXKit` / `import FluxSwiftKit` /
-//      `import StableDiffusionKit` lines in Sources/ and Tests/ back
-//   3. revert the target name in scripts/test-mlx-integration.sh
-// Paths (`Sources/ManifoldMLX`, …) are already the final layout — the
-// ManifoldBackendTestKit #filePath upwalk depends on them; do not move them.
+// NOTE(C2, resolved): the targets/products/modules carried temporary `Kit`
+// suffixes while core still declared `ManifoldMLX` / `FluxSwift` /
+// `StableDiffusion` / `ManifoldMLXIntegrationTests` targets (SwiftPM requires
+// target names to be unique across the package graph). Core's C2 removal PR
+// deletes those targets; this branch restores the canonical names and merges
+// immediately after core's C2.
 let package = Package(
     name: "manifold-mlx",
     platforms: [
@@ -22,7 +14,7 @@ let package = Package(
         .macOS(.v15),
     ],
     products: [
-        .library(name: "ManifoldMLXKit", targets: ["ManifoldMLXKit"]),
+        .library(name: "ManifoldMLX", targets: ["ManifoldMLX"]),
     ],
     dependencies: [
         // TODO(C3): switch to .upToNextMinor(from: "0.48.0") at the release train.
@@ -47,7 +39,7 @@ let package = Package(
         // because flux.swift pins swift-transformers 0.1.x; ManifoldKit
         // requires 1.2.x.
         .target(
-            name: "FluxSwiftKit",
+            name: "FluxSwift",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
@@ -62,7 +54,7 @@ let package = Package(
         // Vendored StableDiffusion (from mlx-swift-examples, MIT — LICENSE
         // kept in-tree), used by MLXDiffusionBackend.
         .target(
-            name: "StableDiffusionKit",
+            name: "StableDiffusion",
             dependencies: [
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
@@ -77,7 +69,7 @@ let package = Package(
         // commit trailer); the `#if MLX` / `#if HuggingFace` trait gates were
         // stripped at import — both are always-on here.
         .target(
-            name: "ManifoldMLXKit",
+            name: "ManifoldMLX",
             dependencies: [
                 .product(name: "ManifoldInference", package: "ManifoldKit"),
                 .product(name: "MLX", package: "mlx-swift"),
@@ -96,15 +88,15 @@ let package = Package(
                 // Hub is consumed directly by the FLUX diffusion backend for
                 // repository snapshot downloads.
                 .product(name: "Hub", package: "swift-transformers"),
-                "StableDiffusionKit",
-                "FluxSwiftKit",
+                "StableDiffusion",
+                "FluxSwift",
             ],
             path: "Sources/ManifoldMLX"
         ),
         .testTarget(
             name: "ManifoldMLXTests",
             dependencies: [
-                "ManifoldMLXKit",
+                "ManifoldMLX",
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "ManifoldInference", package: "ManifoldKit"),
                 .product(name: "ManifoldRuntime", package: "ManifoldKit"),
@@ -118,9 +110,9 @@ let package = Package(
         // with a patched .xctestrun) — every test XCTSkips under plain
         // `swift test` unless MANIFOLD_DISCOVER_LOCAL_MODELS=1 is injected.
         .testTarget(
-            name: "ManifoldMLXKitIntegrationTests",
+            name: "ManifoldMLXIntegrationTests",
             dependencies: [
-                "ManifoldMLXKit",
+                "ManifoldMLX",
                 .product(name: "ManifoldInference", package: "ManifoldKit"),
                 .product(name: "ManifoldRuntime", package: "ManifoldKit"),
                 .product(name: "ManifoldPersistenceSwiftData", package: "ManifoldKit"),

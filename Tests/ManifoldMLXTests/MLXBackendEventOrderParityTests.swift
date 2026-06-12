@@ -2,8 +2,8 @@ import XCTest
 import MLXLMCommon
 import ManifoldInference
 import ManifoldTestSupport
-import ManifoldMLXKit
-@_spi(Testing) import ManifoldMLXKit
+import ManifoldMLX
+@_spi(Testing) import ManifoldMLX
 
 /// Pins the **event ordering** emitted by `MLXBackend.generate(...)` against
 /// a frozen expected sequence.
