@@ -1,0 +1,28 @@
+name: Canary (core main)
+
+# Re-resolves against roryford/ManifoldKit main and builds+tests from scratch.
+# A failure here means the core seam moved — not that this repo regressed.
+on:
+  schedule:
+    - cron: "17 4 * * 1"   # weekly, Monday 04:17 UTC (quiet hour)
+  workflow_dispatch:
+  repository_dispatch:
+    types: [core-release]
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Drop lockfile and re-resolve against core main
+        run: |
+          rm -f Package.resolved
+          swift package resolve
+      - name: Build
+        run: swift build
+      - name: Test
+        # NO --parallel (process-global claims registry; see ci.yml).
+        run: swift test

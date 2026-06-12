@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache SwiftPM dependency material
+        uses: actions/cache@v4
+        with:
+          # Dependency material only (clones, registries, prebuilt binary
+          # artifacts — for manifold-mlx the big win is the cached checkout of the
+          # heavy ML dependency tree). Own-module .build/debug objects are
+          # deliberately NOT cached: SwiftPM embeds absolute paths in module
+          # fingerprints, so restored objects go stale on miss (same lesson
+          # as core's ci.yml).
+          path: |
+            ~/.swiftpm
+            .build/artifacts
+            .build/checkouts
+            .build/repositories
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-
+      - name: Build
+        run: swift build
+      - name: Test
+        # NO --parallel: ManifoldBackendTestKit's BackendContractChecks claims
+        # registry is process-global; explicit parallelism interleaves backend
+        # test classes and races it.
+        run: swift test
+
+  # Real-model MLX integration tests are NOT run in CI: they need Apple
+  # Silicon Metal plus multi-GB local model snapshots that hosted runners
+  # don't have, and `xcodebuild` env-var patching (scripts/
+  # test-mlx-integration.sh). This stub exists so the lane can be triggered
+  # manually on a self-hosted runner if one ever materializes; nothing is
+  # scheduled.
+  integration-tests:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run MLX integration tests
+        run: scripts/test-mlx-integration.sh

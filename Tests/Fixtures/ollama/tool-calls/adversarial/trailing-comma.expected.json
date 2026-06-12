@@ -1,0 +1,8 @@
+{
+  "should_emit": true,
+  "event_type": "toolCall",
+  "tool_name": "get_weather",
+  "arguments_contains": "Paris",
+  "should_log_warning": false,
+  "notes": "Apple's JSONSerialization is lenient and accepts trailing commas in object literals, so the line parses successfully and the parser emits the tool call. Empirically verified on macOS; behaviour is platform-specific."
+}
