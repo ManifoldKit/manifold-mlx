@@ -17,11 +17,10 @@ let package = Package(
         .library(name: "ManifoldMLX", targets: ["ManifoldMLX"]),
     ],
     dependencies: [
-        // TODO(C3): switch to .upToNextMinor(from: "0.48.0") at the release train.
         // The ManifoldBackendTestKit / ManifoldTestSupport products this package
         // needs exist only on main until the 0.48 tags ship.
         // traits: [] builds core's products trait-less (the post-C2 world).
-        .package(url: "https://github.com/roryford/ManifoldKit", branch: "main", traits: []),
+        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.48.0")),
         // Pins copied from core's Package.swift.
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.3"),
         // 3.31.3 ships the decoupled MLXHuggingFace target and adds the
