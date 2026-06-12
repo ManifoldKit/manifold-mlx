@@ -1,7 +1,7 @@
 import XCTest
 import ManifoldInference
-import ManifoldMLXKit
-@_spi(Testing) import ManifoldMLXKit
+import ManifoldMLX
+@_spi(Testing) import ManifoldMLX
 
 /// Unit tests for the chat-message encoding helpers extracted from `MLXBackend.generate` (#1113).
 ///

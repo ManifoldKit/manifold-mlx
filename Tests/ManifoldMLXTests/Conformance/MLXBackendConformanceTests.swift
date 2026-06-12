@@ -2,8 +2,8 @@ import XCTest
 import ManifoldInference
 import ManifoldBackendTestKit
 import ManifoldTestSupport
-import ManifoldMLXKit
-import ManifoldMLXKit
+import ManifoldMLX
+import ManifoldMLX
 
 /// MLXBackend conformance against the universal backend contract.
 ///

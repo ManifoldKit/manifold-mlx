@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 import ManifoldInference
 import Hub
 import MLX
-import StableDiffusionKit
+import StableDiffusion
 
 // MARK: - Errors
 

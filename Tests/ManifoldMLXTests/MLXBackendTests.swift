@@ -4,8 +4,8 @@ import ManifoldPersistenceSwiftData
 import ManifoldInference
 import ManifoldBackendTestKit
 import ManifoldTestSupport
-import ManifoldMLXKit
-@_spi(Testing) import ManifoldMLXKit
+import ManifoldMLX
+@_spi(Testing) import ManifoldMLX
 
 /// Tests for MLXBackend state, capabilities, and lifecycle.
 ///

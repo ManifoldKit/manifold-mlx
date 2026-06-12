@@ -1,8 +1,8 @@
 import XCTest
 import ManifoldInference
 import ManifoldTestSupport
-import ManifoldMLXKit
-@_spi(Testing) import ManifoldMLXKit
+import ManifoldMLX
+@_spi(Testing) import ManifoldMLX
 
 /// Behavioral proof that dropping an `MLXBackend` releases its `MLXResourceArbiter`
 /// claim (#1623 class C — "asymmetric sibling").

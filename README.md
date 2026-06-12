@@ -4,7 +4,7 @@ MLX inference and diffusion backends for [ManifoldKit](https://github.com/roryfo
 
 It provides Apple-Silicon-native text generation (mlx-swift-lm model families incl. MoE Gemma 4 via MLXVLM routing), prompt/KV cache coordination, a resource arbiter, capability probing, and FLUX.1 / Stable Diffusion image generation.
 
-> **Temporary module names — pre-0.48 only.** Until ManifoldKit's C2 removal PR deletes the in-core `ManifoldMLX`/`FluxSwift`/`StableDiffusion` targets, SwiftPM's graph-wide target-name uniqueness forces this package to ship the modules as **`ManifoldMLXKit`**, `FluxSwiftKit`, `StableDiffusionKit`. They are renamed to their real names in one commit before the first `0.1.0` tag (see the `NOTE(C2)` in `Package.swift`). If you are reading this after a 0.1.0 tag exists and still see `Kit` names, file an issue.
+> **Temporary module names — pre-0.48 only.** Until ManifoldKit's C2 removal PR deletes the in-core `ManifoldMLX`/`FluxSwift`/`StableDiffusion` targets, SwiftPM's graph-wide target-name uniqueness forces this package to ship the modules as **`ManifoldMLX`**, `FluxSwift`, `StableDiffusion`. They are renamed to their real names in one commit before the first `0.1.0` tag (see the `NOTE(C2)` in `Package.swift`). If you are reading this after a 0.1.0 tag exists and still see `Kit` names, file an issue.
 
 ## Install
 
@@ -17,30 +17,18 @@ dependencies: [
 targets: [
     .target(name: "MyApp", dependencies: [
         .product(name: "ManifoldKit", package: "ManifoldKit"),
-        .product(name: "ManifoldMLXKit", package: "manifold-mlx"), // ManifoldMLX after 0.1.0
+        .product(name: "ManifoldMLX", package: "manifold-mlx"),
     ]),
 ]
 ```
 
-Register the backend with your `InferenceService` (the registrar seam shipped in core's B2 work):
+Register the backend via the `MLXBackends` registrar (the seam shipped in core's B2 work; the registrar moved here in core's C2 split):
 
 ```swift
 import ManifoldKit
-import ManifoldMLXKit  // import ManifoldMLX after 0.1.0
+import ManifoldMLX
 
-// TODO(C2): once core's C2 PR moves the `MLXBackends` registrar enum from
-// ManifoldKit's ManifoldBackendsUmbrella into this package, this becomes
-//     try await ManifoldKit.quickStart(backends: [MLXBackends.self])
-// Until then, register through the same public seam the registrar uses:
-await MainActor.run {
-    service.registerBackendFactory { modelType in
-        switch modelType {
-        case .mlx: return MLXBackend()
-        default:   return nil
-        }
-    }
-    service.declareSupport(for: .mlx)
-}
+let kit = try await ManifoldKit.quickStart(backends: [MLXBackends.self])
 ```
 
 ## Compatibility

@@ -1,6 +1,6 @@
 import XCTest
 import MLXLMCommon
-@_spi(Testing) import ManifoldMLXKit
+@_spi(Testing) import ManifoldMLX
 
 /// Unit tests for prompt-cache coordination helpers that do not touch MLX/Metal
 /// runtime state (no `eval`, no tensor materialisation).

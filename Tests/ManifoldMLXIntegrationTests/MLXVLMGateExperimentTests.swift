@@ -1,8 +1,8 @@
 import XCTest
 import ManifoldInference
 import ManifoldTestSupport
-import ManifoldMLXKit
-@_spi(Testing) import ManifoldMLXKit
+import ManifoldMLX
+@_spi(Testing) import ManifoldMLX
 
 /// Confirms the VLM-side KV-reuse gate is currently on.
 ///
