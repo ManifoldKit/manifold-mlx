@@ -105,7 +105,7 @@ if [[ "$REBUILD" -eq 1 || ! -d "$DERIVED" ]]; then
     echo "==> Building test bundle (xcodebuild build-for-testing)…"
     rm -rf "$DERIVED"
     xcodebuild build-for-testing \
-        -scheme manifold-mlx-Package \
+        -scheme manifold-mlx \
         -only-testing ManifoldMLXIntegrationTests \
         -destination 'platform=macOS' \
         -derivedDataPath "$DERIVED" \
