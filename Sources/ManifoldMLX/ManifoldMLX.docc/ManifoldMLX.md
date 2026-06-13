@@ -15,8 +15,9 @@ distinct surfaces:
   conformers of `ImageGenerationBackend` that drive `mlx-swift-examples`'s
   StableDiffusion and `mzbac/flux.swift` respectively.
 
-The module is trait-gated behind the `MLX` package trait; apps that don't
-need MLX can build without it. Image generation backends additionally need
+The package lives outside the main ManifoldKit repository because of its heavy
+MLX dependency; apps that don't need MLX simply omit the `manifold-mlx`
+package. Image generation backends additionally need
 diffusion weights on disk — see ``ImageModelInfo`` for the on-disk shape and
 `ManifoldHuggingFace` for the downloader.
 
@@ -47,9 +48,9 @@ Import `ManifoldMLX` directly when:
 
 ## When not to use this module
 
-- **Your app never runs on Apple Silicon.** The entire module is conditionally
-  compiled behind the `MLX` package trait. Cloud-only apps should omit the
-  `MLX` trait so the MLX XCFramework is never linked.
+- **Your app never runs on Apple Silicon.** The whole family lives in the
+  separate `manifold-mlx` package. Cloud-only apps should omit that package
+  dependency so the MLX XCFramework is never linked.
 - **You only need the image-generation value types** (``ImageGenerationConfig``,
   ``ImageGenerationEvent``). Those are in `ManifoldInference` so you can
   reference them without pulling in the MLX dependency.
