@@ -10,8 +10,13 @@ import Tokenizers
 /// `TokenizerAdaptorMacro` in
 /// `mlx-swift-lm/Libraries/MLXHuggingFaceMacros/HuggingFaceIntegrationMacros.swift`
 /// exactly — keep them in sync if the upstream expansion changes.
-struct TransformersTokenizerLoader: MLXLMCommon.TokenizerLoader {
-    func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
+// @_spi(Testing): published only for backend test targets (companion-package split, #1749)
+// so TransformersTokenizerLoaderTests can drive load(from:) against fixture
+// directories without taking a @testable import on the whole module.
+@_spi(Testing) public struct TransformersTokenizerLoader: MLXLMCommon.TokenizerLoader {
+    public init() {}
+
+    public func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
         let upstream = try await Tokenizers.AutoTokenizer.from(modelFolder: directory)
         return TokenizerBridge(upstream)
     }
