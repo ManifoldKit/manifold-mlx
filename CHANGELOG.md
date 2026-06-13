@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/roryford/manifold-mlx/compare/v0.2.0...v0.2.1) (2026-06-13)
+
+### Highlights
+
+**Upgrade from 0.2.0 to pick up the ManifoldKit 0.50 core.** `v0.2.0` was pinned to ManifoldKit 0.49.0; this is the recommended successor for anyone on `from: "0.2.0"`. The core pin moves to `.upToNextMinor(from: "0.50.0")` ([#9](https://github.com/roryford/manifold-mlx/issues/9)), building against ManifoldKit 0.50 — which adds an additive `ImageGenerationEvent.preview` case for live denoising previews; this release handles the new case (the actual MLX preview-frame emit is a planned follow-up). No source changes are required — bump and rebuild.
+
+**Versioning reconciled** ([#10](https://github.com/roryford/manifold-mlx/issues/10)) — a manual `v0.2.0` tag had been pushed out-of-band, so release-please (which versions from `.release-please-manifest.json`, not git tags) cut a `v0.1.1` *below* it, leaving the published high tag pointing at older code. The manifest is reset to `0.2.0` so the version line resumes correctly at `0.2.1` and can never regress below `v0.2.0` again.
+
 ## [0.1.1](https://github.com/roryford/manifold-mlx/compare/v0.1.0...v0.1.1) (2026-06-13)
 
 ### Highlights
