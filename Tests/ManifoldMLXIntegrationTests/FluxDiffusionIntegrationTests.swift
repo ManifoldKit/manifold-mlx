@@ -66,6 +66,10 @@ final class FluxDiffusionIntegrationTests: XCTestCase {
                 sawProgress = true
             case .completed(let imageURL):
                 producedURL = imageURL
+            // TODO: assert on intermediate preview frames once the backend emits
+            // ImageGenerationEvent.preview (VAE-decode preview emission is deferred).
+            case .preview:
+                break
             }
         }
 
