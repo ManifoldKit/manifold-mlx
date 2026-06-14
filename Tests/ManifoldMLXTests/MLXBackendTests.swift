@@ -108,6 +108,21 @@ final class MLXBackendTests: XCTestCase {
             }
             XCTAssertFalse(reason.isEmpty)
         }
+
+        // Differential check: the SAME no-model call WITHOUT a grammar must
+        // throw `No model loaded` (`inferenceFailure`), not `unsupportedGrammar`.
+        // Proves the guard is grammar-specific and not swallowing every call —
+        // i.e. the `config.grammar != nil` predicate is load-bearing.
+        XCTAssertThrowsError(
+            try MLXBackend().generate(prompt: "hi", systemPrompt: nil, config: GenerationConfig())
+        ) { error in
+            if case InferenceError.unsupportedGrammar = error {
+                return XCTFail("A grammar-free call must not throw unsupportedGrammar, got \(error)")
+            }
+            guard case InferenceError.inferenceFailure = error else {
+                return XCTFail("Expected inferenceFailure (No model loaded), got \(error)")
+            }
+        }
     }
 
     func test_unloadModel_beforeLoad_doesNotCrash() {
