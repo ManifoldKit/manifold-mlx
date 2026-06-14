@@ -92,6 +92,39 @@ final class MLXBackendTests: XCTestCase {
         )
     }
 
+    func test_generate_withGrammar_throwsUnsupportedGrammar() {
+        // The grammar guard must fire before any model work, so this requires
+        // no model load. A non-nil GBNF grammar on a backend that does not
+        // support grammar-constrained sampling MUST throw `unsupportedGrammar`
+        // (InferenceBackend contract), not silently drop the constraint.
+        var config = GenerationConfig()
+        config.grammar = "root ::= \"yes\" | \"no\""
+        XCTAssertFalse(MLXBackend().capabilities.supportsGrammarConstrainedSampling)
+        XCTAssertThrowsError(
+            try MLXBackend().generate(prompt: "hi", systemPrompt: nil, config: config)
+        ) { error in
+            guard case InferenceError.unsupportedGrammar(let reason) = error else {
+                return XCTFail("Expected unsupportedGrammar, got \(error)")
+            }
+            XCTAssertFalse(reason.isEmpty)
+        }
+
+        // Differential check: the SAME no-model call WITHOUT a grammar must
+        // throw `No model loaded` (`inferenceFailure`), not `unsupportedGrammar`.
+        // Proves the guard is grammar-specific and not swallowing every call —
+        // i.e. the `config.grammar != nil` predicate is load-bearing.
+        XCTAssertThrowsError(
+            try MLXBackend().generate(prompt: "hi", systemPrompt: nil, config: GenerationConfig())
+        ) { error in
+            if case InferenceError.unsupportedGrammar = error {
+                return XCTFail("A grammar-free call must not throw unsupportedGrammar, got \(error)")
+            }
+            guard case InferenceError.inferenceFailure = error else {
+                return XCTFail("Expected inferenceFailure (No model loaded), got \(error)")
+            }
+        }
+    }
+
     func test_unloadModel_beforeLoad_doesNotCrash() {
         MLXBackend().unloadModel()
     }
