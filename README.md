@@ -31,6 +31,11 @@ import ManifoldMLX
 let kit = try await ManifoldKit.quickStart(backends: [MLXBackends.self])
 ```
 
+> [!IMPORTANT]
+> **MLX needs an Xcode `.app` build — it cannot generate from a plain `swift run` / bare SwiftPM executable.** mlx-swift compiles its Metal kernels into a `default.metallib` that only the Xcode / `xcodebuild` build path produces and bundles; a SwiftPM executable never builds it, so generation aborts at model load with `MLX error: Failed to load the default metallib` (`mlx-c/.../stream.cpp`). Everything up to that point — backend registration, model discovery/classification, and the load *plan* — works under `swift run`; only the generate step fails.
+>
+> A normal SwiftUI **app** target is an Xcode build, so it works out of the box. For a **headless / CLI** local backend use the GGUF/llama.cpp companion ([manifold-llama](https://github.com/roryford/manifold-llama)) instead, which runs fine from `swift run`, or build your CLI target with `xcodebuild`. See ManifoldKit's [`docs/QUICKSTART-CLI.md` §4](https://github.com/roryford/ManifoldKit/blob/main/docs/QUICKSTART-CLI.md) for the full constraint and recipe.
+
 ## Compatibility
 
 | manifold-mlx | ManifoldKit |
