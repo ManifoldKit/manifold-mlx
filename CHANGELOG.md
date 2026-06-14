@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.2](https://github.com/roryford/manifold-mlx/compare/v0.2.1...v0.2.2) (2026-06-14)
+
+### Highlights
+
+**MLX rejects unsupported grammars instead of dropping them silently** ([#13](https://github.com/roryford/manifold-mlx/issues/13)) — `MLXBackend` has no grammar-constrained sampling path, but it previously ignored a non-nil `GenerationConfig.grammar` and returned unconstrained free text with no error. It now throws `InferenceError.unsupportedGrammar`, matching the `InferenceBackend` contract that the cloud backends already enforce — so a caller asking for grammar-constrained output on MLX gets a clear failure instead of silent free-form text ([#14](https://github.com/roryford/manifold-mlx/issues/14)).
+
+**Tracks ManifoldKit 0.51** ([#16](https://github.com/roryford/manifold-mlx/issues/16)) — the core pin moves to `.upToNextMinor(from: "0.51.0")`, building against the 0.51 release (grammar-constrained tool calling, model-capability flags, and the pre-1.0 Contract wire-type freeze). The new additive `GenerationEvent.generationCompleted` case is handled. Bump and rebuild — no other source changes required.
+
 ## [0.2.1](https://github.com/roryford/manifold-mlx/compare/v0.2.0...v0.2.1) (2026-06-13)
 
 ### Highlights
