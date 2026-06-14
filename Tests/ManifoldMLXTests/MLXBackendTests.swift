@@ -92,6 +92,24 @@ final class MLXBackendTests: XCTestCase {
         )
     }
 
+    func test_generate_withGrammar_throwsUnsupportedGrammar() {
+        // The grammar guard must fire before any model work, so this requires
+        // no model load. A non-nil GBNF grammar on a backend that does not
+        // support grammar-constrained sampling MUST throw `unsupportedGrammar`
+        // (InferenceBackend contract), not silently drop the constraint.
+        var config = GenerationConfig()
+        config.grammar = "root ::= \"yes\" | \"no\""
+        XCTAssertFalse(MLXBackend().capabilities.supportsGrammarConstrainedSampling)
+        XCTAssertThrowsError(
+            try MLXBackend().generate(prompt: "hi", systemPrompt: nil, config: config)
+        ) { error in
+            guard case InferenceError.unsupportedGrammar(let reason) = error else {
+                return XCTFail("Expected unsupportedGrammar, got \(error)")
+            }
+            XCTAssertFalse(reason.isEmpty)
+        }
+    }
+
     func test_unloadModel_beforeLoad_doesNotCrash() {
         MLXBackend().unloadModel()
     }

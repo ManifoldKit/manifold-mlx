@@ -397,6 +397,19 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         // touching backend state — so once we leave the lock, the driver call
         // is decoupled from `setLoadOptions` / `setConversationHistory` /
         // `setToolAwareHistory` racing in.
+        // Fail fast on an unsupported grammar request — before the no-model and
+        // already-generating checks — so a caller passing a non-nil GBNF grammar
+        // gets a precise `unsupportedGrammar` diagnostic rather than silently
+        // unconstrained output. MLX has no grammar-constrained sampling path and
+        // `capabilities.supportsGrammarConstrainedSampling` is `false`; the
+        // `InferenceBackend` contract requires this throw. Mirrors
+        // `SSECloudBackend.validateGenerationConfig`.
+        if config.grammar != nil, !capabilities.supportsGrammarConstrainedSampling {
+            throw InferenceError.unsupportedGrammar(
+                reason: "MLXBackend does not support grammar-constrained sampling."
+            )
+        }
+
         let snapshot: GenerationCallSnapshot = try withStateLock {
             guard _isModelLoaded, let container = _modelContainer else {
                 throw InferenceError.inferenceFailure("No model loaded")
