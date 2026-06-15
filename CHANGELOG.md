@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.3](https://github.com/roryford/manifold-mlx/compare/v0.2.2...v0.2.3) (2026-06-15)
+
+### Highlights
+
+**Tracks ManifoldKit 0.52** ([#20](https://github.com/roryford/manifold-mlx/issues/20)) — the core pin moves to `.upToNextMinor(from: "0.52.0")`, building against the 0.52 release (opt-in rendered-prompt observability via `GenerationConfig.captureRenderedPrompt`, batteries-included context-compression policies, idle model auto-unload, and headless model selection).
+
+**Parity test future-proofed against core enum growth** ([#18](https://github.com/roryford/manifold-mlx/issues/18)) — 0.52 adds the non-frozen `GenerationEvent.promptRendered` case, which broke the event-order parity test's exhaustive switch. The switch now carries an `@unknown default`, so it compiles across pin bumps and survives all future `GenerationEvent` additions instead of failing to build on each new case.
+
 ## [0.2.2](https://github.com/roryford/manifold-mlx/compare/v0.2.1...v0.2.2) (2026-06-14)
 
 ### Highlights
