@@ -68,6 +68,12 @@ final class MLXBackendEventOrderParityTests: XCTestCase {
         case .throttleDiagnostic: return "throttleDiagnostic"
         case .handoffRequested: return "handoffRequested"
         case .generationCompleted: return "generationCompleted"
+        // GenerationEvent is a non-frozen enum in ManifoldContract; new cases
+        // (e.g. .promptRendered in 0.52.0) are additive on the core side but
+        // source-breaking for an exhaustive switch here. Map unknown events to
+        // a stable tag so this parity test survives core enum growth across
+        // pin bumps instead of failing to compile on each new case.
+        @unknown default: return "unknown"
         }
     }
 
