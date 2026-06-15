@@ -70,6 +70,11 @@ final class FluxDiffusionIntegrationTests: XCTestCase {
             // ImageGenerationEvent.preview (VAE-decode preview emission is deferred).
             case .preview:
                 break
+            // ImageGenerationEvent is a non-frozen core enum; @unknown default
+            // keeps this compiling across ManifoldKit pin bumps that add cases
+            // (same break-class that .promptRendered caused for GenerationEvent).
+            @unknown default:
+                break
             }
         }
 

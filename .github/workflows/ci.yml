@@ -1,9 +1,21 @@
 name: CI
 
 on:
+  # Skip the heavy macOS build+test on docs/version-only changes — notably
+  # release-please PRs and their merge commits, which touch only CHANGELOG.md
+  # and .release-please-manifest.json. `test` is a required check, so a skipped
+  # release PR stays BLOCKED and must be admin-merged (gh api PUT .../merge) —
+  # which is already the release flow (Highlights rewrite is hand-merged). Any
+  # PR touching Sources/Package/etc. is unaffected and still runs the gate.
   pull_request:
+    paths-ignore:
+      - 'CHANGELOG.md'
+      - '.release-please-manifest.json'
   push:
     branches: [main]
+    paths-ignore:
+      - 'CHANGELOG.md'
+      - '.release-please-manifest.json'
   workflow_dispatch:
 
 concurrency:
