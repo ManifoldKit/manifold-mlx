@@ -149,7 +149,7 @@ import ManifoldInference
         if let modelType = (json["model_type"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased(),
-           modelType.hasSuffix("_vl") || modelType.hasSuffix("vl") {
+           modelType.hasSuffix("_vl") {
             return true
         }
         // MoE fallback: Gemma 4 26B ships `text_config.enable_moe_block = true`

@@ -335,6 +335,16 @@ final class MLXBackendTests: XCTestCase {
         ])
         XCTAssertFalse(MLXModelProbe.requiresVLMFactory(at: url))
     }
+
+    func test_requiresVLMFactory_modelTypeEndingInBareVL_returnsFalse() throws {
+        // The architecture-name fallback matches the `_vl` suffix (the mlx-swift-lm
+        // registry convention), NOT a bare `vl` substring/suffix — otherwise an
+        // unrelated text model_type that merely ends in the two letters "vl" would
+        // be misrouted to the VLM factory. Sabotage check: widening the match to
+        // `hasSuffix("vl")` makes this fail.
+        let url = try writeTempConfig(["model_type": "someothervl"])
+        XCTAssertFalse(MLXModelProbe.requiresVLMFactory(at: url))
+    }
 }
 
 // MARK: - Backend Contract
