@@ -293,6 +293,48 @@ final class MLXBackendTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
         XCTAssertFalse(MLXModelProbe.requiresVLMFactory(at: dir))
     }
+
+    func test_requiresVLMFactory_qwen2VLTopLevelVisionConfig_returnsTrue() throws {
+        // #22: mlx-community/Qwen2-VL-2B-Instruct-4bit ships a flat config.json
+        // whose `vision_config` sits at the top level (alongside the image/video
+        // token-id fields), NOT nested under `text_config`. The probe must route
+        // this stock VLM checkpoint through the VLM factory. Sabotage check:
+        // dropping the top-level `vision_config` branch from `requiresVLMFactory`
+        // makes this fail (verified locally before commit).
+        let url = try writeTempConfig([
+            "model_type": "qwen2_vl",
+            "architectures": ["Qwen2VLForConditionalGeneration"],
+            "image_token_id": 151_655,
+            "video_token_id": 151_656,
+            "vision_start_token_id": 151_652,
+            "vision_end_token_id": 151_653,
+            "vision_token_id": 151_654,
+            "vision_config": [
+                "depth": 32,
+                "hidden_size": 1280,
+                "in_chans": 3,
+            ],
+        ])
+        XCTAssertTrue(MLXModelProbe.requiresVLMFactory(at: url))
+    }
+
+    func test_requiresVLMFactory_qwen2VLModelTypeWithoutVisionConfig_returnsTrue() throws {
+        // A lossy conversion may strip the `vision_config` block while leaving the
+        // `_vl` model_type intact. The architecture-name fallback must still route
+        // such a checkpoint to the VLM factory.
+        let url = try writeTempConfig(["model_type": "qwen2_5_vl"])
+        XCTAssertTrue(MLXModelProbe.requiresVLMFactory(at: url))
+    }
+
+    func test_requiresVLMFactory_nullVisionConfig_returnsFalse() throws {
+        // An explicit `"vision_config": null` decodes to NSNull and must NOT be
+        // treated as vision support — only a real object counts.
+        let url = try writeTempConfig([
+            "model_type": "qwen3",
+            "vision_config": NSNull(),
+        ])
+        XCTAssertFalse(MLXModelProbe.requiresVLMFactory(at: url))
+    }
 }
 
 // MARK: - Backend Contract

@@ -118,13 +118,42 @@ import ManifoldInference
                 )
             }
         }
-        // MoE fallback: Gemma 4 26B ships `text_config.enable_moe_block = true`
-        // and its MoE decoder only exists in the VLM factory today.
+        // Config.json fallback: reached when the capability probe threw (e.g. a
+        // malformed sibling file) or reported no vision. We re-derive routing
+        // directly from the durable config.json signals so a real VLM whose
+        // probe run failed still lands on the VLM factory.
         let configURL = url.appendingPathComponent("config.json")
         guard let data = try? Data(contentsOf: configURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return false
         }
+        // Top-level `vision_config` is the authoritative multimodal signal that
+        // standard Qwen2-VL/Qwen2.5-VL MLX checkpoints emit at the root of
+        // config.json (#22). `ModelCapabilityProbe` keys off the same shape, but
+        // duplicating it here keeps routing correct even when that probe throws.
+        // Use `is [String: Any]` (not `!= nil`): an explicit `"vision_config": null`
+        // decodes to NSNull and must not count as vision.
+        if json["vision_config"] is [String: Any] {
+            return true
+        }
+        // Some converted VLMs nest the vision tower under `text_config` rather
+        // than the root; honor that shape too.
+        if let textConfig = json["text_config"] as? [String: Any],
+           textConfig["vision_config"] is [String: Any] {
+            return true
+        }
+        // Architecture-name fallback: VLM `model_type`s in mlx-swift-lm's
+        // registry end in `_vl` (qwen2_vl, qwen2_5_vl, qwen3_vl, …). This
+        // catches a VLM whose vision_config block was stripped by a lossy
+        // conversion but whose declared model_type still names a vision model.
+        if let modelType = (json["model_type"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+           modelType.hasSuffix("_vl") || modelType.hasSuffix("vl") {
+            return true
+        }
+        // MoE fallback: Gemma 4 26B ships `text_config.enable_moe_block = true`
+        // and its MoE decoder only exists in the VLM factory today.
         if let textConfig = json["text_config"] as? [String: Any],
            textConfig["enable_moe_block"] as? Bool == true {
             return true
