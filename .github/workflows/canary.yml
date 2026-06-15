@@ -1,10 +1,17 @@
 name: Canary (core main)
 
-# Re-resolves against roryford/ManifoldKit main and builds+tests from scratch.
-# A failure here means the core seam moved — not that this repo regressed.
+# Builds + tests THIS repo against roryford/ManifoldKit's main HEAD (NOT the
+# latest published tag) to catch a core seam move before it ships. A failure
+# means the core seam moved — not that this repo regressed.
+#
+# Previously a no-op for unreleased breaks: `rm Package.resolved && swift
+# package resolve` against a `.upToNextMinor` pin only ever resolves to the
+# highest PUBLISHED tag, never main — so it silently tested already-released
+# core and gave false confidence. Now it checks out core main and `swift
+# package edit`s the dependency to point at it.
 on:
   schedule:
-    - cron: "17 4 * * 1"   # weekly, Monday 04:17 UTC (quiet hour)
+    - cron: "17 4 * * *"   # nightly, 04:17 UTC (quiet hour)
   workflow_dispatch:
   repository_dispatch:
     types: [core-release]
@@ -17,6 +24,12 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Check out ManifoldKit main
+        uses: actions/checkout@v4
+        with:
+          repository: roryford/ManifoldKit
+          ref: main
+          path: core
       - name: Select newest Xcode 26 toolchain
         # The image default (Xcode 16.4 / Swift 6.1) mis-resolves the
         # dependency graph: its SwiftPM does not prune AnyLanguageModel's
@@ -26,10 +39,11 @@ jobs:
         run: |
           sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)/Contents/Developer"
           swift --version
-      - name: Drop lockfile and re-resolve against core main
-        run: |
-          rm -f Package.resolved
-          swift package resolve
+      - name: Point ManifoldKit dependency at core main checkout
+        # `swift package edit` swaps the dependency to the local main checkout,
+        # bypassing the .upToNextMinor pin (published-tags-only) and
+        # Package.resolved without dirtying Package.swift.
+        run: swift package edit manifoldkit --path ./core
       - name: Build
         run: swift build
       - name: Test
