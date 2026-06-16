@@ -20,6 +20,16 @@ import Tokenizers
         let upstream = try await Tokenizers.AutoTokenizer.from(modelFolder: directory)
         return TokenizerBridge(upstream)
     }
+
+    /// Test-only seam: wraps an injected upstream `Tokenizers.Tokenizer` in the
+    /// same `TokenizerBridge` adapter `load(from:)` produces, without needing a
+    /// real on-disk tokenizer. Lets the bridge's argument/label remapping and
+    /// the `missingChatTemplate` error translation be unit-tested directly.
+    @_spi(Testing) public static func makeBridge(
+        from upstream: any Tokenizers.Tokenizer
+    ) -> any MLXLMCommon.Tokenizer {
+        TokenizerBridge(upstream)
+    }
 }
 
 private struct TokenizerBridge: MLXLMCommon.Tokenizer {
