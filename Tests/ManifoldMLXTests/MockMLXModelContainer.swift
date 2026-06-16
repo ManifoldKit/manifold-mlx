@@ -39,6 +39,20 @@ final class MockMLXModelContainer: @unchecked Sendable {
     /// Tokens the mock yields from `generate`. Defaults to a two-token sequence.
     var tokensToYield: [String] = ["Hello", " world"]
 
+    /// Raw `Generation` values the mock yields from `generate`, in order.
+    ///
+    /// When non-empty this takes precedence over `tokensToYield` and lets a
+    /// test drive the *exact* stream shape the production detokenizer can emit —
+    /// including:
+    ///   - a marker split across chunks (`.chunk("<tool")`, `.chunk("_call>")`)
+    ///     so `MLXGenerationDriver`'s tool-call reassembly sees real
+    ///     fragmentation rather than pre-split, well-formed markers; and
+    ///   - a `.info(...)` element, whose `Generation.chunk` is `nil`, so the
+    ///     driver's `guard let text = generation.chunk else { continue }` nil
+    ///     path (run loop ~line 342) is actually exercised. The real MLX stream
+    ///     interleaves `.info` completion metadata with text chunks.
+    var generationsToYield: [Generation] = []
+
     /// When set, `generate` throws this error instead of yielding tokens.
     var generateError: Error?
 
@@ -152,18 +166,23 @@ final class MockMLXModelContainer: @unchecked Sendable {
         if let error = simulatedTokenizerApplyFailure { throw error }
         if let error = generateError { throw error }
 
-        let tokens = tokensToYield
+        // Prefer the explicit `Generation` script when supplied (covers
+        // fragmentation + nil-chunk shapes); otherwise wrap each string token.
+        let generations: [Generation] =
+            generationsToYield.isEmpty
+                ? tokensToYield.map { .chunk($0) }
+                : generationsToYield
         let cache = cache
         let promptTokenCount = promptTokenIds.count
         let completionTokenCount = simulatedCacheCompletionTokenCount
         return AsyncStream { continuation in
-            let producerTask = Task { [tokens, cache, promptTokenCount, completionTokenCount] in
-                for token in tokens {
+            let producerTask = Task { [generations, cache, promptTokenCount, completionTokenCount] in
+                for generation in generations {
                     if Task.isCancelled {
                         continuation.finish()
                         return
                     }
-                    continuation.yield(.chunk(token))
+                    continuation.yield(generation)
                     await Task.yield()
                 }
                 if let cache {
