@@ -60,12 +60,23 @@ public enum MLXDiffusionError: Error, LocalizedError {
 public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Sendable {
 
     private let lock = NSLock()
-    private var _generator: (any TextToImageGenerator)?
+    private var _generator: (any DiffusionGenerator)?
     private var _preset: StableDiffusionConfiguration?
     private var _isGenerating = false
     private var _stopRequested = false
 
     public init() {}
+
+    /// Test-only seam: construct a backend with a pre-installed
+    /// ``DiffusionGenerator`` (typically a fake), bypassing `loadModel(from:)`
+    /// and the Metal-bound weight load. Production code never calls this — the
+    /// public `init()` leaves the backend unloaded and `loadModel(from:)`
+    /// installs the real generator.
+    @_spi(Testing)
+    public init(generator: any DiffusionGenerator, preset: StableDiffusionConfiguration = .presetStableDiffusion21Base) {
+        self._generator = generator
+        self._preset = preset
+    }
 
     // MARK: - Sync lock helper
     //
@@ -111,14 +122,14 @@ public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Senda
         // `HubApi` is still supplied so nothing attempts a network fetch; its
         // `localRepoLocation` is overridden by `resolvingFiles(in:)`.
         let hub = HubApi(useOfflineMode: true)
-        guard let generator = try preset.resolvingFiles(in: url).textToImageGenerator(
+        guard let textToImage = try preset.resolvingFiles(in: url).textToImageGenerator(
             hub: hub, configuration: .init(quantize: true)
         ) else {
             throw MLXDiffusionError.unsupportedModelLayout(url)
         }
 
         withLock {
-            _generator = generator
+            _generator = RealStableDiffusionGenerator(generator: textToImage, preset: preset)
             _preset = preset
             _stopRequested = false
         }
@@ -144,46 +155,31 @@ public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Senda
                     // Re-read under lock — unloadModel() could have run, but
                     // _isGenerating=true prevents concurrent unload on the
                     // same thread. Guard anyway for safety.
-                    guard let generator = self.withLock({ self._generator }),
-                          let preset   = self.withLock({ self._preset }) else {
+                    guard let generator = self.withLock({ self._generator }) else {
                         throw MLXDiffusionError.notLoaded
                     }
-                    let params = Self.makeParams(prompt: prompt, config: config, preset: preset)
-                    var iterator = generator.generateLatents(parameters: params)
-                    let totalSteps = iterator.underestimatedCount
+                    let run = generator.makeRun(prompt: prompt, config: config)
+                    let totalSteps = run.totalSteps
 
                     var step = 0
-                    var lastLatent: MLXArray?
-
-                    while let latent = iterator.next() {
+                    var producedAny = false
+                    while true {
                         try Task.checkCancellation()
                         let stopped = self.withLock { self._stopRequested }
                         if stopped { throw CancellationError() }
 
-                        // Force evaluation here to bound peak memory: without this, MLX
-                        // accumulates the full N-step compute graph before running anything.
-                        MLX.eval(latent)
+                        guard try run.step() else { break }
                         step += 1
-                        lastLatent = latent
+                        producedAny = true
                         continuation.yield(.progress(step: step, total: totalSteps))
                     }
 
-                    guard let finalLatent = lastLatent else {
+                    guard producedAny else {
                         continuation.finish()
                         return
                     }
 
-                    // Get a VAE-only decoder closure, then flush the GPU activation
-                    // cache built up during denoising before the decode step starts.
-                    // This prevents UNet activations and VAE activations from
-                    // competing for GPU memory simultaneously.
-                    let decode = generator.detachedDecoder()
-                    MLX.Memory.cacheLimit = 0
-
-                    let decoded = decode(finalLatent)
-                    // decode() returns float32 in [0, 1]; Image expects uint8 [0, 255].
-                    let frame = decoded.ndim == 4 ? decoded[0] : decoded
-                    let imageURL = try Self.savePNG(Image((frame * 255).asType(.uint8)), to: config.outputDirectory)
+                    let imageURL = try run.finishImage(to: config.outputDirectory)
                     continuation.yield(.completed(imageURL))
                     continuation.finish()
                 } catch is CancellationError {
@@ -285,12 +281,72 @@ public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Senda
         )
     }
 
-    private static func savePNG(_ image: Image, to directory: URL?) throws -> URL {
+    static func savePNG(_ image: Image, to directory: URL?) throws -> URL {
         let dir = directory ?? FileManager.default.temporaryDirectory
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let dest = dir.appending(component: "\(UUID().uuidString).png")
         try image.save(url: dest)
         return dest
+    }
+}
+
+// MARK: - Real generator seam implementation
+
+/// Production ``DiffusionGenerator`` wrapping a vendored StableDiffusion
+/// ``TextToImageGenerator``. Owns all `MLXArray` handling — the
+/// `MLXDiffusionBackend.generate(...)` loop never touches MLX directly.
+// `@unchecked Sendable`: the vendored StableDiffusion `TextToImageGenerator` is
+// not `Sendable`, but this wrapper is only ever read inside the backend's
+// serialised generate task (the same constraint that lets `MLXDiffusionBackend`
+// itself be `@unchecked Sendable` and capture the generator into its detached
+// task). Mirrors `LlamaBackend`'s pattern.
+private struct RealStableDiffusionGenerator: DiffusionGenerator, @unchecked Sendable {
+    let generator: any TextToImageGenerator
+    let preset: StableDiffusionConfiguration
+
+    func makeRun(prompt: String, config: ImageGenerationConfig) -> any DiffusionRun {
+        let params = MLXDiffusionBackend.makeParams(prompt: prompt, config: config, preset: preset)
+        return RealStableDiffusionRun(generator: generator, iterator: generator.generateLatents(parameters: params))
+    }
+}
+
+private final class RealStableDiffusionRun: DiffusionRun {
+    let generator: any TextToImageGenerator
+    var iterator: DenoiseIterator
+    private var lastLatent: MLXArray?
+
+    let totalSteps: Int
+
+    init(generator: any TextToImageGenerator, iterator: DenoiseIterator) {
+        self.generator = generator
+        self.iterator = iterator
+        self.totalSteps = iterator.underestimatedCount
+    }
+
+    func step() throws -> Bool {
+        guard let latent = iterator.next() else { return false }
+        // Force evaluation here to bound peak memory: without this, MLX
+        // accumulates the full N-step compute graph before running anything.
+        MLX.eval(latent)
+        lastLatent = latent
+        return true
+    }
+
+    func finishImage(to outputDirectory: URL?) throws -> URL {
+        guard let finalLatent = lastLatent else {
+            throw MLXDiffusionError.notLoaded
+        }
+        // Get a VAE-only decoder closure, then flush the GPU activation cache
+        // built up during denoising before the decode step starts. This
+        // prevents UNet activations and VAE activations from competing for GPU
+        // memory simultaneously.
+        let decode = generator.detachedDecoder()
+        MLX.Memory.cacheLimit = 0
+
+        let decoded = decode(finalLatent)
+        // decode() returns float32 in [0, 1]; Image expects uint8 [0, 255].
+        let frame = decoded.ndim == 4 ? decoded[0] : decoded
+        return try MLXDiffusionBackend.savePNG(Image((frame * 255).asType(.uint8)), to: outputDirectory)
     }
 }
 

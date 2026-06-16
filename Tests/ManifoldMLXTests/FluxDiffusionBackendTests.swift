@@ -1,6 +1,7 @@
 
 import XCTest
 import ManifoldMLX
+@_spi(Testing) import ManifoldMLX
 import ManifoldInference
 
 /// Unit tests for ``FluxDiffusionBackend``.
@@ -95,6 +96,86 @@ final class FluxDiffusionBackendTests: XCTestCase {
         let backend = FluxDiffusionBackend()
         backend.unloadModel()
         backend.unloadModel()
+        XCTAssertFalse(backend.isLoaded)
+    }
+
+    // MARK: - generate() pipeline via injected fake (no Metal)
+
+    func test_generate_emitsProgressSequenceThenCompleted() async throws {
+        let fake = FakeDiffusionGenerator(steps: 4)
+        let backend = FluxDiffusionBackend(generator: fake)
+        XCTAssertTrue(backend.isLoaded)
+
+        let outDir = FileManager.default.temporaryDirectory
+            .appending(component: "FluxDiffGen-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: outDir) }
+
+        let stream = try backend.generate(
+            prompt: "a fox", config: .init(steps: 4, outputDirectory: outDir)
+        )
+        let events = try await DiffusionTestHelpers.collect(stream)
+
+        XCTAssertEqual(events.compactMap { $0.progressStep }, [1, 2, 3, 4])
+        if case let .progress(_, total) = events.first {
+            XCTAssertEqual(total, 4)
+        } else {
+            XCTFail("First event must be .progress")
+        }
+        XCTAssertTrue(events.last?.isCompleted ?? false)
+        XCTAssertEqual(events.filter { $0.isCompleted }.count, 1)
+        XCTAssertFalse(backend.isGenerating)
+    }
+
+    func test_stopGeneration_midStream_finishesEarly_andClearsIsGenerating() async throws {
+        let holder = FluxBackendHolder()
+        let fake = FakeDiffusionGenerator(steps: 10) { stepIndex in
+            if stepIndex == 0 { holder.backend?.stopGeneration() }
+        }
+        let backend = FluxDiffusionBackend(generator: fake)
+        holder.backend = backend
+
+        let stream = try backend.generate(prompt: "a fox", config: .init(steps: 10))
+        let events = try await DiffusionTestHelpers.collect(stream)
+
+        XCTAssertEqual(events.compactMap { $0.progressStep }, [1])
+        XCTAssertFalse(events.contains { $0.isCompleted })
+        XCTAssertFalse(backend.isGenerating)
+    }
+
+    func test_generate_noLatents_finishesWithError() async {
+        // Flux's contract throws noLatentsProduced when the loop yields nothing.
+        let backend = FluxDiffusionBackend(generator: FakeDiffusionGenerator(steps: 0))
+        do {
+            let stream = try backend.generate(prompt: "x", config: .init(steps: 0))
+            _ = try await DiffusionTestHelpers.collect(stream)
+            XCTFail("Expected noLatentsProduced")
+        } catch FluxDiffusionError.noLatentsProduced {
+            // expected
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertFalse(backend.isGenerating)
+    }
+
+    // MARK: - loadModel branch selection (past fileExists, no Metal)
+
+    func test_loadModel_metadataJsonPresent_takesQuantizedBranch_andFailsClosed() async {
+        // metadata.json present → quantized branch (FLUX.loadQuantized). With no
+        // real quantized weights it must throw and leave isLoaded == false —
+        // proving the branch is selected past the fileExists check.
+        let dir = FileManager.default.temporaryDirectory
+            .appending(component: "FluxQuant-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? Data("{}".utf8).write(to: dir.appending(component: "metadata.json"))
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let backend = FluxDiffusionBackend()
+        do {
+            try await backend.loadModel(from: dir)
+            XCTFail("Quantized branch must fail without real weights")
+        } catch {
+            // expected
+        }
         XCTAssertFalse(backend.isLoaded)
     }
 
