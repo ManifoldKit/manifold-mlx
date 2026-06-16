@@ -682,6 +682,104 @@ final class MLXBackendGenerationTests: XCTestCase {
         // raw `<tool_call>` bytes leak back into .token events, failing both asserts.
     }
 
+    // MARK: - Detokenization fragmentation + nil-chunk (#27)
+
+    /// A `<tool_call>` marker that real BPE/SentencePiece detokenization can
+    /// split across chunk boundaries (`<tool` + `_call>`) must still be
+    /// reassembled by the driver's `ToolCallTransform` stage and surface as a
+    /// single whole-call `.toolCall` event — none of the marker bytes may leak
+    /// into visible `.token` output.
+    ///
+    /// This differs from `test_toolCall_extractedFromStream_wholeCall`, which
+    /// feeds *pre-split, well-formed* `<tool_call>` strings: here the opening and
+    /// closing markers are each fragmented mid-token, so the test exercises the
+    /// transform's cross-chunk buffering rather than a clean tag boundary.
+    func test_toolCall_markerFragmentedAcrossChunks_reassembled() async throws {
+        let mock = MockMLXModelContainer()
+        // Fragment BOTH markers across chunk boundaries, the way real
+        // detokenization can. The payload is also split.
+        mock.generationsToYield = [
+            .chunk("<tool"),
+            .chunk("_call>"),
+            .chunk("{\"name\":\"get_weather\","),
+            .chunk("\"arguments\":{\"city\":\"Paris\"}}"),
+            .chunk("</tool"),
+            .chunk("_call>"),
+        ]
+
+        let backend = MLXBackend()
+        backend._inject(mock, dialect: .qwen25)
+
+        var config = GenerationConfig()
+        config.tools = [
+            ToolDefinition(name: "get_weather", description: "weather", parameters: .object([:]))
+        ]
+
+        let stream = try backend.generate(
+            prompt: "weather?",
+            systemPrompt: nil,
+            config: config
+        )
+
+        let events = try await collectAllEvents(from: stream)
+
+        let visibleTokens = events.compactMap { ev -> String? in
+            if case .token(let t) = ev { return t } else { return nil }
+        }
+        XCTAssertFalse(visibleTokens.joined().contains("<tool"),
+            "Fragmented tool-call marker bytes must not leak into visible tokens")
+        XCTAssertFalse(visibleTokens.joined().contains("_call>"),
+            "The split marker tail must not leak into visible tokens either")
+
+        let extractedNames = events.compactMap { ev -> String? in
+            if case .toolCall(let call) = ev { return call.toolName } else { return nil }
+        }
+        let extractedArgs = events.compactMap { ev -> String? in
+            if case .toolCall(let call) = ev { return call.arguments } else { return nil }
+        }
+        XCTAssertEqual(extractedNames, ["get_weather"],
+            "A marker fragmented across chunks must still reassemble into one whole-call event")
+        XCTAssertTrue(extractedArgs.first?.contains("Paris") == true,
+            "Reassembled tool call must carry the full arguments payload")
+    }
+
+    /// Realistic streams interleave `.info(...)` completion metadata with text
+    /// chunks; `Generation.info`'s `chunk` accessor is `nil`, so the driver's
+    /// `guard let text = generation.chunk else { continue }` nil path (run loop
+    /// ~line 342) must skip it without dropping or duplicating surrounding text.
+    func test_run_nilChunkGeneration_isSkippedWithoutDisturbingText() async throws {
+        let mock = MockMLXModelContainer()
+        // `.info` has a nil `chunk` — it must be silently skipped, and the
+        // text on either side must still surface intact and in order.
+        let info = Generation.info(
+            GenerateCompletionInfo(
+                promptTokenCount: 4,
+                generationTokenCount: 2,
+                promptTime: 0.01,
+                generationTime: 0.02
+            )
+        )
+        mock.generationsToYield = [
+            .chunk("Hello"),
+            info,
+            .chunk(" world"),
+        ]
+
+        let backend = MLXBackend()
+        backend._inject(mock)
+
+        let stream = try backend.generate(
+            prompt: "hi",
+            systemPrompt: nil,
+            config: GenerationConfig()
+        )
+
+        let tokens = try await collectTokens(from: stream)
+
+        XCTAssertEqual(tokens, ["Hello", " world"],
+            "The nil-chunk .info generation must be skipped, leaving surrounding text intact and ordered")
+    }
+
     // MARK: - Chat-template detection (#516)
 
     /// Covers the observable slice of MLX chat-template handling: the `messages`

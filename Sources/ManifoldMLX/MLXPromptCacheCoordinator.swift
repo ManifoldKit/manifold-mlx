@@ -35,9 +35,11 @@ import ManifoldInference
     )
 
     public struct CachedLayerState {
-        let cacheTypeName: String
-        let offset: Int
-        let state: [MLXArray]
+        // @_spi(Testing): exposed read-only so tests can assert the trimmed
+        // offset / sliced tensor state captured by the real trim/copy path (#27).
+        @_spi(Testing) public let cacheTypeName: String
+        @_spi(Testing) public let offset: Int
+        @_spi(Testing) public let state: [MLXArray]
         let metaState: [String]
 
         public init(cacheTypeName: String, offset: Int, state: [MLXArray], metaState: [String]) {
@@ -50,7 +52,9 @@ import ManifoldInference
 
     public struct Snapshot {
         let promptTokens: [Int]
-        let layers: [CachedLayerState]
+        // @_spi(Testing): exposed read-only so tests can assert per-layer
+        // captured tensor state from the real trim/copy path (#27).
+        @_spi(Testing) public let layers: [CachedLayerState]
 
         public init(promptTokens: [Int], layers: [CachedLayerState]) {
             self.promptTokens = promptTokens
@@ -135,7 +139,9 @@ import ManifoldInference
     }
 
     /// Why a post-generation snapshot was or wasn't captured for next-turn reuse.
-    enum PromptCacheCaptureReason: Equatable, Sendable, CustomStringConvertible {
+    // @_spi(Testing): published so backend tests can assert capture diagnostics
+    // when driving the real tensor trim/copy path (#27).
+    @_spi(Testing) public enum PromptCacheCaptureReason: Equatable, Sendable, CustomStringConvertible {
         case captured(layers: Int)
         case emptyPrompt
         case noCaches
@@ -148,7 +154,7 @@ import ManifoldInference
         /// recurrent/hybrid layer captured post-generation).
         case layerNotTrimmable(layerIndex: Int, cacheTypeName: String)
 
-        var description: String {
+        public var description: String {
             switch self {
             case .captured(let n): return "captured(\(n) layers)"
             case .emptyPrompt: return "empty prompt"
@@ -429,8 +435,10 @@ import ManifoldInference
     /// state via its own cache type's `trim`; a layer that cannot be reduced
     /// (e.g. a recurrent/hybrid layer post-generation) is reported rather than
     /// silently discarding the whole snapshot.
+    // @_spi(Testing): published so backend test targets can drive the real
+    // copy()/state-slice/trim(excess) tensor path with small CPU caches (#27).
     @MainActor
-    static func captureSnapshot(
+    @_spi(Testing) public static func captureSnapshot(
         from cache: MLXPromptCache,
         promptTokens: [Int]
     ) -> (Snapshot?, PromptCacheCaptureReason) {
@@ -499,8 +507,10 @@ import ManifoldInference
     /// `reusedPromptTokenCount` tokens. Returns the per-layer-aware reuse
     /// outcome; on any non-`.reused` result the caller must treat `cache` as
     /// spent (it may be partially mutated) and allocate a fresh one.
+    // @_spi(Testing): published so backend tests can drive the authoritative
+    // post-restore offset/trim guards with fake/in-memory KVCache doubles (#27).
     @MainActor
-    static func restorePromptCache(
+    @_spi(Testing) public static func restorePromptCache(
         _ snapshot: Snapshot,
         into cache: MLXPromptCache,
         reusedPromptTokenCount: Int
