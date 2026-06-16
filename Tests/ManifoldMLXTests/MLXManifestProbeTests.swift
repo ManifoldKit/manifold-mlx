@@ -133,6 +133,79 @@ final class MLXManifestProbeTests: XCTestCase {
                        "Configs without max_position_embeddings / model_max_length must fall back to 8k")
     }
 
+    // MARK: - positiveInt coercion of max_position_embeddings
+
+    func test_maxPositionEmbeddings_asJSONString_parses() throws {
+        let dir = try makeTempDir()
+        try writeConfig([
+            "model_type": "qwen3",
+            "max_position_embeddings": "32768",
+        ], in: dir)
+
+        let manifest = MLXModelProbe.produceManifest(
+            at: dir, detectedThinkingMarkers: nil, supportsVision: false
+        )
+        XCTAssertEqual(manifest.contextWindow, 32_768,
+                       "a string-encoded max_position_embeddings must coerce to Int")
+    }
+
+    func test_maxPositionEmbeddings_asDouble_parses() throws {
+        let dir = try makeTempDir()
+        // A fractional literal forces JSONSerialization to read it back as Double.
+        try writeConfig([
+            "model_type": "qwen3",
+            "max_position_embeddings": 32_768.0,
+        ], in: dir)
+
+        let manifest = MLXModelProbe.produceManifest(
+            at: dir, detectedThinkingMarkers: nil, supportsVision: false
+        )
+        XCTAssertEqual(manifest.contextWindow, 32_768,
+                       "a floating-point max_position_embeddings must coerce to Int")
+    }
+
+    func test_maxPositionEmbeddings_asInt64_parses() throws {
+        let dir = try makeTempDir()
+        try writeConfig([
+            "model_type": "qwen3",
+            "max_position_embeddings": Int64(32_768),
+        ], in: dir)
+
+        let manifest = MLXModelProbe.produceManifest(
+            at: dir, detectedThinkingMarkers: nil, supportsVision: false
+        )
+        XCTAssertEqual(manifest.contextWindow, 32_768,
+                       "an Int64 max_position_embeddings must coerce to Int")
+    }
+
+    func test_maxPositionEmbeddings_zero_fallsBackToDefault() throws {
+        let dir = try makeTempDir()
+        try writeConfig([
+            "model_type": "qwen3",
+            "max_position_embeddings": 0,
+        ], in: dir)
+
+        let manifest = MLXModelProbe.produceManifest(
+            at: dir, detectedThinkingMarkers: nil, supportsVision: false
+        )
+        XCTAssertEqual(manifest.contextWindow, 8192,
+                       "zero is rejected by positiveInt and must fall back to the 8k default")
+    }
+
+    func test_maxPositionEmbeddings_negative_fallsBackToDefault() throws {
+        let dir = try makeTempDir()
+        try writeConfig([
+            "model_type": "qwen3",
+            "max_position_embeddings": -4096,
+        ], in: dir)
+
+        let manifest = MLXModelProbe.produceManifest(
+            at: dir, detectedThinkingMarkers: nil, supportsVision: false
+        )
+        XCTAssertEqual(manifest.contextWindow, 8192,
+                       "a negative value is rejected by positiveInt and must fall back to the 8k default")
+    }
+
     // MARK: - Thinking marker plumbing
 
     func test_carriesDetectedThinkingMarkers() throws {
