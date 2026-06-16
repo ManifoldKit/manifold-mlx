@@ -16,6 +16,9 @@ final class FakeDiffusionGenerator: DiffusionGenerator, @unchecked Sendable {
     /// Optional hook fired at the start of each `step()` — used to drive
     /// `stopGeneration()` from inside the loop in cancellation tests.
     let onStep: (@Sendable (Int) -> Void)?
+    /// Shared counter of `previewImage()` calls across every run this generator
+    /// vends — lets preview tests assert decode count without an MLX/Metal decode.
+    let previewDecodeCount = PreviewDecodeCounter()
 
     init(steps: Int, stepError: Error? = nil, onStep: (@Sendable (Int) -> Void)? = nil) {
         self.stepCount = steps
@@ -24,20 +27,41 @@ final class FakeDiffusionGenerator: DiffusionGenerator, @unchecked Sendable {
     }
 
     func makeRun(prompt: String, config: ImageGenerationConfig) -> any DiffusionRun {
-        FakeDiffusionRun(totalSteps: stepCount, stepError: stepError, onStep: onStep)
+        FakeDiffusionRun(
+            totalSteps: stepCount,
+            stepError: stepError,
+            onStep: onStep,
+            decodeCounter: previewDecodeCount
+        )
     }
+}
+
+/// Thread-safe counter for `previewImage()` invocations (the backend's detached
+/// generate task calls into the fake off the test's actor).
+final class PreviewDecodeCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _count = 0
+    var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
+    func increment() { lock.lock(); _count += 1; lock.unlock() }
 }
 
 final class FakeDiffusionRun: DiffusionRun {
     let totalSteps: Int
     private let stepError: Error?
     private let onStep: (@Sendable (Int) -> Void)?
+    private let decodeCounter: PreviewDecodeCounter
     private var produced = 0
 
-    init(totalSteps: Int, stepError: Error?, onStep: (@Sendable (Int) -> Void)?) {
+    init(
+        totalSteps: Int,
+        stepError: Error?,
+        onStep: (@Sendable (Int) -> Void)?,
+        decodeCounter: PreviewDecodeCounter = PreviewDecodeCounter()
+    ) {
         self.totalSteps = totalSteps
         self.stepError = stepError
         self.onStep = onStep
+        self.decodeCounter = decodeCounter
     }
 
     func step() throws -> Bool {
@@ -46,6 +70,13 @@ final class FakeDiffusionRun: DiffusionRun {
         guard produced < totalSteps else { return false }
         produced += 1
         return true
+    }
+
+    func previewImage() throws -> Data {
+        decodeCounter.increment()
+        // Canned stub bytes — no MLX/Metal decode. A small valid PNG so a
+        // consumer could in principle decode it.
+        return Data(Self.onePixelPNG)
     }
 
     func finishImage(to outputDirectory: URL?) throws -> URL {
@@ -102,5 +133,14 @@ extension ImageGenerationEvent {
     var isCompleted: Bool {
         if case .completed = self { return true }
         return false
+    }
+    /// The 1-based step a `.preview` was emitted at, else nil.
+    var previewStep: Int? {
+        if case let .preview(step, _, _) = self { return step }
+        return nil
+    }
+    var previewImageData: Data? {
+        if case let .preview(_, _, image) = self { return image }
+        return nil
     }
 }
