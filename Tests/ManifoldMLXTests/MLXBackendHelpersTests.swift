@@ -123,6 +123,76 @@ final class MLXChatMessageEncoderTests: XCTestCase {
         XCTAssertEqual(messages[0]["content"], "what's the weather?")
     }
 
+    func test_buildChatMessages_toolAwareAssistantEntryEncodesToolCalls() throws {
+        let toolEntry = ToolAwareHistoryEntry(
+            role: "assistant",
+            content: "",
+            toolCalls: [
+                ToolCall(id: "c1", toolName: "get_weather", arguments: "{\"city\":\"Paris\"}")
+            ]
+        )
+        let (_, messages) = try MLXChatMessageEncoder.buildChatMessages(
+            prompt: "ignored",
+            effectiveSystemPrompt: nil,
+            conversationHistory: [],
+            toolAwareHistory: [toolEntry],
+            structuredHistory: nil,
+            dialect: .qwen25
+        )
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages[0]["role"], "assistant")
+        let content = try XCTUnwrap(messages[0]["content"])
+        XCTAssertTrue(content.contains("<tool_call>"), "Qwen tool calls render as <tool_call> blocks")
+        XCTAssertTrue(content.contains("</tool_call>"))
+        XCTAssertTrue(content.contains("get_weather"), "tool name must appear in the encoded call")
+        // The arguments must round-trip into a parsed object, not the raw string.
+        let open = try XCTUnwrap(content.range(of: "{"))
+        let close = try XCTUnwrap(content.range(of: "}", options: .backwards))
+        let jsonSlice = String(content[open.lowerBound...close.lowerBound])
+        let obj = try XCTUnwrap(
+            try JSONSerialization.jsonObject(
+                with: XCTUnwrap(jsonSlice.data(using: .utf8))
+            ) as? [String: Any]
+        )
+        XCTAssertEqual(obj["name"] as? String, "get_weather")
+        let args = try XCTUnwrap(obj["arguments"] as? [String: Any])
+        XCTAssertEqual(args["city"] as? String, "Paris")
+    }
+
+    func test_buildChatMessages_toolAwareMalformedArgumentsFallBackToEmptyObject() throws {
+        let toolEntry = ToolAwareHistoryEntry(
+            role: "assistant",
+            content: "",
+            toolCalls: [
+                ToolCall(id: "c1", toolName: "broken", arguments: "{not valid json")
+            ]
+        )
+        let (_, messages) = try MLXChatMessageEncoder.buildChatMessages(
+            prompt: "ignored",
+            effectiveSystemPrompt: nil,
+            conversationHistory: [],
+            toolAwareHistory: [toolEntry],
+            structuredHistory: nil,
+            dialect: .qwen25
+        )
+        XCTAssertEqual(messages.count, 1)
+        let content = try XCTUnwrap(messages[0]["content"])
+        // The call is preserved (not dropped) with an empty args object.
+        XCTAssertTrue(content.contains("<tool_call>"))
+        XCTAssertTrue(content.contains("broken"))
+        let open = try XCTUnwrap(content.range(of: "{"))
+        let close = try XCTUnwrap(content.range(of: "}", options: .backwards))
+        let jsonSlice = String(content[open.lowerBound...close.lowerBound])
+        let obj = try XCTUnwrap(
+            try JSONSerialization.jsonObject(
+                with: XCTUnwrap(jsonSlice.data(using: .utf8))
+            ) as? [String: Any]
+        )
+        XCTAssertEqual(obj["name"] as? String, "broken")
+        let args = try XCTUnwrap(obj["arguments"] as? [String: Any])
+        XCTAssertTrue(args.isEmpty, "malformed argument JSON must collapse to an empty object, not drop the call")
+    }
+
     func test_buildChatMessages_returnsNilChatMessagesWhenStructuredHistoryHasNoImages() throws {
         let history = [
             StructuredMessage(role: "user", content: "text only"),
@@ -167,8 +237,16 @@ final class MLXChatMessageEncoderTests: XCTestCase {
             structuredHistory: history,
             dialect: .unknown
         )
-        XCTAssertNotNil(chatMessages)
-        XCTAssertEqual(chatMessages?.count, 2, "system + user")
+        let chat = try XCTUnwrap(chatMessages)
+        XCTAssertEqual(chat.count, 2, "system + user")
+        // Roles: system prompt first, then the structured user turn.
+        XCTAssertEqual(chat.map(\.role), [.system, .user])
+        // The system message carries the supplied prompt.
+        XCTAssertEqual(chat[0].content, "system!")
+        // The user message text is the .text part of the structured message...
+        XCTAssertEqual(chat[1].content, "describe this")
+        // ...and the decoded image lands in its images array.
+        XCTAssertEqual(chat[1].images.count, 1, "the single .image part must produce one Chat image")
     }
 }
 
