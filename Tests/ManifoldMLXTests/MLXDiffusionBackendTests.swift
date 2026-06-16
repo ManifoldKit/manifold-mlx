@@ -103,6 +103,84 @@ final class MLXDiffusionBackendTests: XCTestCase {
                       "text_encoder_2/ present must select the SDXL preset")
     }
 
+    // MARK: - generate() pipeline via injected fake (no Metal)
+
+    func test_generate_emitsProgressSequenceThenCompleted() async throws {
+        let fake = FakeDiffusionGenerator(steps: 3)
+        let backend = MLXDiffusionBackend(generator: fake)
+        XCTAssertTrue(backend.isLoaded)
+
+        let outDir = FileManager.default.temporaryDirectory
+            .appending(component: "MLXDiffGen-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: outDir) }
+
+        let stream = try backend.generate(
+            prompt: "a cat", config: .init(steps: 3, outputDirectory: outDir)
+        )
+        let events = try await DiffusionTestHelpers.collect(stream)
+
+        // 3 progress ticks (1,2,3 over total 3) followed by a single completed.
+        XCTAssertEqual(events.compactMap { $0.progressStep }, [1, 2, 3])
+        if case let .progress(_, total) = events.first {
+            XCTAssertEqual(total, 3)
+        } else {
+            XCTFail("First event must be .progress")
+        }
+        XCTAssertTrue(events.last?.isCompleted ?? false,
+                      "Final event must be .completed")
+        XCTAssertEqual(events.filter { $0.isCompleted }.count, 1)
+        // isGenerating returns to false once the stream drains.
+        XCTAssertFalse(backend.isGenerating)
+    }
+
+    func test_stopGeneration_midStream_finishesEarly_andClearsIsGenerating() async throws {
+        // Sendable box so the @Sendable onStep hook can reach the backend.
+        let holder = BackendHolder()
+        let fake = FakeDiffusionGenerator(steps: 10) { stepIndex in
+            // After the first step is produced, request a stop. The loop checks
+            // _stopRequested at the top of the next iteration → CancellationError.
+            if stepIndex == 0 { holder.backend?.stopGeneration() }
+        }
+        let backend = MLXDiffusionBackend(generator: fake)
+        holder.backend = backend
+
+        let stream = try backend.generate(prompt: "a cat", config: .init(steps: 10))
+        let events = try await DiffusionTestHelpers.collect(stream)
+
+        // Exactly one progress tick emitted, then early finish — NO completed.
+        XCTAssertEqual(events.compactMap { $0.progressStep }, [1])
+        XCTAssertFalse(events.contains { $0.isCompleted },
+                       "A stopped run must not emit .completed")
+        XCTAssertFalse(backend.isGenerating,
+                       "isGenerating must return to false after early finish")
+    }
+
+    func test_generate_noLatents_finishesWithoutCompleted() async throws {
+        let backend = MLXDiffusionBackend(generator: FakeDiffusionGenerator(steps: 0))
+        let stream = try backend.generate(prompt: "x", config: .init(steps: 0))
+        let events = try await DiffusionTestHelpers.collect(stream)
+        XCTAssertTrue(events.isEmpty, "Zero-step run yields no events and finishes")
+        XCTAssertFalse(backend.isGenerating)
+    }
+
+    // MARK: - loadModel branch selection (past fileExists, no Metal)
+
+    func test_loadModel_unetOnly_isLoadedFalseUntilSuccess() async {
+        // unet/ exists so detectPreset succeeds, but no real weights → the
+        // Metal-bound textToImageGenerator load fails. loadModel must NOT flip
+        // isLoaded on a failed load.
+        let dir = makeModelDir(withXLEncoder: false)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let backend = MLXDiffusionBackend()
+        do {
+            try await backend.loadModel(from: dir)
+        } catch {
+            // Expected: no weights on disk.
+        }
+        XCTAssertFalse(backend.isLoaded,
+                       "A failed weight load must leave isLoaded == false")
+    }
+
     // MARK: - Sabotage check (documented in CLAUDE.md test conventions)
     //
     // To verify test_loadModel_emptyDirectory_throwsUnsupportedLayout is

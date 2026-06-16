@@ -48,11 +48,19 @@ public enum FluxDiffusionError: Error, LocalizedError {
 public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Sendable {
 
     private let lock = NSLock()
-    private var _generator: (any TextToImageGenerator)?
+    private var _generator: (any DiffusionGenerator)?
     private var _isGenerating = false
     private var _stopRequested = false
 
     public init() {}
+
+    /// Test-only seam: construct a backend with a pre-installed
+    /// ``DiffusionGenerator`` (typically a fake), bypassing `loadModel(from:)`
+    /// and the Metal-bound weight load. Production code never calls this.
+    @_spi(Testing)
+    public init(generator: any DiffusionGenerator) {
+        self._generator = generator
+    }
 
     @discardableResult
     private func withLock<T>(_ body: () throws -> T) rethrows -> T {
@@ -72,7 +80,7 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
 
     public func loadModel(from url: URL) async throws {
         // Try flux.swift's own quantized format first (requires metadata.json).
-        let generator: any TextToImageGenerator
+        let textToImage: any TextToImageGenerator
         let quantizedMetadata = url.appending(component: "metadata.json")
         if FileManager.default.fileExists(atPath: quantizedMetadata.path) {
             let flux = try await FLUX.loadQuantized(
@@ -83,17 +91,17 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
             guard let ttig = flux as? any TextToImageGenerator else {
                 throw FluxDiffusionError.notLoaded
             }
-            generator = ttig
+            textToImage = ttig
         } else {
             // Standard FP16 / BF16 diffusers layout.
             let hub = HubApi(useOfflineMode: true)
             let model = try Flux1Schnell(hub: hub, modelDirectory: url)
             try model.loadWeights(from: url, dtype: .float16)
-            generator = model
+            textToImage = model
         }
 
         withLock {
-            _generator = generator
+            _generator = RealFluxGenerator(generator: textToImage)
             _stopRequested = false
         }
     }
@@ -114,38 +122,26 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
                         throw FluxDiffusionError.notLoaded
                     }
 
-                    var params = EvaluateParameters(
-                        width: config.width,
-                        height: config.height,
-                        numInferenceSteps: config.steps,
-                        seed: config.seed,
-                        prompt: prompt
-                    )
-                    if let guidance = config.guidanceScale {
-                        params.guidance = Float(guidance)
-                    }
+                    let run = generator.makeRun(prompt: prompt, config: config)
+                    let totalSteps = run.totalSteps
 
-                    var denoiser = generator.generateLatents(parameters: params)
-                    let totalSteps = params.numInferenceSteps
-                    var lastLatent: MLXArray?
-
-                    while let xt = denoiser.next() {
+                    var step = 0
+                    var producedAny = false
+                    while true {
                         try Task.checkCancellation()
                         if self.withLock({ self._stopRequested }) { throw CancellationError() }
-                        eval(xt)
-                        lastLatent = xt
-                        continuation.yield(.progress(step: denoiser.i, total: totalSteps))
+
+                        guard try run.step() else { break }
+                        step += 1
+                        producedAny = true
+                        continuation.yield(.progress(step: step, total: totalSteps))
                     }
 
-                    guard let finalLatent = lastLatent else {
+                    guard producedAny else {
                         throw FluxDiffusionError.noLatentsProduced
                     }
 
-                    let unpacked = Self.unpackLatents(
-                        finalLatent, height: config.height, width: config.width
-                    )
-                    let decoded = generator.decode(xt: unpacked)
-                    let url = try Self.savePNG(decoded, to: config.outputDirectory)
+                    let url = try run.finishImage(to: config.outputDirectory)
                     continuation.yield(.completed(url))
                     continuation.finish()
                 } catch is CancellationError {
@@ -186,7 +182,7 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
     /// decoder expects spatial [H/8, W/8, 16] latents, so unpacking is required
     /// before decode. This is the inverse of the pack operation in flux.swift's
     /// `ImageToImageGenerator` extension.
-    private static func unpackLatents(_ latents: MLXArray, height: Int, width: Int) -> MLXArray {
+    static func unpackLatents(_ latents: MLXArray, height: Int, width: Int) -> MLXArray {
         let h = height / 16
         let w = width / 16
         // [1, h*w, 64] → [1, h, w, 16, 2, 2]
@@ -201,7 +197,7 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
     ///
     /// Follows the same CGContext pattern as the vendored `StableDiffusion/Image.swift`
     /// (RGBA, `noneSkipLast`, `byteOrder32Big`) so both backends write identical-format PNGs.
-    private static func savePNG(_ decoded: MLXArray, to directory: URL?) throws -> URL {
+    static func savePNG(_ decoded: MLXArray, to directory: URL?) throws -> URL {
         let dir = directory ?? FileManager.default.temporaryDirectory
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let dest = dir.appending(component: "\(UUID().uuidString).png")
@@ -239,6 +235,74 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
             }
             return dest
         }
+    }
+}
+
+// MARK: - Real generator seam implementation
+
+/// Production ``DiffusionGenerator`` wrapping a vendored FluxSwift
+/// ``TextToImageGenerator``. Owns all `MLXArray` handling — the
+/// `FluxDiffusionBackend.generate(...)` loop never touches MLX directly.
+private struct RealFluxGenerator: DiffusionGenerator {
+    let generator: any TextToImageGenerator
+
+    func makeRun(prompt: String, config: ImageGenerationConfig) -> any DiffusionRun {
+        var params = EvaluateParameters(
+            width: config.width,
+            height: config.height,
+            numInferenceSteps: config.steps,
+            seed: config.seed,
+            prompt: prompt
+        )
+        if let guidance = config.guidanceScale {
+            params.guidance = Float(guidance)
+        }
+        return RealFluxRun(
+            generator: generator,
+            denoiser: generator.generateLatents(parameters: params),
+            totalSteps: params.numInferenceSteps,
+            height: config.height,
+            width: config.width
+        )
+    }
+}
+
+private final class RealFluxRun: DiffusionRun {
+    let generator: any TextToImageGenerator
+    var denoiser: DenoiseIterator
+    let totalSteps: Int
+    let height: Int
+    let width: Int
+    private var lastLatent: MLXArray?
+
+    init(
+        generator: any TextToImageGenerator,
+        denoiser: DenoiseIterator,
+        totalSteps: Int,
+        height: Int,
+        width: Int
+    ) {
+        self.generator = generator
+        self.denoiser = denoiser
+        self.totalSteps = totalSteps
+        self.height = height
+        self.width = width
+    }
+
+    func step() throws -> Bool {
+        guard let xt = denoiser.next() else { return false }
+        eval(xt)
+        lastLatent = xt
+        return true
+    }
+
+    func finishImage(to outputDirectory: URL?) throws -> URL {
+        guard let finalLatent = lastLatent else {
+            throw FluxDiffusionError.noLatentsProduced
+        }
+        let unpacked = FluxDiffusionBackend.unpackLatents(finalLatent, height: height, width: width)
+        let decoded = generator.decode(xt: unpacked)
+        return try FluxDiffusionBackend.savePNG(decoded, to: outputDirectory)
     }
 }
 
