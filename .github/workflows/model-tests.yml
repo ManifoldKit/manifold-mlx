@@ -1,0 +1,134 @@
+name: Model Tests (slow)
+
+# Scheduled real-model lane for the RUN_SLOW_TESTS-gated MLX streaming
+# contract scenarios (issue #28).
+#
+# Why this is its own workflow (not part of ci.yml)
+# -------------------------------------------------
+# `MLXLocalBackendContractTests`'s generation scenarios
+# (`test_generate_simplePrompt_emitsTokensInOrder`,
+# `test_generate_stopsGenerating_afterStreamEnd`) are gated behind
+# `requiresSlowTests` -> `XCTSkipIf(RUN_SLOW_TESTS != 1)`. The per-PR `ci.yml`
+# lane never sets that var, so those scenarios always skip there (by design —
+# the fast lane is covered by the injected-mock companions that DO run on every
+# PR). This lane exists to exercise the real-model path: it sets
+# `RUN_SLOW_TESTS=1` and points the MLX model-discovery helper at a pinned tiny
+# model so the gated scenarios actually execute.
+#
+# IMPORTANT: hosted GitHub runners have no Apple-Silicon Metal device, so the
+# `swift test` step here only runs to completion when a self-hosted Apple
+# Silicon runner with the pinned model on disk is available. Until one exists
+# this lane is `workflow_dispatch`-only in practice — the nightly `schedule`
+# trigger is wired so it starts producing signal automatically the moment a
+# capable runner is registered. See ci.yml's `integration-tests` stub and
+# scripts/test-mlx-integration.sh for the matching real-model story.
+
+on:
+  schedule:
+    # 07:00 UTC nightly — after the per-PR CI lane is quiet.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'MLX model name hint to discover under $HOME/Documents/Models (pinned tiny model by default)'
+        required: false
+        default: 'Qwen2.5-0.5B-Instruct-4bit'
+
+concurrency:
+  group: model-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Pinned tiny MLX model. A `workflow_dispatch` run can override via the
+  # `model` input; the schedule trigger uses this default. The model must be
+  # present on the runner under $HOME/Documents/Models/ (one nested level is
+  # also searched) with config.json + tokenizer + *.safetensors.
+  PINNED_MLX_MODEL: ${{ github.event.inputs.model || 'Qwen2.5-0.5B-Instruct-4bit' }}
+
+jobs:
+  slow-model-tests:
+    # macos-15 mirrors ci.yml. NOTE: hosted runners lack Metal — this job only
+    # produces real coverage on a self-hosted Apple Silicon runner. It is kept
+    # here so the lane is ready the moment such a runner is registered.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode 26 toolchain
+        # Same toolchain pin as ci.yml: the image default (Xcode 16.4 /
+        # Swift 6.1) mis-resolves the dependency graph; Swift 6.3 (Xcode 26.3)
+        # prunes the trait-disabled mlx-swift-lm 2.x edge correctly.
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)/Contents/Developer"
+          swift --version
+      - name: Cache SwiftPM dependency material
+        uses: actions/cache@v4
+        with:
+          # Dependency material only — same rationale as ci.yml (own-module
+          # .build/debug objects are deliberately not cached).
+          path: |
+            ~/.swiftpm
+            .build/artifacts
+            .build/checkouts
+            .build/repositories
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-
+      - name: Build tests
+        run: swift build --build-tests
+      - name: Run slow MLX streaming contract tests
+        # `swift test` (unlike `xcodebuild`) propagates shell env vars to the
+        # spawned xctest runner, so RUN_SLOW_TESTS + the model-discovery vars
+        # reach LocalBackendContractRunner.skipIfHardwareGated directly.
+        #   RUN_SLOW_TESTS=1                  -> un-gate the generation scenarios
+        #   MANIFOLD_DISCOVER_LOCAL_MODELS=1  -> enable real-model discovery
+        #   MLX_TEST_MODEL=<name>             -> prefer the pinned tiny model
+        # Tee the output so the non-vacuity guard below can inspect it.
+        env:
+          RUN_SLOW_TESTS: '1'
+          MANIFOLD_DISCOVER_LOCAL_MODELS: '1'
+          MLX_TEST_MODEL: ${{ env.PINNED_MLX_MODEL }}
+        run: |
+          set -o pipefail
+          swift test --filter MLXLocalBackendContractTests 2>&1 | tee model-tests.log
+      - name: Guard against an all-skipped (vacuous) run
+        # The whole point of #28 is that a green check while running nothing is
+        # worse than a red one. If the two RUN_SLOW_TESTS-gated streaming
+        # scenarios both skipped, this lane added zero real-model signal and
+        # must FAIL loudly rather than report a vacuous pass.
+        #
+        # Bash 3.2 safe: no `declare -A`, no `${var,,}`, plain grep + arithmetic.
+        run: |
+          set -u
+          log=model-tests.log
+          if [ ! -f "$log" ]; then
+            echo "::error::test log $log is missing — cannot verify non-vacuity"
+            exit 1
+          fi
+
+          gated_tests='test_generate_simplePrompt_emitsTokensInOrder test_generate_stopsGenerating_afterStreamEnd'
+          executed=0
+          for t in $gated_tests; do
+            # The injected-mock companions share the prefix, so anchor on the
+            # exact ']' that follows the bare method name (no _injectedMock).
+            if grep -E "$t\]" "$log" | grep -vq "_injectedMock"; then
+              if grep -E "$t\]" "$log" | grep -v "_injectedMock" | grep -q "skipped"; then
+                echo "Gated scenario $t: SKIPPED"
+              else
+                echo "Gated scenario $t: executed"
+                executed=$((executed + 1))
+              fi
+            else
+              echo "::warning::Gated scenario $t not found in log"
+            fi
+          done
+
+          if [ "$executed" -eq 0 ]; then
+            echo "::error::All RUN_SLOW_TESTS-gated streaming scenarios skipped — this lane ran no real-model coverage. Check that the pinned model ($MLX_TEST_MODEL) is present on the runner and Metal is available."
+            exit 1
+          fi
+          echo "Non-vacuity guard passed: $executed gated scenario(s) executed."
+        env:
+          MLX_TEST_MODEL: ${{ env.PINNED_MLX_MODEL }}
