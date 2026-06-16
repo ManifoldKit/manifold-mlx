@@ -190,14 +190,20 @@ final class MLXBackendEventOrderParityTests: XCTestCase {
         }
     }
 
-    // MARK: - 3. Cancellation mid-stream: tokens emitted up to break point
+    // MARK: - 3. Cancellation mid-stream: consumer can break early
 
-    /// Cancelling the stream after the first token must surface exactly the
-    /// events the consumer observed before breaking — no extra synthesised
-    /// events from the driver. This pins the contract that mid-stream
-    /// teardown doesn't inject phantom completion / usage events the
-    /// consumer never asked for.
-    func test_cancelMidStream_yieldsOnlyConsumedTokens() async throws {
+    /// A consumer may `break` out of the event loop after consuming only some
+    /// of the available tokens, and doing so must tear the stream down cleanly:
+    /// `isGenerating` returns to false once the cancel propagates.
+    ///
+    /// NOTE: This test does NOT verify "no phantom completion / .usage events"
+    /// — breaking at `observed.count == 2` makes `tags == ["token","token"]`
+    /// true by construction (the loop exits before any later event could be
+    /// observed), so that claim would be tautological here. The positive
+    /// "no trailing terminal events" check lives in
+    /// `test_simpleCompletion_emitsNoUsageOrCompletionEventsAfterTokens`, which
+    /// drains the full stream.
+    func test_cancelMidStream_consumerCanBreakEarly_andIsGeneratingClears() async throws {
         let mock = MockMLXModelContainer()
         // Use a generous yield list so the producer always has work
         // queued up at the cancel point.
@@ -220,12 +226,11 @@ final class MLXBackendEventOrderParityTests: XCTestCase {
             }
         }
 
-        let tags = observed.map(tag)
-        XCTAssertEqual(
-            tags,
-            ["token", "token"],
-            "Mid-stream cancel must only surface the two consumed .token events — no phantom completion / .usage / .stopReason"
-        )
+        // We consumed exactly the two tokens we asked for before breaking.
+        XCTAssertEqual(observed.count, 2,
+            "Consumer should have stopped after observing two events")
+        XCTAssertEqual(observed.map(tag), ["token", "token"],
+            "The two consumed events are tokens (mock yields tokens only)")
 
         // Wait for the cancel to propagate so other tests aren't racing on
         // shared backend state. Matches the pattern in
@@ -239,6 +244,41 @@ final class MLXBackendEventOrderParityTests: XCTestCase {
             expectation.fulfill()
         }
         await fulfillment(of: [expectation], timeout: 3)
-        XCTAssertFalse(backend.isGenerating)
+        XCTAssertFalse(backend.isGenerating,
+            "Breaking out of the consumer loop must tear the stream down and clear isGenerating")
+    }
+
+    /// Positively pins the "no phantom terminal events" contract that the
+    /// early-break test above cannot: drains the stream PAST every token and
+    /// asserts the driver never appends a `.usage` or `.generationCompleted`
+    /// event after the consumed tokens for a plain completion. (`GenerationEvent`
+    /// has no `stopReason` case today — see
+    /// MLXBackendGenerationTests.test_stopReason_currentlyCollapsesToDone — so
+    /// there is no stopReason event to assert against; this test will need
+    /// updating if/when one is added.)
+    func test_simpleCompletion_emitsNoUsageOrCompletionEventsAfterTokens() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["a", "b", "c"]
+
+        let backend = MLXBackend()
+        backend._inject(mock)
+
+        let stream = try backend.generate(
+            prompt: "hi",
+            systemPrompt: nil,
+            config: GenerationConfig()
+        )
+
+        // Drain the ENTIRE stream — no early break — so any trailing
+        // synthesised terminal event would be captured here.
+        let events = try await collectEvents(from: stream)
+        let tags = events.map(tag)
+
+        XCTAssertEqual(tags, ["token", "token", "token"],
+            "A plain completion must emit only its tokens, with no trailing terminal events; got: \(tags)")
+        XCTAssertFalse(tags.contains("usage"),
+            "Driver must not synthesise a .usage event after the consumed tokens; got: \(tags)")
+        XCTAssertFalse(tags.contains("generationCompleted"),
+            "Driver must not synthesise a .generationCompleted event after the consumed tokens; got: \(tags)")
     }
 }

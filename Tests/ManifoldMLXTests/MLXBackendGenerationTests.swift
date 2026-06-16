@@ -726,25 +726,26 @@ final class MLXBackendGenerationTests: XCTestCase {
         // flip system and user positions, failing the first/last XCTAssertEquals.
     }
 
-    // MARK: - test_chatTemplate_missingTemplate_throwsModelLoadFailed
+    // MARK: - test_chatTemplate_missingTemplate_propagatesApplyErrorUnchanged
 
     /// When the loaded tokenizer has no `chat_template` (e.g. `tokenizer_config.json`
     /// missing the field, or the file itself absent in the model snapshot), the
     /// MLX container raises an error from `apply_chat_template` *during generation*.
     ///
-    /// Today `MLXBackend` does NOT wrap that error in `InferenceError.modelLoadFailed`
-    /// — `modelLoadFailed` is reserved for the `loadModel(...)` path. The error
-    /// surfaces unchanged through the GenerationStream's `try await events`. This
-    /// test pins the current behavior so the failure mode is visible and a future
-    /// structured-error change has a concrete fixture to update.
-    func test_chatTemplate_missingTemplate_throwsModelLoadFailed() async throws {
+    /// `MLXBackend` does NOT wrap that mid-generation error in
+    /// `InferenceError.modelLoadFailed` — `modelLoadFailed` is reserved for the
+    /// `loadModel(...)` path. The original error surfaces UNCHANGED through the
+    /// GenerationStream's `try await events`, and the stream phase becomes
+    /// `.failed`. This test pins that pass-through contract (named for what it
+    /// actually asserts, not for `modelLoadFailed`, which is the opposite of the
+    /// real behaviour) so a future structured-error change has a concrete fixture.
+    func test_chatTemplate_missingTemplate_propagatesApplyErrorUnchanged() async throws {
         struct MissingChatTemplateError: Error, Equatable {
             let detail = "tokenizer_config.json missing chat_template field"
         }
 
         let mock = MockMLXModelContainer()
         mock.simulatedTokenizerApplyFailure = MissingChatTemplateError()
-        mock.simulatedChatTemplate = nil // documents the scenario
 
         let backend = MLXBackend()
         backend._inject(mock)
@@ -782,21 +783,23 @@ final class MLXBackendGenerationTests: XCTestCase {
         // succeed and `caught` stays nil, failing the XCTUnwrap.
     }
 
-    // MARK: - test_chatTemplate_noAssistantMarker_throwsStructuredError
+    // MARK: - test_chatTemplate_noAssistantMarker_propagatesApplyErrorUnchanged
 
     /// When the chat template is present but malformed (e.g. it never emits an
     /// `<|assistant|>` marker so the tokenizer has nowhere to start the model's
     /// turn), `apply_chat_template` raises a different error class. Same surfacing
-    /// contract — propagated unchanged through the GenerationStream.
-    func test_chatTemplate_noAssistantMarker_throwsStructuredError() async throws {
+    /// contract as the missing-template case: the error propagates UNCHANGED
+    /// through the GenerationStream (the backend does not re-wrap it into any
+    /// structured InferenceError), and the container's `generate` is reached
+    /// before the apply fails. Renamed from `..._throwsStructuredError` because
+    /// no wrapping/structuring happens — the assertion is plain pass-through.
+    func test_chatTemplate_noAssistantMarker_propagatesApplyErrorUnchanged() async throws {
         struct NoAssistantMarkerError: Error, Equatable {
             let detail = "chat template missing <|assistant|> marker"
         }
 
         let mock = MockMLXModelContainer()
         mock.simulatedTokenizerApplyFailure = NoAssistantMarkerError()
-        // Document the malformed template the test is exercising.
-        mock.simulatedChatTemplate = "{% for message in messages %}{{ message.content }}{% endfor %}"
 
         let backend = MLXBackend()
         backend._inject(mock)
