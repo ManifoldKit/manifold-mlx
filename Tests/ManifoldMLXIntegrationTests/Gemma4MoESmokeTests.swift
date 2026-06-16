@@ -23,6 +23,12 @@ final class Gemma4MoESmokeTests: XCTestCase {
     override func setUp() async throws {
         try await super.setUp()
 
+        // Skip BEFORE any model discovery/load. The on-disk Gemma4 MoE weights
+        // trigger an uncatchable upstream mlx-swift-lm C++ broadcast crash (#802),
+        // and loading the model before skipping hangs/kills the integration lane
+        // when the weights are present (#26). The skip must precede every load.
+        throw XCTSkip("Skipped pending upstream mlx-swift-lm fix for Gemma4 MoE broadcast crash (issue #802)")
+
         try XCTSkipUnless(HardwareRequirements.isAppleSilicon, "Requires Apple Silicon")
         try XCTSkipUnless(HardwareRequirements.hasMetalDevice, "Requires Metal GPU")
 
@@ -45,7 +51,8 @@ final class Gemma4MoESmokeTests: XCTestCase {
     }
 
     func test_loadAndGenerate_producesNonEmptyResponse() async throws {
-        // Upstream mlx-swift-lm Gemma4 MoE broadcast crash. #802 closed-completed but the defect persists upstream; skip stays because the abort is an uncatchable C++ fatal that would kill the test lane.
+        // Defense-in-depth: setUp() already skips before any model load (#26/#802),
+        // so this body never executes while the upstream MoE crash persists.
         throw XCTSkip("Skipped pending upstream mlx-swift-lm fix for Gemma4 MoE broadcast crash (issue #802)")
 
         let config = GenerationConfig(temperature: 0.3, maxOutputTokens: 32)
