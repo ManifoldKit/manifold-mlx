@@ -242,7 +242,7 @@ public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Senda
         return .presetStableDiffusion21Base
     }
 
-    private static func loadPlanInputs(
+    @_spi(Testing) public static func loadPlanInputs(
         at url: URL,
         preset: StableDiffusionConfiguration
     ) throws -> ImageModelLoadPlan.Inputs {
@@ -270,7 +270,7 @@ public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Senda
         )
     }
 
-    private static func makeParams(
+    @_spi(Testing) public static func makeParams(
         prompt: String,
         config: ImageGenerationConfig,
         preset: StableDiffusionConfiguration

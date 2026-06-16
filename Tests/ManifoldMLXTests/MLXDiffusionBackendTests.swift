@@ -122,5 +122,150 @@ final class MLXDiffusionBackendTests: XCTestCase {
         }
         return dir
     }
+
+    // MARK: - makeParams (pure parameter mapping, no Metal)
+
+    func test_makeParams_latentSizeIsHeightFirstAndDividedBy8() {
+        let config = ImageGenerationConfig(steps: 4, width: 768, height: 512)
+        let params = MLXDiffusionBackend.makeParams(
+            prompt: "p", config: config, preset: .presetStableDiffusion21Base
+        )
+        // latentSize == [height/8, width/8] — height first.
+        XCTAssertEqual(params.latentSize, [512 / 8, 768 / 8])
+    }
+
+    func test_makeParams_stepsAndPromptForwarded() {
+        let config = ImageGenerationConfig(steps: 7, width: 512, height: 512)
+        let params = MLXDiffusionBackend.makeParams(
+            prompt: "a fox", config: config, preset: .presetStableDiffusion21Base
+        )
+        XCTAssertEqual(params.steps, 7)
+        XCTAssertEqual(params.prompt, "a fox")
+    }
+
+    func test_makeParams_guidanceScaleNil_fallsBackToPresetDefault() {
+        let preset = try! MLXDiffusionBackend.detectPreset(at: makeModelDir(withXLEncoder: false))
+        let config = ImageGenerationConfig(width: 512, height: 512, guidanceScale: nil)
+        let params = MLXDiffusionBackend.makeParams(prompt: "p", config: config, preset: preset)
+        XCTAssertEqual(params.cfgWeight, preset.defaultParameters().cfgWeight)
+    }
+
+    func test_makeParams_guidanceScaleSet_overridesDefault() {
+        let config = ImageGenerationConfig(width: 512, height: 512, guidanceScale: 3.25)
+        let params = MLXDiffusionBackend.makeParams(
+            prompt: "p", config: config, preset: .presetStableDiffusion21Base
+        )
+        XCTAssertEqual(params.cfgWeight, 3.25)
+    }
+
+    func test_makeParams_seedSet_isForwarded() {
+        let config = ImageGenerationConfig(width: 512, height: 512, seed: 4242)
+        let params = MLXDiffusionBackend.makeParams(
+            prompt: "p", config: config, preset: .presetStableDiffusion21Base
+        )
+        XCTAssertEqual(params.seed, 4242)
+    }
+
+    // MARK: - loadPlanInputs (filesystem byte accounting, no Metal)
+
+    /// Writes a file of exactly `byteCount` zero bytes at `relativePath` under `dir`.
+    private func writeFile(_ dir: URL, _ relativePath: String, bytes byteCount: Int) {
+        let fileURL = dir.appending(path: relativePath)
+        try? FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        try? Data(count: byteCount).write(to: fileURL)
+    }
+
+    func test_loadPlanInputs_sumsWeightBytesAndPresetDims_SD21() throws {
+        let dir = makeModelDir(withXLEncoder: false)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        writeFile(dir, "unet/diffusion_pytorch_model.safetensors", bytes: 1000)
+        writeFile(dir, "vae/diffusion_pytorch_model.safetensors", bytes: 200)
+        writeFile(dir, "text_encoder/model.safetensors", bytes: 300)
+        // No text_encoder_2 for SD 2.1 → te2 contributes 0 (missing file → 0).
+
+        let inputs = try MLXDiffusionBackend.loadPlanInputs(
+            at: dir, preset: .presetStableDiffusion21Base
+        )
+
+        XCTAssertEqual(inputs.unetWeightBytes, 1000)
+        XCTAssertEqual(inputs.vaeWeightBytes, 200)
+        XCTAssertEqual(inputs.textEncoderWeightBytes, 300, "te1 only; missing te2 → 0")
+        // SD 2.1: 512×512 target, activation = (64*64) * 2 * 8.
+        XCTAssertEqual(inputs.targetWidth, 512)
+        XCTAssertEqual(inputs.targetHeight, 512)
+        XCTAssertEqual(inputs.activationMemoryBytes, Int64(64 * 64) * 2 * 8)
+    }
+
+    func test_loadPlanInputs_sumsTwoTextEncoders_andSDXLDims() throws {
+        let dir = makeModelDir(withXLEncoder: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        writeFile(dir, "text_encoder/model.safetensors", bytes: 300)
+        writeFile(dir, "text_encoder_2/model.safetensors", bytes: 400)
+
+        let inputs = try MLXDiffusionBackend.loadPlanInputs(at: dir, preset: .presetSDXLTurbo)
+
+        XCTAssertEqual(inputs.textEncoderWeightBytes, 700, "te1 + te2 summed")
+        // SDXL: 1024×1024 target, activation = (128*128) * 2 * 8.
+        XCTAssertEqual(inputs.targetWidth, 1024)
+        XCTAssertEqual(inputs.targetHeight, 1024)
+        XCTAssertEqual(inputs.activationMemoryBytes, Int64(128 * 128) * 2 * 8)
+    }
+
+    func test_loadPlanInputs_missingWeightFiles_areZero() throws {
+        // unet/ dir exists (so detectPreset would pass) but no weight files written.
+        let dir = makeModelDir(withXLEncoder: false)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let inputs = try MLXDiffusionBackend.loadPlanInputs(
+            at: dir, preset: .presetStableDiffusion21Base
+        )
+        XCTAssertEqual(inputs.unetWeightBytes, 0)
+        XCTAssertEqual(inputs.vaeWeightBytes, 0)
+        XCTAssertEqual(inputs.textEncoderWeightBytes, 0)
+    }
+
+    func test_loadPlanInputs_availableMemoryIsPhysicalMinus1GiB() throws {
+        let dir = makeModelDir(withXLEncoder: false)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let inputs = try MLXDiffusionBackend.loadPlanInputs(
+            at: dir, preset: .presetStableDiffusion21Base
+        )
+        let expected = max(0, Int64(ProcessInfo.processInfo.physicalMemory) - 1_073_741_824)
+        XCTAssertEqual(inputs.availableMemoryBytes, expected)
+    }
+
+    // MARK: - MLXDiffusionError.errorDescription
+
+    func test_errorDescription_notLoaded_mentionsLoadModel() {
+        XCTAssertTrue(
+            MLXDiffusionError.notLoaded.errorDescription?.contains("loadModel") ?? false
+        )
+    }
+
+    func test_errorDescription_pngEncodingFailed_containsPath() {
+        let url = URL(fileURLWithPath: "/tmp/some/output.png")
+        let desc = MLXDiffusionError.pngEncodingFailed(url).errorDescription ?? ""
+        XCTAssertTrue(desc.contains(url.path), "PNG-failure message must contain the file path")
+    }
+
+    func test_errorDescription_unsupportedModelLayout_containsLastPathComponent() {
+        let url = URL(fileURLWithPath: "/models/org__weirdmodel")
+        let desc = MLXDiffusionError.unsupportedModelLayout(url).errorDescription ?? ""
+        XCTAssertTrue(desc.contains("weirdmodel"))
+    }
+
+    func test_errorDescription_insufficientMemory_joinsReasons() {
+        let reasons: [ImageModelLoadPlan.Reason] = [
+            .unetTooLarge(required: 100, available: 50),
+            .totalExceedsBudget(required: 200, available: 50),
+        ]
+        let desc = MLXDiffusionError.insufficientMemory(reasons).errorDescription ?? ""
+        // Both reasons must appear in the joined message.
+        XCTAssertTrue(desc.contains("\(reasons[0])"))
+        XCTAssertTrue(desc.contains("\(reasons[1])"))
+    }
 }
 
