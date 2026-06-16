@@ -1,7 +1,9 @@
 import XCTest
+import MLXLMCommon
 import ManifoldInference
 import ManifoldTestSupport
 import ManifoldBackendTestKit
+import ManifoldMLX
 @_spi(Testing) import ManifoldMLX
 
 /// MLX participant for the local-backend contract suite.
@@ -72,6 +74,84 @@ final class MLXLocalBackendContractTests: XCTestCase {
         await LocalBackendContractRunner.assertCapabilityGateDisclaimedRequirementThrows(
             participant: Self.participant
         )
+    }
+
+    // MARK: - Fast-lane companions (no weights / Metal)
+
+    // The two RUN_SLOW_TESTS-gated scenarios above
+    // (`test_generate_simplePrompt_emitsTokensInOrder`,
+    // `test_generate_stopsGenerating_afterStreamEnd`) only run in the nightly
+    // real-model tier, so on every normal CI run they silently skip and assert
+    // nothing. They are intentionally kept (issue #28 tracks the real-model lane
+    // decision). The two tests below give the SAME contract a fast lane that
+    // always runs: they inject a scripted `MockMLXModelContainer` through the
+    // `@_spi(Testing) _inject(...)` seam on `MLXBackend` (mirroring
+    // `MLXBackendGenerationTests`), so the token-ordering and
+    // isGenerating-clears guarantees are exercised in CI without weights or
+    // Metal. `MockMLXModelContainer`'s `MLXModelContainerProtocol` conformance
+    // is provided in `MLXBackendGenerationTests.swift` in this same test target.
+
+    /// Fast-lane companion to `test_generate_simplePrompt_emitsTokensInOrder`:
+    /// the injected mock yields a scripted token sequence and the backend must
+    /// surface those `.token` events in order.
+    func test_generate_simplePrompt_emitsTokensInOrder_injectedMock() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["The", " quick", " brown", " fox"]
+
+        let backend = MLXBackend()
+        backend._inject(mock)
+
+        let stream = try backend.generate(
+            prompt: "hi",
+            systemPrompt: nil,
+            config: GenerationConfig()
+        )
+
+        var tokens: [String] = []
+        for try await event in stream.events {
+            if case .token(let text) = event { tokens.append(text) }
+        }
+
+        XCTAssertEqual(tokens, ["The", " quick", " brown", " fox"],
+            "Backend must emit the injected tokens in order")
+    }
+
+    /// Fast-lane companion to `test_generate_stopsGenerating_afterStreamEnd`:
+    /// once a fully-drained stream ends naturally, `isGenerating` must return
+    /// to false.
+    func test_generate_stopsGenerating_afterStreamEnd_injectedMock() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["a", "b", "c"]
+
+        let backend = MLXBackend()
+        backend._inject(mock)
+
+        XCTAssertFalse(backend.isGenerating,
+            "Backend must not report generating before generate() is called")
+
+        let stream = try backend.generate(
+            prompt: "hi",
+            systemPrompt: nil,
+            config: GenerationConfig()
+        )
+
+        // Drain the full stream so it terminates naturally.
+        for try await _ in stream.events {}
+
+        // The terminal state is applied asynchronously on the @MainActor task;
+        // poll with a tight deadline, mirroring MLXBackendGenerationTests.
+        let cleared = expectation(description: "isGenerating clears after stream end")
+        Task {
+            let deadline = ContinuousClock.now + .seconds(2)
+            while backend.isGenerating, ContinuousClock.now < deadline {
+                await Task.yield()
+            }
+            cleared.fulfill()
+        }
+        await fulfillment(of: [cleared], timeout: 3)
+
+        XCTAssertFalse(backend.isGenerating,
+            "isGenerating must return to false after the stream drains to completion")
     }
 }
 

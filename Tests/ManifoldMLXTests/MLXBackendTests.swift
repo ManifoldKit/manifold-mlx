@@ -53,7 +53,12 @@ final class MLXBackendTests: XCTestCase {
     func test_loadOptions_defaultUsesBackendTunedDefaults() {
         let opts = MLXBackend().loadOptionsForTesting
         XCTAssertEqual(opts.kvCacheQuantization, .q8)
-        XCTAssertEqual(opts.flashAttention, BackendLoadOptions.platformDefaultFlashAttention)
+        // Intentionally NOT asserting `flashAttention` against
+        // `BackendLoadOptions.platformDefaultFlashAttention` here — that is the
+        // very constant `BackendLoadOptions.default` uses to initialise the field,
+        // so the comparison is tautological and would pass for any value. The
+        // round-trip / override behaviour of flashAttention is covered by
+        // `test_setLoadOptions_persistsForNextLoad`.
         XCTAssertNil(opts.prefillBatchSize)
     }
 
@@ -125,12 +130,22 @@ final class MLXBackendTests: XCTestCase {
         }
     }
 
-    func test_unloadModel_beforeLoad_doesNotCrash() {
-        MLXBackend().unloadModel()
+    func test_unloadModel_beforeLoad_isNoOp_andLeavesBackendUnloaded() {
+        let backend = MLXBackend()
+        backend.unloadModel()
+        XCTAssertFalse(backend.isModelLoaded,
+            "unloadModel before any load must leave the backend in its unloaded zero state")
+        XCTAssertFalse(backend.isGenerating,
+            "unloadModel before any load must not put the backend into a generating state")
     }
 
-    func test_stopGeneration_beforeLoad_doesNotCrash() {
-        MLXBackend().stopGeneration()
+    func test_stopGeneration_beforeLoad_isNoOp_andLeavesBackendIdle() {
+        let backend = MLXBackend()
+        backend.stopGeneration()
+        XCTAssertFalse(backend.isGenerating,
+            "stopGeneration before any generation must leave isGenerating false")
+        XCTAssertFalse(backend.isModelLoaded,
+            "stopGeneration must not flip the model-loaded state")
     }
 
     func test_unloadModel_afterMockInjection_doesNotCrash() {
@@ -150,7 +165,14 @@ final class MLXBackendTests: XCTestCase {
             try await b.loadModel(from: badURL, plan: .testStub(effectiveContextSize: 512))
             XCTFail("Should throw for invalid model directory")
         } catch {
-            XCTAssertFalse(b.isModelLoaded)
+            // The directory has no config.json, so `validateArchitecture` is a
+            // no-op and the failure surfaces from the mlx-swift-lm factory load,
+            // which `loadModel` wraps in `InferenceError.modelLoadFailed`.
+            guard case InferenceError.modelLoadFailed = error else {
+                return XCTFail("Expected InferenceError.modelLoadFailed for a nonexistent model directory, got \(error)")
+            }
+            XCTAssertFalse(b.isModelLoaded,
+                "A failed load must leave the backend unloaded")
         }
     }
 
