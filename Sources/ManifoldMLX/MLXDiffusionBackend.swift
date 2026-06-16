@@ -1,6 +1,7 @@
 
 import CoreGraphics
 import Foundation
+import ImageIO
 import UniformTypeIdentifiers
 import ManifoldInference
 import Hub
@@ -172,6 +173,16 @@ public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Senda
                         step += 1
                         producedAny = true
                         continuation.yield(.progress(step: step, total: totalSteps))
+
+                        // Opt-in live preview: only when previewStride is set.
+                        // nil stride takes none of this path — no decode, no
+                        // emit — preserving the byte-for-byte no-preview
+                        // behaviour. Each emit costs one extra VAE decode (see
+                        // RealStableDiffusionRun.previewImage()).
+                        if DiffusionPreviewThrottle.shouldEmit(step: step, total: totalSteps, stride: config.previewStride) {
+                            let data = try run.previewImage()
+                            continuation.yield(.preview(step: step, total: totalSteps, image: data))
+                        }
                     }
 
                     guard producedAny else {
@@ -288,6 +299,23 @@ public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Senda
         try image.save(url: dest)
         return dest
     }
+
+    /// Encodes an ``Image`` to PNG bytes **in memory** (no disk write) — the
+    /// representation carried by ``ImageGenerationEvent/preview(step:total:image:)``.
+    static func encodePNGData(_ image: Image) throws -> Data {
+        let cgImage = image.asCGImage()
+        let mutable = NSMutableData()
+        guard let dst = CGImageDestinationCreateWithData(
+            mutable as CFMutableData, UTType.png.identifier as CFString, 1, nil
+        ) else {
+            throw MLXDiffusionError.pngEncodingFailed(URL(fileURLWithPath: "(memory)"))
+        }
+        CGImageDestinationAddImage(dst, cgImage, nil)
+        guard CGImageDestinationFinalize(dst) else {
+            throw MLXDiffusionError.pngEncodingFailed(URL(fileURLWithPath: "(memory)"))
+        }
+        return mutable as Data
+    }
 }
 
 // MARK: - Real generator seam implementation
@@ -330,6 +358,21 @@ private final class RealStableDiffusionRun: DiffusionRun {
         MLX.eval(latent)
         lastLatent = latent
         return true
+    }
+
+    func previewImage() throws -> Data {
+        guard let latent = lastLatent else {
+            throw MLXDiffusionError.notLoaded
+        }
+        // Extra VAE decode of the *current* intermediate latent — pure GPU cost
+        // on top of the denoise the loop is already doing (see the protocol's
+        // `previewImage()` doc). No GPU-cache flush here: unlike the terminal
+        // decode, a preview tick is interleaved with ongoing denoising, so we
+        // must not zero the activation cache the next `step()` will reuse.
+        let decode = generator.detachedDecoder()
+        let decoded = decode(latent)
+        let frame = decoded.ndim == 4 ? decoded[0] : decoded
+        return try MLXDiffusionBackend.encodePNGData(Image((frame * 255).asType(.uint8)))
     }
 
     func finishImage(to outputDirectory: URL?) throws -> URL {

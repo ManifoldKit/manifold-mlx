@@ -135,6 +135,15 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
                         step += 1
                         producedAny = true
                         continuation.yield(.progress(step: step, total: totalSteps))
+
+                        // Opt-in live preview: nil stride takes none of this
+                        // path (no decode, no emit), preserving the no-preview
+                        // behaviour. Each emit costs one extra unpack + VAE
+                        // decode (see RealFluxRun.previewImage()).
+                        if DiffusionPreviewThrottle.shouldEmit(step: step, total: totalSteps, stride: config.previewStride) {
+                            let data = try run.previewImage()
+                            continuation.yield(.preview(step: step, total: totalSteps, image: data))
+                        }
                     }
 
                     guard producedAny else {
@@ -201,7 +210,41 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
         let dir = directory ?? FileManager.default.temporaryDirectory
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let dest = dir.appending(component: "\(UUID().uuidString).png")
+        let cgImage = try makeCGImage(decoded)
+        guard let dst = CGImageDestinationCreateWithURL(
+            dest as CFURL, UTType.png.identifier as CFString, 1, nil
+        ) else {
+            throw FluxDiffusionError.pngEncodingFailed(dest)
+        }
+        CGImageDestinationAddImage(dst, cgImage, nil)
+        guard CGImageDestinationFinalize(dst) else {
+            throw FluxDiffusionError.pngEncodingFailed(dest)
+        }
+        return dest
+    }
 
+    /// Encodes a decoded latent to PNG bytes **in memory** (no disk write) — the
+    /// representation carried by ``ImageGenerationEvent/preview(step:total:image:)``.
+    static func encodePNGData(_ decoded: MLXArray) throws -> Data {
+        let cgImage = try makeCGImage(decoded)
+        let mutable = NSMutableData()
+        guard let dst = CGImageDestinationCreateWithData(
+            mutable as CFMutableData, UTType.png.identifier as CFString, 1, nil
+        ) else {
+            throw FluxDiffusionError.pngEncodingFailed(URL(fileURLWithPath: "(memory)"))
+        }
+        CGImageDestinationAddImage(dst, cgImage, nil)
+        guard CGImageDestinationFinalize(dst) else {
+            throw FluxDiffusionError.pngEncodingFailed(URL(fileURLWithPath: "(memory)"))
+        }
+        return mutable as Data
+    }
+
+    /// Shared `[1, H, W, 3]` float32 [0,1] → `CGImage` conversion. Follows the
+    /// vendored `StableDiffusion/Image.swift` layout (RGBA, `noneSkipLast`,
+    /// `byteOrder32Big`) so both PNG paths and the in-memory preview encode emit
+    /// identical-format bytes.
+    static func makeCGImage(_ decoded: MLXArray) throws -> CGImage {
         // [1, H, W, 3] → [H, W, 3] uint8, padded to RGBA (CGContext requires 4 bytes/pixel).
         let rgb = clip(decoded.squeezed() * 255, min: MLXArray(Int32(0)), max: MLXArray(Int32(255)))
             .asType(DType.uint8)
@@ -222,18 +265,9 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
                 bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
                     | CGBitmapInfo.byteOrder32Big.rawValue
             ), let cgImage = ctx.makeImage() else {
-                throw FluxDiffusionError.pngEncodingFailed(dest)
+                throw FluxDiffusionError.pngEncodingFailed(URL(fileURLWithPath: "(memory)"))
             }
-            guard let dst = CGImageDestinationCreateWithURL(
-                dest as CFURL, UTType.png.identifier as CFString, 1, nil
-            ) else {
-                throw FluxDiffusionError.pngEncodingFailed(dest)
-            }
-            CGImageDestinationAddImage(dst, cgImage, nil)
-            guard CGImageDestinationFinalize(dst) else {
-                throw FluxDiffusionError.pngEncodingFailed(dest)
-            }
-            return dest
+            return cgImage
         }
     }
 }
@@ -294,6 +328,18 @@ private final class RealFluxRun: DiffusionRun {
         eval(xt)
         lastLatent = xt
         return true
+    }
+
+    func previewImage() throws -> Data {
+        guard let latent = lastLatent else {
+            throw FluxDiffusionError.noLatentsProduced
+        }
+        // Extra unpack + VAE decode of the *current* intermediate latent — pure
+        // GPU cost on top of the denoise the loop is already doing (see the
+        // protocol's `previewImage()` doc).
+        let unpacked = FluxDiffusionBackend.unpackLatents(latent, height: height, width: width)
+        let decoded = generator.decode(xt: unpacked)
+        return try FluxDiffusionBackend.encodePNGData(decoded)
     }
 
     func finishImage(to outputDirectory: URL?) throws -> URL {
