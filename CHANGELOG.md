@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.4](https://github.com/roryford/manifold-mlx/compare/v0.2.3...v0.2.4) (2026-06-17)
+
+
+### Features
+
+* **mlx:** emit live .preview denoising events from diffusion backends ([#8](https://github.com/roryford/manifold-mlx/issues/8)) ([#37](https://github.com/roryford/manifold-mlx/issues/37)) ([5e62b91](https://github.com/roryford/manifold-mlx/commit/5e62b91f34219b46cb0f7e2dc7b347d22485783c))
+* **mlx:** injectable TextToImageGenerator seam for diffusion generate/stop coverage ([#29](https://github.com/roryford/manifold-mlx/issues/29)) ([#34](https://github.com/roryford/manifold-mlx/issues/34)) ([7616090](https://github.com/roryford/manifold-mlx/commit/76160902e93f5d5694f003829e07c2a8bd4fb1bc))
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.53.0 ([#38](https://github.com/roryford/manifold-mlx/issues/38)) ([62fb12c](https://github.com/roryford/manifold-mlx/commit/62fb12cf0aecc4ec3c5cb268f5178079084bcca4))
+* **mlx:** detect top-level vision_config in requiresVLMFactory ([#22](https://github.com/roryford/manifold-mlx/issues/22)) ([#24](https://github.com/roryford/manifold-mlx/issues/24)) ([9c4865f](https://github.com/roryford/manifold-mlx/commit/9c4865f70cfcfd46bfb24e427c2c0ea2bea16127))
+* **mlx:** skip Gemma4-MoE smoke test before model load to avoid integration hang ([#26](https://github.com/roryford/manifold-mlx/issues/26)) ([#35](https://github.com/roryford/manifold-mlx/issues/35)) ([e989772](https://github.com/roryford/manifold-mlx/commit/e989772c0b3229aed350f64c31ae3c1d9e10ffda))
+
 ## [0.2.3](https://github.com/roryford/manifold-mlx/compare/v0.2.2...v0.2.3) (2026-06-15)
 
 ### Highlights
