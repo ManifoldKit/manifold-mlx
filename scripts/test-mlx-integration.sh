@@ -157,6 +157,23 @@ if [[ -n "${MLX_VLM_TEST_MODEL:-}" ]]; then
     echo "==> Forwarding MLX_VLM_TEST_MODEL=$MLX_VLM_TEST_MODEL to the VLM gate experiment"
 fi
 
+# Optional hybrid (recurrent+attention) selector for the per-layer hybrid cache
+# reuse test. Like MLX_VLM_TEST_MODEL, forwarded only when set so default runs
+# stay green without a downloaded hybrid checkpoint (e.g. Falcon-H1 / Qwen3-Next).
+if [[ -n "${MLX_HYBRID_TEST_MODEL:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Add $ENV_PATH:MLX_HYBRID_TEST_MODEL string $MLX_HYBRID_TEST_MODEL" "$RUNFILE" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Set $ENV_PATH:MLX_HYBRID_TEST_MODEL $MLX_HYBRID_TEST_MODEL" "$RUNFILE"
+    echo "==> Forwarding MLX_HYBRID_TEST_MODEL=$MLX_HYBRID_TEST_MODEL to the hybrid cache reuse test"
+fi
+
+# Optional FLUX diffusion model directory for the FLUX image-generation tests.
+# Forwarded only when set; default runs skip diffusion without a local snapshot.
+if [[ -n "${MANIFOLD_FLUX_MODEL:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Add $ENV_PATH:MANIFOLD_FLUX_MODEL string $MANIFOLD_FLUX_MODEL" "$RUNFILE" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Set $ENV_PATH:MANIFOLD_FLUX_MODEL $MANIFOLD_FLUX_MODEL" "$RUNFILE"
+    echo "==> Forwarding MANIFOLD_FLUX_MODEL=$MANIFOLD_FLUX_MODEL to the FLUX diffusion tests"
+fi
+
 echo "==> Running tests (xcodebuild test-without-building): -only-testing $ONLY_TESTING_RUN"
 xcodebuild test-without-building \
     -xctestrun "$RUNFILE" \
