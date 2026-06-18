@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.5](https://github.com/roryford/manifold-mlx/compare/v0.2.4...v0.2.5) (2026-06-18)
+
+### Highlights
+
+**Tracks ManifoldKit 0.54** ([#41](https://github.com/roryford/manifold-mlx/issues/41)) — the core pin moves to `.upToNextMinor(from: "0.54.0")`, building against the 0.54 release: real GGUF Jinja chat-template rendering, a server-side HTTP/SSE transport for the MCP host, and continued pre-1.0 Contract API hardening (backend-neutral `InferenceError.idleTimeout`, the `streamsToolCallArgumentDeltas` capability-alias deprecation, and documented `EmbeddingBackend` guarantees). No source changes required — bump and rebuild.
+
 ## [0.2.4](https://github.com/roryford/manifold-mlx/compare/v0.2.3...v0.2.4) (2026-06-17)
 
 
