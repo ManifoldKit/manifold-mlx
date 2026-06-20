@@ -51,6 +51,22 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
     private var _generator: (any DiffusionGenerator)?
     private var _isGenerating = false
     private var _stopRequested = false
+    private var _loadedQuantizedWeights = false
+
+    /// `true` when the most recent ``loadModel(from:)`` consumed an already
+    /// pre-quantized 4-bit diffusers bundle (each component's `config.json`
+    /// carried a `quantization` block, or its safetensors shipped
+    /// `.scales`/`.biases`), so the in-memory `quantize(...)` pass was skipped.
+    ///
+    /// Surfaced from `FluxSwift`'s `Flux1Schnell.loadedQuantizedWeights`. Lets
+    /// the gated integration test prove that pointing `MANIFOLD_FLUX_MODEL` at a
+    /// 4-bit bundle actually exercises the pre-quantized branch (rather than the
+    /// fp16-then-quantize path) on constrained hardware. Always `false` for the
+    /// `metadata.json` (flux.swift single-bundle) path and for the test-only
+    /// injected-generator initializer.
+    public var loadedQuantizedWeights: Bool {
+        withLock { _loadedQuantizedWeights }
+    }
 
     public init() {}
 
@@ -81,6 +97,10 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
     public func loadModel(from url: URL) async throws {
         // Try flux.swift's own quantized format first (requires metadata.json).
         let textToImage: any TextToImageGenerator
+        // Whether the diffusers branch detected pre-quantized 4-bit weights and
+        // skipped the in-memory quantize pass. The metadata.json single-bundle
+        // path manages its own quantization internally, so it stays false here.
+        var loadedQuantized = false
         let quantizedMetadata = url.appending(component: "metadata.json")
         if FileManager.default.fileExists(atPath: quantizedMetadata.path) {
             let flux = try await FLUX.loadQuantized(
@@ -93,16 +113,22 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
             }
             textToImage = ttig
         } else {
-            // Standard FP16 / BF16 diffusers layout.
+            // Standard diffusers multi-folder layout — fp16/bf16 OR a complete
+            // pre-quantized 4-bit bundle. `loadWeights` auto-detects 4-bit
+            // components (config.json `quantization` block or `.scales`
+            // tensors); when it does, `quantize` MUST stay false so the loader
+            // does not re-quantize already-QuantizedLinear layers.
             let hub = HubApi(useOfflineMode: true)
             let model = try Flux1Schnell(hub: hub, modelDirectory: url)
             try model.loadWeights(from: url, dtype: .float16)
+            loadedQuantized = model.loadedQuantizedWeights
             textToImage = model
         }
 
         withLock {
             _generator = RealFluxGenerator(generator: textToImage)
             _stopRequested = false
+            _loadedQuantizedWeights = loadedQuantized
         }
     }
 
@@ -176,6 +202,7 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
             let had = _generator != nil
             _generator = nil
             _stopRequested = false
+            _loadedQuantizedWeights = false
             return had
         }
         if wasLoaded {
