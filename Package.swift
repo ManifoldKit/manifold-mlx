@@ -15,6 +15,7 @@ let package = Package(
     ],
     products: [
         .library(name: "ManifoldMLX", targets: ["ManifoldMLX"]),
+        .executable(name: "manifold-tools-mlx", targets: ["manifold-tools-mlx"]),
     ],
     dependencies: [
         // The ManifoldBackendTestKit / ManifoldTestSupport products this package
@@ -118,6 +119,24 @@ let package = Package(
                 .product(name: "ManifoldTestSupport", package: "ManifoldKit"),
             ],
             path: "Tests/ManifoldMLXIntegrationTests"
+        ),
+        // Tool-calling validation CLI: reuses ManifoldKit's published
+        // ManifoldTools library (its bundled scenarios + reference toolset)
+        // and drives them against a real MLX model. Needs Apple Silicon +
+        // Metal + a local model dir to actually run; compiles everywhere.
+        .executableTarget(
+            name: "manifold-tools-mlx",
+            dependencies: [
+                .product(name: "ManifoldTools", package: "ManifoldKit"),
+                .product(name: "ManifoldInference", package: "ManifoldKit"),
+                "ManifoldMLX",
+            ],
+            path: "Sources/manifold-tools-mlx",
+            exclude: ["README.md"],
+            resources: [
+                .copy("Fixtures/manifold-tools"),
+                .copy("Scenarios/built-in"),
+            ]
         ),
     ]
 )
