@@ -109,8 +109,12 @@ struct CLI {
 /// `manifold-tools` directory bundled as a `.copy` resource with this CLI.
 func resolveFixturesRoot(_ override: URL?) -> URL? {
     if let override { return override }
-    return Bundle.module.url(forResource: "manifold-tools", withExtension: nil, subdirectory: "Fixtures")
-        ?? Bundle.module.url(forResource: "manifold-tools", withExtension: nil)
+    // `.copy("Fixtures/manifold-tools")` flattens to `<bundle>/manifold-tools`
+    // (SwiftPM copies the leaf directory, dropping the `Fixtures/` prefix), so
+    // the unqualified lookup is the real one. The `subdirectory:` form is a
+    // defensive fallback in case SwiftPM's layout ever changes.
+    return Bundle.module.url(forResource: "manifold-tools", withExtension: nil)
+        ?? Bundle.module.url(forResource: "manifold-tools", withExtension: nil, subdirectory: "Fixtures")
 }
 
 /// Loads the bundled scenarios.
@@ -122,8 +126,10 @@ func resolveFixturesRoot(_ override: URL?) -> URL? {
 /// bundle resource and load them via the public `ScenarioLoader.load(from:)`
 /// so the CLI is self-contained regardless of CWD.
 func loadScenarios() throws -> [Scenario] {
-    if let bundled = Bundle.module.url(forResource: "built-in", withExtension: nil, subdirectory: "Scenarios")
-        ?? Bundle.module.url(forResource: "built-in", withExtension: nil) {
+    // `.copy("Scenarios/built-in")` flattens to `<bundle>/built-in`, so the
+    // unqualified lookup resolves; the `subdirectory:` form is a fallback.
+    if let bundled = Bundle.module.url(forResource: "built-in", withExtension: nil)
+        ?? Bundle.module.url(forResource: "built-in", withExtension: nil, subdirectory: "Scenarios") {
         return try ScenarioLoader.load(from: bundled)
     }
     // Fall back to the CWD-relative loader (works when run from a ManifoldKit checkout).

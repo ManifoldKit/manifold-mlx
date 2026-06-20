@@ -3,10 +3,22 @@
 A tool-calling validation CLI that runs ManifoldKit's bundled tool-calling
 scenarios against a **real MLX model** (e.g. Gemma) on Apple Silicon.
 
-It reuses ManifoldKit's published `ManifoldTools` library product — its bundled
-scenarios (`ScenarioLoader.loadBuiltIn()`), reference toolset, `ScenarioRunner`,
-and JSONL `TranscriptLogger`. This target only adds the MLX backend wiring and a
-small argument parser; no ManifoldKit core changes are needed.
+It reuses ManifoldKit's published `ManifoldTools` library product — its reference
+toolset, `ScenarioRunner`, and JSONL `TranscriptLogger`. This target only adds
+the MLX backend wiring and a small argument parser; no ManifoldKit core changes
+are needed.
+
+The scenario JSONs and the `read_file` / `list_dir` fixture tree are **vendored
+copies** bundled as `.copy` resources and loaded via `Bundle.module` +
+`ScenarioLoader.load(from:)`, because `ScenarioLoader.loadBuiltIn()` resolves its
+directory relative to the current working directory (a ManifoldKit checkout) and
+is unusable from this companion repo.
+
+> **Vendored-copy drift warning.** `Sources/manifold-tools-mlx/Scenarios/built-in/`
+> and `Sources/manifold-tools-mlx/Fixtures/manifold-tools/` are hand-copied from
+> ManifoldKit's `Sources/ManifoldTools/Scenarios/built-in/` and
+> `Tests/Fixtures/manifold-tools/` respectively. They can drift when it changes its
+> scenarios or fixtures. Re-sync them by hand on each ManifoldKit pin bump.
 
 ## Usage
 
