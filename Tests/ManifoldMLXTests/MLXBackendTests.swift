@@ -340,6 +340,27 @@ final class MLXBackendTests: XCTestCase {
         XCTAssertTrue(MLXModelProbe.requiresVLMFactory(at: url))
     }
 
+    func test_requiresVLMFactory_gemma3nWithVisionAndAudioConfig_returnsFalse() throws {
+        // #56: the full mlx-community/gemma-3n-E4B-it-4bit checkpoint ships
+        //   { "model_type": "gemma3n", "vision_config": {…}, "audio_config": {…},
+        //     "text_config": { "model_type": "gemma3n_text", … } }
+        // but mlx-swift-lm only implements the gemma3n *text* decoder, registered
+        // on the LLM factory (`LLMTypeRegistry`). The VLM factory has no `gemma3n`
+        // creator, so routing here would throw
+        // `ModelFactoryError.unsupportedModelType("gemma3n")` at load. The probe
+        // must keep gemma3n on the LLM factory despite the vision/audio signals.
+        // Sabotage check: removing the `llmFactoryOnlyMultimodalArchitectures`
+        // guard makes this fail (the top-level `vision_config` branch fires).
+        let url = try writeTempConfig([
+            "model_type": "gemma3n",
+            "architectures": ["Gemma3nForConditionalGeneration"],
+            "vision_config": ["hidden_size": 2048],
+            "audio_config": ["hidden_size": 1536],
+            "text_config": ["model_type": "gemma3n_text"],
+        ])
+        XCTAssertFalse(MLXModelProbe.requiresVLMFactory(at: url))
+    }
+
     func test_requiresVLMFactory_qwen2VLModelTypeWithoutVisionConfig_returnsTrue() throws {
         // A lossy conversion may strip the `vision_config` block while leaving the
         // `_vl` model_type intact. The architecture-name fallback must still route
