@@ -3,6 +3,7 @@ import XCTest
 import ManifoldMLX
 @_spi(Testing) import ManifoldMLX
 import ManifoldInference
+import FluxSwift
 
 /// Unit tests for ``FluxDiffusionBackend``.
 ///
@@ -177,6 +178,70 @@ final class FluxDiffusionBackendTests: XCTestCase {
             // expected
         }
         XCTAssertFalse(backend.isLoaded)
+    }
+
+    // MARK: - Pre-quantized weight detection (config.json quantization block)
+    //
+    // These exercise the MLX-LLM-style detection that lets FluxModelCore load
+    // already-4-bit weights and SKIP the in-memory quantize(...) pass. The
+    // detection reader is pure (filesystem + JSON), so it runs without Metal or
+    // a real FLUX snapshot — the actual QuantizedLinear application requires a
+    // full model load and is covered only by the gated integration test.
+
+    private func makeComponentDir(configJSON: String?) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appending(component: "FluxQuantCfg-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if let configJSON {
+            try Data(configJSON.utf8).write(to: dir.appending(component: "config.json"))
+        }
+        return dir
+    }
+
+    func test_quantizationConfig_present_parsesBitsAndGroupSize() throws {
+        let dir = try makeComponentDir(
+            configJSON: #"{"quantization": {"group_size": 64, "bits": 4}}"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let cfg = FluxModelCore.quantizationConfig(in: dir)
+        XCTAssertNotNil(cfg, "A config.json with a quantization block must be detected")
+        XCTAssertEqual(cfg?.bits, 4)
+        XCTAssertEqual(cfg?.groupSize, 64)
+    }
+
+    func test_quantizationConfig_8bitGroup128_parsed() throws {
+        let dir = try makeComponentDir(
+            configJSON: #"{"quantization": {"group_size": 128, "bits": 8}}"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let cfg = FluxModelCore.quantizationConfig(in: dir)
+        XCTAssertEqual(cfg?.bits, 8)
+        XCTAssertEqual(cfg?.groupSize, 128)
+    }
+
+    func test_quantizationConfig_noBlock_returnsNil_fp16Path() throws {
+        // A config.json WITHOUT a quantization block must read as fp16 (nil) so
+        // the loader keeps the backward-compatible fp16-then-quantize behaviour.
+        let dir = try makeComponentDir(configJSON: #"{"_class_name": "FluxTransformer2DModel"}"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertNil(FluxModelCore.quantizationConfig(in: dir))
+    }
+
+    func test_quantizationConfig_missingFile_returnsNil() throws {
+        let dir = try makeComponentDir(configJSON: nil)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertNil(FluxModelCore.quantizationConfig(in: dir),
+                     "No config.json → fp16 path (nil)")
+    }
+
+    func test_quantizationConfig_defaultsWhenKeysOmitted() throws {
+        // An empty quantization block still signals "quantized", defaulting to
+        // the standard 4-bit / group-64 used elsewhere in the loader.
+        let dir = try makeComponentDir(configJSON: #"{"quantization": {}}"#)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cfg = FluxModelCore.quantizationConfig(in: dir)
+        XCTAssertEqual(cfg?.bits, 4)
+        XCTAssertEqual(cfg?.groupSize, 64)
     }
 
     // MARK: - Error descriptions

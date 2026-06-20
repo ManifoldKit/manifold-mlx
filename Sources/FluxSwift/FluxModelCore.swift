@@ -105,35 +105,88 @@ public class FluxModelCore: @unchecked Sendable {
         self.clipEncoder = CLIPEncoder(modelConfiguration.clipConfig)
     }
     
+    /// Set to `true` after ``loadWeights(from:dtype:)`` when the on-disk weights
+    /// were already quantized (each component's `config.json` carried a
+    /// `quantization` block, or the safetensors shipped `.scales`/`.biases`
+    /// tensors). When this is `true`, the caller MUST NOT run the in-memory
+    /// `quantize(...)` pass in `FluxConfiguration` — the layers are already
+    /// `QuantizedLinear` and re-quantizing would corrupt them.
+    ///
+    /// Mirrors the MLX-LLM convention where a checkpoint declares its
+    /// quantization in `config.json` so the loader skips fp16-then-quantize.
+    public private(set) var loadedQuantized = false
+
     public func loadWeights(from directory: URL, dtype: DType = .float16) throws {
         self.modelDirectory = directory
         logger.info("Loading weights from: \(directory.path)")
         logger.info("Using dtype: \(dtype)")
-        
-        try loadTransformerWeights(from: directory.appending(path: "transformer"), dtype: dtype)
-        try loadVAEWeights(from: directory.appending(path: "vae"), dtype: dtype)
-        try loadT5EncoderWeights(from: directory.appending(path: "text_encoder_2"), dtype: dtype)
-        try loadCLIPEncoderWeights(from: directory.appending(path: "text_encoder"), dtype: dtype)
-        
-        logger.info("All weights loaded successfully")
+
+        var anyQuantized = false
+        anyQuantized = try loadTransformerWeights(from: directory.appending(path: "transformer"), dtype: dtype) || anyQuantized
+        anyQuantized = try loadVAEWeights(from: directory.appending(path: "vae"), dtype: dtype) || anyQuantized
+        anyQuantized = try loadT5EncoderWeights(from: directory.appending(path: "text_encoder_2"), dtype: dtype) || anyQuantized
+        anyQuantized = try loadCLIPEncoderWeights(from: directory.appending(path: "text_encoder"), dtype: dtype) || anyQuantized
+
+        self.loadedQuantized = anyQuantized
+        logger.info("All weights loaded successfully (quantized: \(anyQuantized))")
     }
-    
-    
-    private func loadTransformerWeights(from directory: URL, dtype: DType) throws {
+
+    /// Reads an MLX-LLM-style `quantization` block from a component's
+    /// `config.json`, e.g. `{"quantization": {"group_size": 64, "bits": 4}}`.
+    /// Returns `nil` when no such block exists (fp16 checkpoint).
+    private func quantizationConfig(in directory: URL) -> (groupSize: Int, bits: Int)? {
+        Self.quantizationConfig(in: directory)
+    }
+
+    /// Static, testable form of the `config.json` quantization-block reader.
+    /// Mirrors the MLX-LLM convention: a checkpoint declares its quantization in
+    /// `config.json` so loaders can skip the fp16-then-quantize round-trip.
+    public static func quantizationConfig(in directory: URL) -> (groupSize: Int, bits: Int)? {
+        let configURL = directory.appending(path: "config.json")
+        guard let data = try? Data(contentsOf: configURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let quant = json["quantization"] as? [String: Any] else {
+            return nil
+        }
+        let groupSize = (quant["group_size"] as? Int) ?? QuantizationUtils.defaultGroupSize
+        let bits = (quant["bits"] as? Int) ?? QuantizationUtils.defaultBits
+        return (groupSize, bits)
+    }
+
+    /// Converts the matching `Linear` layers of `module` into `QuantizedLinear`
+    /// so the pre-quantized `.weight`/`.scales`/`.biases` tensors land in the
+    /// right slots when `update(parameters:)` runs. A layer is quantized only if
+    /// the loaded weight dict carries a `<path>.scales` tensor for it — this
+    /// matches `applySelectiveQuantization` used by the metadata.json path and
+    /// keeps non-quantized layers (e.g. small embeddings) in fp16.
+    private func applyPreQuantization(
+        to module: Module, weights: [String: MLXArray], groupSize: Int, bits: Int
+    ) {
+        quantize(model: module, filter: { path, m in
+            guard m is Linear, weights["\(path).scales"] != nil else { return nil }
+            return (groupSize: groupSize, bits: bits)
+        })
+    }
+
+    /// Returns `true` when the component was loaded as pre-quantized weights.
+    @discardableResult
+    private func loadTransformerWeights(from directory: URL, dtype: DType) throws -> Bool {
         var transformerWeights = [String: MLXArray]()
-        
+
         guard let enumerator = FileManager.default.enumerator(
             at: directory, includingPropertiesForKeys: nil
         ) else {
             throw FluxError.weightsNotFound("Unable to enumerate transformer directory: \(directory)")
         }
-        
+
         for case let url as URL in enumerator {
             if url.pathExtension == "safetensors" {
                 let w = try loadArrays(url: url)
                 for (key, value) in w {
                     let newKey = FLUX.remapWeightKey(key)
-                    if value.dtype != .bfloat16 {
+                    // .scales/.biases of quantized layers are uint32/half — never
+                    // re-cast them through dtype; only fp32/fp16 fp weights.
+                    if value.dtype != .bfloat16 && value.dtype != .uint32 {
                         transformerWeights[newKey] = value.asType(dtype)
                     } else {
                         transformerWeights[newKey] = value
@@ -141,38 +194,57 @@ public class FluxModelCore: @unchecked Sendable {
                 }
             }
         }
+
+        let isQuantized = quantizationConfig(in: directory) != nil
+            || transformerWeights.keys.contains { $0.hasSuffix(".scales") }
+        if isQuantized {
+            let (groupSize, bits) = quantizationConfig(in: directory)
+                ?? (QuantizationUtils.defaultGroupSize, QuantizationUtils.defaultBits)
+            applyPreQuantization(to: transformer, weights: transformerWeights, groupSize: groupSize, bits: bits)
+        }
         transformer.update(parameters: ModuleParameters.unflattened(transformerWeights))
+        return isQuantized
     }
-    
-    private func loadVAEWeights(from directory: URL, dtype: DType) throws {
+
+    @discardableResult
+    private func loadVAEWeights(from directory: URL, dtype: DType) throws -> Bool {
         let vaeURL = directory.appending(path: "diffusion_pytorch_model.safetensors")
         var vaeWeights = try loadArrays(url: vaeURL)
-        
+
         for (key, value) in vaeWeights {
-            if value.dtype != .bfloat16 {
+            if value.dtype != .bfloat16 && value.dtype != .uint32 {
                 vaeWeights[key] = value.asType(dtype)
             }
             if value.ndim == 4 {
                 vaeWeights[key] = value.transposed(0, 2, 3, 1)
             }
         }
+        let isQuantized = quantizationConfig(in: directory) != nil
+            || vaeWeights.keys.contains { $0.hasSuffix(".scales") }
+        if isQuantized {
+            let (groupSize, bits) = quantizationConfig(in: directory)
+                ?? (QuantizationUtils.defaultGroupSize, QuantizationUtils.defaultBits)
+            applyPreQuantization(to: vae, weights: vaeWeights, groupSize: groupSize, bits: bits)
+        }
         vae.update(parameters: ModuleParameters.unflattened(vaeWeights))
+        return isQuantized
     }
-    
-    private func loadT5EncoderWeights(from directory: URL, dtype: DType) throws {
+
+    @discardableResult
+    private func loadT5EncoderWeights(from directory: URL, dtype: DType) throws -> Bool {
         var weights = [String: MLXArray]()
-        
+
         guard let enumerator = FileManager.default.enumerator(
             at: directory, includingPropertiesForKeys: nil
         ) else {
             throw FluxError.weightsNotFound("Unable to enumerate T5 encoder directory: \(directory)")
         }
-        
+
         for case let url as URL in enumerator {
             if url.pathExtension == "safetensors" {
                 let w = try loadArrays(url: url)
                 for (key, value) in w {
-                    if value.dtype != .bfloat16 {
+                    if value.dtype != .bfloat16 && value.dtype != .uint32 {
                         weights[key] = value.asType(dtype)
                     } else {
                         weights[key] = value
@@ -180,26 +252,43 @@ public class FluxModelCore: @unchecked Sendable {
                 }
             }
         }
-        
+
         if let relativeAttentionBias = weights[
             "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"
         ] {
             weights["relative_attention_bias.weight"] = relativeAttentionBias
         }
-        
+
+        let isQuantized = quantizationConfig(in: directory) != nil
+            || weights.keys.contains { $0.hasSuffix(".scales") }
+        if isQuantized {
+            let (groupSize, bits) = quantizationConfig(in: directory)
+                ?? (QuantizationUtils.defaultGroupSize, QuantizationUtils.defaultBits)
+            applyPreQuantization(to: t5Encoder, weights: weights, groupSize: groupSize, bits: bits)
+        }
         t5Encoder.update(parameters: ModuleParameters.unflattened(weights))
+        return isQuantized
     }
-    
-    private func loadCLIPEncoderWeights(from directory: URL, dtype: DType) throws {
+
+    @discardableResult
+    private func loadCLIPEncoderWeights(from directory: URL, dtype: DType) throws -> Bool {
         let weightsURL = directory.appending(path: "model.safetensors")
         var weights = try loadArrays(url: weightsURL)
-        
+
         for (key, value) in weights {
-            if value.dtype != .bfloat16 {
+            if value.dtype != .bfloat16 && value.dtype != .uint32 {
                 weights[key] = value.asType(dtype)
             }
         }
+        let isQuantized = quantizationConfig(in: directory) != nil
+            || weights.keys.contains { $0.hasSuffix(".scales") }
+        if isQuantized {
+            let (groupSize, bits) = quantizationConfig(in: directory)
+                ?? (QuantizationUtils.defaultGroupSize, QuantizationUtils.defaultBits)
+            applyPreQuantization(to: clipEncoder, weights: weights, groupSize: groupSize, bits: bits)
+        }
         clipEncoder.update(parameters: ModuleParameters.unflattened(weights))
+        return isQuantized
     }
     
     

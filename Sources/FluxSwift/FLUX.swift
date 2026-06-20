@@ -146,19 +146,24 @@ public class Flux1Schnell: FLUX, TextToImageGenerator, FLUXComponents, @unchecke
     self.modelDirectory = directory
     try core.loadWeights(from: directory, dtype: dtype)
   }
-  
+
+  /// `true` when ``loadWeights(from:dtype:)`` detected and applied
+  /// pre-quantized on-disk weights, so the caller must skip the in-memory
+  /// `quantize(...)` pass. See `FluxModelCore.loadedQuantized`.
+  public var loadedQuantizedWeights: Bool { core.loadedQuantized }
+
   public func conditionText(prompt: String) -> (MLXArray, MLXArray) {
     core.conditionText(prompt: prompt)
   }
-  
+
   public func ensureLoaded() {
     core.ensureLoaded()
   }
-  
+
   public func decode(xt: MLXArray) -> MLXArray {
     core.decode(xt: xt)
   }
-  
+
   public func detachedDecoder() -> ImageDecoder {
     core.detachedDecoder()
   }
@@ -209,19 +214,24 @@ public class Flux1Dev: FLUX, TextToImageGenerator, FLUXComponents, @unchecked Se
     self.modelDirectory = directory
     try core.loadWeights(from: directory, dtype: dtype)
   }
-  
+
+  /// `true` when ``loadWeights(from:dtype:)`` detected and applied
+  /// pre-quantized on-disk weights, so the caller must skip the in-memory
+  /// `quantize(...)` pass. See `FluxModelCore.loadedQuantized`.
+  public var loadedQuantizedWeights: Bool { core.loadedQuantized }
+
   public func conditionText(prompt: String) -> (MLXArray, MLXArray) {
     core.conditionText(prompt: prompt)
   }
-  
+
   public func ensureLoaded() {
     core.ensureLoaded()
   }
-  
+
   public func decode(xt: MLXArray) -> MLXArray {
     core.decode(xt: xt)
   }
-  
+
   public func detachedDecoder() -> ImageDecoder {
     core.detachedDecoder()
   }
