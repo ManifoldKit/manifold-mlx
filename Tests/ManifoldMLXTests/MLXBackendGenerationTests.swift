@@ -1133,4 +1133,72 @@ final class MLXBackendGenerationTests: XCTestCase {
         let valueKeyPath = \SendableLMInput.value
         _ = (initializer, valueKeyPath)
     }
+
+    // MARK: - test_generate_emitsUsageEvent_fromStreamInfo
+
+    /// Verifies that a `.usage(TokenUsage)` event is emitted when the stream
+    /// yields a `.info(GenerateCompletionInfo)` element (the real MLX path).
+    func test_generate_emitsUsageEvent_fromStreamInfo() async throws {
+        let mock = MockMLXModelContainer()
+        let completionInfo = GenerateCompletionInfo(
+            promptTokenCount: 7,
+            generationTokenCount: 3,
+            promptTime: 0.1,
+            generationTime: 0.2
+        )
+        mock.generationsToYield = [
+            .chunk("Hello"),
+            .chunk(" world"),
+            .info(completionInfo),
+        ]
+
+        let backend = MLXBackend()
+        backend._inject(mock)
+
+        let stream = try backend.generate(
+            prompt: "hi",
+            systemPrompt: nil,
+            config: GenerationConfig()
+        )
+
+        var usageEvent: TokenUsage?
+        for try await event in stream.events {
+            if case .usage(let usage) = event {
+                usageEvent = usage
+            }
+        }
+
+        let usage = try XCTUnwrap(usageEvent, "Stream must emit a .usage event")
+        XCTAssertEqual(usage.promptTokens, 7)
+        XCTAssertEqual(usage.completionTokens, 3)
+    }
+
+    // MARK: - test_generate_emitsUsageEvent_fallback
+
+    /// Verifies that a `.usage(TokenUsage)` event is still emitted when the
+    /// stream does NOT yield a `.info` element (mock / legacy path).
+    func test_generate_emitsUsageEvent_fallback() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["A", "B", "C"]
+
+        let backend = MLXBackend()
+        backend._inject(mock)
+
+        let stream = try backend.generate(
+            prompt: "hi",
+            systemPrompt: nil,
+            config: GenerationConfig()
+        )
+
+        var usageEvent: TokenUsage?
+        for try await event in stream.events {
+            if case .usage(let usage) = event {
+                usageEvent = usage
+            }
+        }
+
+        let usage = try XCTUnwrap(usageEvent, "Stream must emit a .usage event even without .info")
+        XCTAssertGreaterThan(usage.completionTokens, 0,
+            "completionTokens must be positive when tokens were generated")
+    }
 }

@@ -63,6 +63,10 @@ import ManifoldInference
         /// `true` when the loop completed without throwing and was not cancelled —
         /// callers may snapshot the prompt cache for next-turn reuse.
         let completedNormally: Bool
+        /// Completion metadata emitted by the stream's `.info` element, when present.
+        let completionInfo: GenerateCompletionInfo?
+        /// Number of chunks the stream emitted (prompt-token fallback when `.info` absent).
+        let completionTokenCount: Int
     }
 
     /// Outcome of a `generate(...)` call.
@@ -228,6 +232,20 @@ import ManifoldInference
                 nil
             }
 
+        let usage: TokenUsage
+        if let info = result.completionInfo {
+            usage = TokenUsage(
+                promptTokens: info.promptTokenCount,
+                completionTokens: info.generationTokenCount
+            )
+        } else {
+            usage = TokenUsage(
+                promptTokens: prepared.generationInput.promptTokenIds.count,
+                completionTokens: result.completionTokenCount
+            )
+        }
+        continuation.yield(.usage(usage))
+
         return GenerateResult(run: result, snapshotInputs: snapshotInputs)
     }
 
@@ -286,6 +304,7 @@ import ManifoldInference
         let outputLimit = config.maxOutputTokens
         var outputTokenCount = 0
         var isFirstToken = true
+        var capturedCompletionInfo: GenerateCompletionInfo?
 
         // Build the unified output-parsing chain. Order is `[tool, thinking]`:
         // tool tags are stripped first, then the thinking transform re-scans the
@@ -340,6 +359,10 @@ import ManifoldInference
         var completionTokenCount = 0
         outer: for await generation in mlxStream {
             if Task.isCancelled { break }
+            if let info = generation.info {
+                capturedCompletionInfo = info
+                continue
+            }
             guard let text = generation.chunk else { continue }
 
             for finalEvent in session.ingest(text) {
@@ -387,6 +410,10 @@ import ManifoldInference
         }
 
         Self.logger.debug("MLXGenerationDriver run finished")
-        return RunResult(completedNormally: !Task.isCancelled)
+        return RunResult(
+            completedNormally: !Task.isCancelled,
+            completionInfo: capturedCompletionInfo,
+            completionTokenCount: completionTokenCount
+        )
     }
 }

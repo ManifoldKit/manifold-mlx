@@ -98,8 +98,8 @@ final class MLXBackendEventOrderParityTests: XCTestCase {
 
         XCTAssertEqual(
             tags,
-            ["token", "token", "token"],
-            "Cold-start completion must emit exactly three .token events in order, no .kvCacheReuse"
+            ["token", "token", "token", "usage"],
+            "Cold-start completion must emit exactly three .token events followed by .usage, no .kvCacheReuse"
         )
 
         // Pin the payload order too — token values must match the mock's
@@ -248,15 +248,12 @@ final class MLXBackendEventOrderParityTests: XCTestCase {
             "Breaking out of the consumer loop must tear the stream down and clear isGenerating")
     }
 
-    /// Positively pins the "no phantom terminal events" contract that the
-    /// early-break test above cannot: drains the stream PAST every token and
-    /// asserts the driver never appends a `.usage` or `.generationCompleted`
-    /// event after the consumed tokens for a plain completion. (`GenerationEvent`
-    /// has no `stopReason` case today — see
-    /// MLXBackendGenerationTests.test_stopReason_currentlyCollapsesToDone — so
-    /// there is no stopReason event to assert against; this test will need
-    /// updating if/when one is added.)
-    func test_simpleCompletion_emitsNoUsageOrCompletionEventsAfterTokens() async throws {
+    /// Pins the terminal-event contract for a plain completion: the driver must
+    /// emit exactly one `.usage` event after all tokens, and no
+    /// `.generationCompleted` event. (`GenerationEvent` has no `stopReason`
+    /// case today — see
+    /// MLXBackendGenerationTests.test_stopReason_currentlyCollapsesToDone.)
+    func test_simpleCompletion_emitsUsageEventAfterTokens() async throws {
         let mock = MockMLXModelContainer()
         mock.tokensToYield = ["a", "b", "c"]
 
@@ -274,11 +271,11 @@ final class MLXBackendEventOrderParityTests: XCTestCase {
         let events = try await collectEvents(from: stream)
         let tags = events.map(tag)
 
-        XCTAssertEqual(tags, ["token", "token", "token"],
-            "A plain completion must emit only its tokens, with no trailing terminal events; got: \(tags)")
-        XCTAssertFalse(tags.contains("usage"),
-            "Driver must not synthesise a .usage event after the consumed tokens; got: \(tags)")
+        XCTAssertEqual(tags, ["token", "token", "token", "usage"],
+            "A plain completion must emit its tokens followed by a single .usage event; got: \(tags)")
+        XCTAssertEqual(tags.filter { $0 == "usage" }.count, 1,
+            "Exactly one .usage event must be emitted; got: \(tags)")
         XCTAssertFalse(tags.contains("generationCompleted"),
-            "Driver must not synthesise a .generationCompleted event after the consumed tokens; got: \(tags)")
+            "Driver must not synthesise a .generationCompleted event; got: \(tags)")
     }
 }
