@@ -1,0 +1,45 @@
+name: Slow Tests (Nightly)
+
+# Runs the RUN_SLOW_TESTS-gated unit tests on a nightly schedule.
+# These tests exercise the LocalBackendContractRunner's real-generation
+# scenarios, which require RUN_SLOW_TESTS=1 to unsuppress. They do NOT
+# require a real MLX model or Apple Silicon — the slow gate exists purely
+# to keep wall-clock CI time bounded on per-PR runs.
+#
+# If the fixture at Tests/Fixtures/backends/mlx/streaming/simple-prompt/
+# expected.jsonl diverges from the current model output, re-record it:
+#   RUN_SLOW_TESTS=1 scripts/record-fixture.sh mlx streaming/simple-prompt
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  slow-tests:
+    runs-on: macos-15
+    env:
+      RUN_SLOW_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select newest Xcode 26 toolchain
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)/Contents/Developer"
+          swift --version
+      - name: Cache SwiftPM dependency material
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.swiftpm
+            .build/artifacts
+            .build/checkouts
+            .build/repositories
+          key: ${{ runner.os }}-swiftpm-${{ hashFiles('Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftpm-
+      - name: Build
+        run: swift build
+      - name: Test (slow lane)
+        run: swift test --filter ManifoldMLXTests

@@ -1,0 +1,10 @@
+{"event":"token","text":"Hello"}
+{"event":"token","text":"!"}
+{"event":"token","text":" How"}
+{"event":"token","text":" can"}
+{"event":"token","text":" I"}
+{"event":"token","text":" help"}
+{"event":"token","text":" you"}
+{"event":"token","text":" today"}
+{"event":"token","text":"?"}
+{"event":"usage","prompt":3,"completion":9}
