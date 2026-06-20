@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.7](https://github.com/roryford/manifold-mlx/compare/v0.2.6...v0.2.7) (2026-06-20)
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.56.0 ([#51](https://github.com/roryford/manifold-mlx/issues/51)) ([53758d9](https://github.com/roryford/manifold-mlx/commit/53758d9ed5b9432e8b672b81b882ab2903317d7f))
+
 ## [0.2.6](https://github.com/roryford/manifold-mlx/compare/v0.2.5...v0.2.6) (2026-06-20)
 
 
