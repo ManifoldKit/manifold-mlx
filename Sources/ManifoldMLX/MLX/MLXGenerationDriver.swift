@@ -54,7 +54,8 @@ import ManifoldInference
         supportsStreaming: true,
         isRemote: false,
         supportsThinking: true,
-        sharesMLXProcessResources: true
+        sharesMLXProcessResources: true,
+        rendersFullPrompt: true
     )
 
     /// Outcome of a `run(...)` call.
