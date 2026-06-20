@@ -136,6 +136,45 @@ func loadScenarios() throws -> [Scenario] {
     return try ScenarioLoader.loadBuiltIn()
 }
 
+/// Builds a `ToolRegistry` containing ONLY the tools named in
+/// `scenario.requiredTools`.
+///
+/// Advertising all six reference tools to every scenario overloads small models
+/// (the toolset itself warns that results degrade beyond ~5 tools) and makes
+/// tool-dispatch outcomes uninterpretable — you can't tell whether a miss is the
+/// model failing the task or drowning in irrelevant tool definitions. Scoping
+/// the registry to each scenario's declared dependency removes that confound.
+///
+/// A scenario with an empty `requiredTools` (e.g. `structured-json-extraction`)
+/// correctly yields a registry with zero tools — that's the intended no-tool
+/// behavior. An unrecognized tool name is logged to stderr and skipped rather
+/// than trapping, so a future scenario referencing a tool this CLI doesn't know
+/// degrades gracefully instead of crashing the whole run.
+@MainActor
+func makeRegistry(for scenario: Scenario, fixturesRoot: URL) -> ToolRegistry {
+    let registry = ToolRegistry()
+    for name in scenario.requiredTools {
+        switch name {
+        case "now":
+            registry.register(NowTool.makeExecutor())
+        case "calc":
+            registry.register(CalcTool.makeExecutor())
+        case "read_file":
+            registry.register(ReadFileTool.makeExecutor(root: fixturesRoot))
+        case "list_dir":
+            registry.register(ListDirTool.makeExecutor(root: fixturesRoot))
+        case "sample_repo_search":
+            registry.register(SampleRepoSearchTool.makeExecutor(root: fixturesRoot))
+        case "http_get_fixture":
+            registry.register(HttpGetFixtureTool.makeExecutor())
+        default:
+            FileHandle.standardError.write(Data(
+                "manifold-tools-mlx: scenario '\(scenario.id)' requires unknown tool '\(name)' — skipping\n".utf8))
+        }
+    }
+    return registry
+}
+
 @MainActor
 func runCLI() async -> Int32 {
     let argv = Array(CommandLine.arguments.dropFirst())
@@ -188,14 +227,6 @@ func runCLI() async -> Int32 {
     print("Logging to \(logger.destination.path)")
     print("Fixtures root: \(fixturesRoot.path)")
 
-    let registry = ToolRegistry()
-    registry.register(NowTool.makeExecutor())
-    registry.register(CalcTool.makeExecutor())
-    registry.register(ReadFileTool.makeExecutor(root: fixturesRoot))
-    registry.register(ListDirTool.makeExecutor(root: fixturesRoot))
-    registry.register(SampleRepoSearchTool.makeExecutor(root: fixturesRoot))
-    registry.register(HttpGetFixtureTool.makeExecutor())
-
     // Load the MLX model once and reuse it across every scenario.
     let backend = MLXBackend()
     let modelURL = URL(fileURLWithPath: modelPath, isDirectory: true)
@@ -211,6 +242,9 @@ func runCLI() async -> Int32 {
     var allPassed = true
     for scenario in filtered {
         print("\n── \(scenario.id) via mlx ──")
+        // Build a fresh registry scoped to just this scenario's required tools,
+        // so we advertise only what the task needs (not all six) to the model.
+        let registry = makeRegistry(for: scenario, fixturesRoot: fixturesRoot)
         do {
             let runner = ScenarioRunner(backend: backend, registry: registry, logger: logger)
             let outcome = try await runner.run(scenario)
