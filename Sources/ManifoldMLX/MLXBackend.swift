@@ -86,7 +86,8 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 supportsKVCachePersistence: enableKVCacheReuse,
                 supportsThinking: true,
                 supportsVision: _supportsVision,
-                sharesMLXProcessResources: true
+                sharesMLXProcessResources: true,
+                rendersFullPrompt: true
             )
         }
     }
