@@ -188,6 +188,27 @@ public struct FluxConfiguration: Sendable {
     try factory(hub, self, configuration) as? ImageToImageGenerator
   }
 
+  // Expected on-disk layout (diffusers multi-folder). The SAME globs serve both
+  // the fp16 and the pre-quantized 4-bit bundle — only the tensor contents and
+  // an optional per-component `config.json` differ:
+  //
+  //   <root>/
+  //     model_index.json
+  //     transformer/      *.safetensors  [+ config.json with {"quantization": {"bits":4,"group_size":64}}]
+  //     text_encoder/     model.safetensors                  (CLIP)
+  //     text_encoder_2/   *.safetensors  [+ config.json]     (T5-XXL)
+  //     vae/              diffusion_pytorch_model.safetensors [+ config.json]
+  //     tokenizer/        vocab.json, merges.txt, ...
+  //     tokenizer_2/      tokenizer.json, tokenizer_config.json, ...
+  //
+  // Pre-quantized detection (FluxModelCore.loadWeights): a component is loaded
+  // as 4-bit when its `config.json` declares a `quantization` block (MLX-LLM
+  // convention) OR its safetensors carry `.scales`/`.biases` tensors. In that
+  // case the loader converts the matching Linear layers to QuantizedLinear
+  // BEFORE update(parameters:) and the in-memory quantize() pass is skipped.
+  //
+  // flux.swift's own single-bundle format (metadata.json + transformer/, vae/
+  // chunked safetensors) is a separate path handled by FLUX.loadQuantized.
   public static let flux1Schnell = FluxConfiguration(
     id: "black-forest-labs/FLUX.1-schnell",
     files: [
@@ -198,6 +219,9 @@ public struct FluxConfiguration: Sendable {
       .tokenizer2: "tokenizer_2/*",
       .vaeWeights: "vae/diffusion_pytorch_model.safetensors",
       .modelIndex: "model_index.json",
+      // config.json files (optional; present for pre-quantized bundles) are
+      // downloaded by the broader `**/*.json` matcher used in FLUX.loadQuantized;
+      // for diffusers snapshots they sit alongside each component's weights.
     ],
     defaultParameters: { EvaluateParameters() },
     factory: { hub, fluxConfiguration, loadConfiguration in
@@ -215,7 +239,11 @@ public struct FluxConfiguration: Sendable {
         applyLoraWeights(to: flux.transformer, loraWeight: loraWeight)
       }
 
-      if loadConfiguration.quantize {
+      // Skip the in-memory quantize pass when the on-disk weights were already
+      // quantized (config.json carried a `quantization` block, or the
+      // safetensors shipped .scales/.biases). Re-quantizing QuantizedLinear
+      // layers would corrupt them. See FluxModelCore.loadedQuantized.
+      if loadConfiguration.quantize && !flux.loadedQuantizedWeights {
         quantize(model: flux.clipEncoder, filter: { k, m in m is Linear })
         quantize(model: flux.t5Encoder, filter: { k, m in m is Linear })
         quantize(
@@ -256,7 +284,9 @@ public struct FluxConfiguration: Sendable {
         applyLoraWeights(to: flux.transformer, loraWeight: loraWeight)
       }
 
-      if loadConfiguration.quantize {
+      // Skip the in-memory quantize pass when the on-disk weights were already
+      // quantized — see the flux1Schnell factory above.
+      if loadConfiguration.quantize && !flux.loadedQuantizedWeights {
         quantize(model: flux.clipEncoder, filter: { k, m in m is Linear })
         quantize(model: flux.t5Encoder, filter: { k, m in m is Linear })
         quantize(
