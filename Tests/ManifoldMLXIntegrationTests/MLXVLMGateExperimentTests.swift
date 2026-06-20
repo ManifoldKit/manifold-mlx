@@ -114,18 +114,38 @@ final class MLXVLMGateExperimentTests: XCTestCase {
 
     private func runTurn(
         on backend: MLXBackend,
-        prompt: String
+        prompt: String,
+        timeoutSeconds: Double = 90
     ) async throws -> [GenerationEvent] {
-        let stream = try backend.generate(
-            prompt: prompt,
-            systemPrompt: nil,
-            config: deterministicConfig
-        )
-        var events: [GenerationEvent] = []
-        for try await event in stream.events {
-            events.append(event)
+        // Qwen2-VL two-turn hang guard (#26): the stream iteration has been observed
+        // to stall indefinitely on certain VLM architectures. The task group races the
+        // collect loop against a deadline; the losing branch is cancelled.
+        let config = deterministicConfig
+        return try await withThrowingTaskGroup(of: [GenerationEvent].self) { group in
+            group.addTask {
+                let stream = try backend.generate(
+                    prompt: prompt,
+                    systemPrompt: nil,
+                    config: config
+                )
+                var events: [GenerationEvent] = []
+                for try await event in stream.events {
+                    events.append(event)
+                }
+                return events
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
+                throw RunTurnTimeoutError(seconds: timeoutSeconds)
+            }
+            defer { group.cancelAll() }
+            return try await group.next() ?? []
         }
-        return events
+    }
+
+    private struct RunTurnTimeoutError: Error, CustomStringConvertible {
+        let seconds: Double
+        var description: String { "runTurn timed out after \(seconds)s — possible VLM stream hang (#26)" }
     }
 
     private func collectAssistantText(from events: [GenerationEvent]) -> String {
