@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.6](https://github.com/roryford/manifold-mlx/compare/v0.2.5...v0.2.6) (2026-06-20)
+
+
+### Features
+
+* **mlx:** emit .usage(TokenUsage) at end-of-turn ([#44](https://github.com/roryford/manifold-mlx/issues/44)) ([#49](https://github.com/roryford/manifold-mlx/issues/49)) ([6b45259](https://github.com/roryford/manifold-mlx/commit/6b4525942120d0475202e2b7b3815dc62b0e03ce))
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.55.0 ([#45](https://github.com/roryford/manifold-mlx/issues/45)) ([86ace57](https://github.com/roryford/manifold-mlx/commit/86ace574aafb8cd44188f2243f03d1b258d93d4a))
+* **ci+tests:** wire slow-tests lane, golden fixture, and integration hang guards ([#50](https://github.com/roryford/manifold-mlx/issues/50)) ([0eb267a](https://github.com/roryford/manifold-mlx/commit/0eb267aba855e71bc15c1030eedf221e4c9036b3))
+
 ## [0.2.5](https://github.com/roryford/manifold-mlx/compare/v0.2.4...v0.2.5) (2026-06-18)
 
 ### Highlights
