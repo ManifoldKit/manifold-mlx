@@ -248,6 +248,76 @@ final class MLXChatMessageEncoderTests: XCTestCase {
         // ...and the decoded image lands in its images array.
         XCTAssertEqual(chat[1].images.count, 1, "the single .image part must produce one Chat image")
     }
+
+    // MARK: - System-message normalization (issue #57)
+
+    /// Regression for #57: with a system prompt set **and** a `system` turn
+    /// replayed inside the tool-aware history, the assembled array must still
+    /// expose exactly one system message at index 0. Qwen 3.x / Mistral v0.3
+    /// chat templates hard-crash ("System message must be at the beginning.")
+    /// otherwise — and a misplaced/duplicate system turn aborts before any
+    /// generation runs.
+    func test_buildChatMessages_systemMessageStaysFirstWithToolsAndHistory() throws {
+        let history = [
+            // The orchestrator replays the full transcript, system turn first.
+            ToolAwareHistoryEntry(role: "system", content: "history system turn"),
+            ToolAwareHistoryEntry(role: "user", content: "what's 2+2?"),
+            ToolAwareHistoryEntry(
+                role: "assistant",
+                content: "",
+                toolCalls: [ToolCall(id: "c1", toolName: "calc", arguments: "{\"expr\":\"2+2\"}")]
+            ),
+            ToolAwareHistoryEntry(role: "tool", content: "4", toolCallId: "c1")
+        ]
+        let (_, messages) = try MLXChatMessageEncoder.buildChatMessages(
+            prompt: "ignored",
+            effectiveSystemPrompt: "You are helpful.\n\n<tools>[…]</tools>",
+            conversationHistory: [],
+            toolAwareHistory: history,
+            structuredHistory: nil,
+            dialect: .qwen25
+        )
+        // Exactly one system message, and it is first.
+        let systemIndices = messages.indices.filter { messages[$0]["role"] == "system" }
+        XCTAssertEqual(systemIndices, [0], "there must be exactly one system message, at index 0")
+        // Both system fragments are merged into the leading message.
+        let systemContent = try XCTUnwrap(messages[0]["content"])
+        XCTAssertTrue(systemContent.contains("You are helpful."))
+        XCTAssertTrue(systemContent.contains("<tools>"))
+        XCTAssertTrue(systemContent.contains("history system turn"))
+        // Remaining turns keep their order and roles.
+        XCTAssertEqual(
+            messages.dropFirst().map { $0["role"] },
+            ["user", "assistant", "tool"]
+        )
+    }
+
+    /// Plain conversation history carrying a stray mid-array `system` turn is
+    /// also folded up to index 0 (covers the non-tool path).
+    func test_buildChatMessages_foldsMidArraySystemTurnFromPlainHistory() throws {
+        let (_, messages) = try MLXChatMessageEncoder.buildChatMessages(
+            prompt: "ignored",
+            effectiveSystemPrompt: "primary system",
+            conversationHistory: [
+                (role: "user", content: "hi"),
+                (role: "system", content: "stray system"),
+                (role: "assistant", content: "hello")
+            ],
+            toolAwareHistory: nil,
+            structuredHistory: nil,
+            dialect: .unknown
+        )
+        XCTAssertEqual(messages.first?["role"], "system")
+        XCTAssertEqual(
+            messages.filter { $0["role"] == "system" }.count,
+            1,
+            "stray system turn must be merged, not left mid-array"
+        )
+        let systemContent = try XCTUnwrap(messages[0]["content"])
+        XCTAssertTrue(systemContent.contains("primary system"))
+        XCTAssertTrue(systemContent.contains("stray system"))
+        XCTAssertEqual(messages.dropFirst().map { $0["role"] }, ["user", "assistant"])
+    }
 }
 
 /// Unit tests for the small thinking-marker resolution helper retained on `MLXBackend`.

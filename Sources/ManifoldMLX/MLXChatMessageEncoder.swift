@@ -52,7 +52,57 @@ import ManifoldInference
         } else {
             msgs.append(["role": "user", "content": prompt])
         }
-        return (chatMessages, msgs)
+        return (normalizeChatMessages(chatMessages), normalizeSystemMessages(msgs))
+    }
+
+    /// Guarantees the assembled `[[String: String]]` message array contains at
+    /// most one `system` message and that it sits at index 0.
+    ///
+    /// Several model families (Qwen 3.x, Mistral v0.3, …) ship Jinja chat
+    /// templates that hard-assert *"System message must be at the beginning"*
+    /// and that no second system turn appears mid-conversation. Our message
+    /// assembly can produce a leading `system` turn from
+    /// `effectiveSystemPrompt` **and** a second `system` turn carried inside the
+    /// conversation / tool-aware history (the orchestrator replays the full
+    /// transcript, system turn included). That misplaced or duplicate system
+    /// message crashes the template at render time, before any generation —
+    /// see issue #57.
+    ///
+    /// This collapses every `system` turn into a single message at index 0,
+    /// preserving relative order of the system fragments and dropping the now
+    /// promoted entries from their original positions. Non-system turns keep
+    /// their order. Qwen 2.5 (which tolerates the looser shape) is unaffected
+    /// because a single leading system message is valid for it too.
+    static func normalizeSystemMessages(_ messages: [[String: String]]) -> [[String: String]] {
+        let systemFragments = messages
+            .filter { $0["role"] == "system" }
+            .compactMap { $0["content"] }
+            .filter { !$0.isEmpty }
+        let nonSystem = messages.filter { $0["role"] != "system" }
+
+        guard !systemFragments.isEmpty else { return nonSystem }
+
+        let merged = systemFragments.joined(separator: "\n\n")
+        return [["role": "system", "content": merged]] + nonSystem
+    }
+
+    /// `Chat.Message` analogue of ``normalizeSystemMessages(_:)``: folds every
+    /// `.system` turn into a single leading message so the vision / structured
+    /// history path obeys the same "system message must be first" contract.
+    /// Image attachments only ride on user/assistant/tool turns, so collapsing
+    /// system turns never drops image inputs.
+    static func normalizeChatMessages(_ messages: [Chat.Message]?) -> [Chat.Message]? {
+        guard let messages else { return nil }
+        let systemFragments = messages
+            .filter { $0.role == .system }
+            .map(\.content)
+            .filter { !$0.isEmpty }
+        let nonSystem = messages.filter { $0.role != .system }
+
+        guard !systemFragments.isEmpty else { return nonSystem }
+
+        let merged = systemFragments.joined(separator: "\n\n")
+        return [.system(merged)] + nonSystem
     }
 
     /// Returns the Qwen 2.5 `<tools>…</tools>` block to append to the system
