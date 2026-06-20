@@ -40,6 +40,21 @@ import ManifoldInference
     private static let normalizedSupportedArchitectures: Set<String> =
         Set((supportedLMArchitectures.union(supportedVLMArchitectures)).map(normalizeArchitectureKey))
 
+    /// Reads the top-level `model_type` string from `config.json` at `url`.
+    /// Returns `nil` when the file is missing/unreadable or carries no
+    /// (non-empty) `model_type`.
+    static func readModelType(at url: URL) -> String? {
+        let configURL = url.appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: configURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let modelType = (json["model_type"] as? String)?
+                  .trimmingCharacters(in: .whitespacesAndNewlines),
+              !modelType.isEmpty else {
+            return nil
+        }
+        return modelType
+    }
+
     static func normalizeArchitectureKey(_ value: String) -> String {
         value.lowercased().unicodeScalars
             .filter { CharacterSet.alphanumerics.contains($0) }
@@ -100,10 +115,36 @@ import ManifoldInference
 
     /// Variant that accepts pre-computed capabilities to avoid re-reading
     /// `config.json` when the caller already ran ``ModelCapabilityProbe``.
+    /// `model_type` values that ship a multimodal (vision/audio) `config.json`
+    /// but whose only decoder in mlx-swift-lm lives on the **LLM** factory
+    /// (`LLMTypeRegistry`), not the VLM factory. These must never be routed to
+    /// `VLMModelFactory` — the VLM registry has no creator for them and would
+    /// throw `ModelFactoryError.unsupportedModelType` at load (see issue #56).
+    ///
+    /// `gemma3n`: the full `gemma-3n-E4B-it-4bit` checkpoint declares top-level
+    /// `vision_config` + `audio_config`, but mlx-swift-lm only implements the
+    /// text decoder (`Gemma3nTextModel` in `Libraries/MLXLLM/Models/Gemma3nText.swift`).
+    /// That model is purpose-built to load the VLM-shaped checkpoint as text-only:
+    /// `Gemma3nTextConfiguration` reads the nested `text_config`, and its
+    /// `sanitize(weights:)` remaps the `model.language_model.` weight prefix.
+    /// So the supported path is the LLM factory, despite the vision signals.
+    static let llmFactoryOnlyMultimodalArchitectures: Set<String> = [
+        normalizeArchitectureKey("gemma3n"),
+    ]
+
     public static func requiresVLMFactory(
         at url: URL,
         precomputedCapabilities capabilities: ModelCapabilities?
     ) -> Bool {
+        // Guard: architectures that look multimodal (vision_config / audio_config)
+        // but only have an LLM-factory decoder in mlx-swift-lm must bypass every
+        // VLM-routing signal below, including the capability-probe fast path —
+        // otherwise we hand them to a VLM factory that can't serve them. See
+        // `llmFactoryOnlyMultimodalArchitectures` and issue #56.
+        if let modelType = readModelType(at: url),
+           llmFactoryOnlyMultimodalArchitectures.contains(normalizeArchitectureKey(modelType)) {
+            return false
+        }
         // Fast path: vision was already detected by the caller's probe run.
         if let capabilities {
             if capabilities.supportsVision { return true }
