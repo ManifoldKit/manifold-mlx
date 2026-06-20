@@ -19,7 +19,7 @@ import FluxSwift
 ///
 /// fp16 FLUX.1-schnell is ~33.7 GB resident, so it cannot load on a 24 GB
 /// machine. A complete pre-quantized 4-bit bundle (~6–7 GB resident) can. Point
-/// `MANIFOLD_FLUX_MODEL` at such a bundle (see `Scripts/assemble-flux-4bit-bundle.sh`
+/// `MANIFOLD_FLUX_MODEL` at such a bundle (see `scripts/assemble-flux-4bit-bundle.sh`
 /// for how to assemble one) and `test_loadModel_4bitBundle_takesPreQuantizedBranch`
 /// asserts the loader actually took the pre-quantized branch
 /// (`loadedQuantizedWeights == true`) rather than the fp16-then-quantize path.
