@@ -6,6 +6,28 @@ import ManifoldTestSupport
 import FluxSwift
 import MLX
 import MLXNN
+#if canImport(Darwin)
+import Darwin
+#endif
+
+/// Current resident memory of this process, in bytes, via
+/// `mach_task_basic_info.resident_size` (the same Mach API a prior worker used
+/// for the memory-guard, see issue #39). Returns `nil` off Darwin.
+private func residentMemoryBytes() -> UInt64? {
+    #if canImport(Darwin)
+    var info = mach_task_basic_info()
+    var count = mach_msg_type_number_t(
+        MemoryLayout<mach_task_basic_info>.size / MemoryLayout<natural_t>.size)
+    let kr = withUnsafeMutablePointer(to: &info) {
+        $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+            task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+        }
+    }
+    return kr == KERN_SUCCESS ? info.resident_size : nil
+    #else
+    return nil
+    #endif
+}
 
 /// Metal-bound integration tests for ``FluxDiffusionBackend``.
 ///
@@ -149,6 +171,62 @@ final class FluxDiffusionIntegrationTests: XCTestCase {
         XCTAssertTrue(
             backend.loadedQuantizedWeights,
             "A complete pre-quantized 4-bit bundle must take the pre-quantized branch and skip the in-memory quantize pass.")
+    }
+
+    /// Issue #39 peak-memory regression guard. Loading a COMPLETE pre-quantized
+    /// 4-bit bundle must stay far below the fp16 ~33.7 GB resident: the validated
+    /// mflux 4-bit load peaked ~17 GB, so a 20 GB ceiling catches a regression
+    /// that silently reintroduces an fp16-then-quantize round-trip (which would
+    /// blow past 33 GB and OOM a 24 GB machine) without flaking on the real load.
+    ///
+    /// CI gating (this exact bug bit PR #66): like its sibling Metal tests this
+    /// must XCTSkip under plain `swift test`. `requireFluxModelURL()` already
+    /// skips when MANIFOLD_FLUX_MODEL is unset (the case on CI), but we ALSO
+    /// require the integration-target marker MANIFOLD_DISCOVER_LOCAL_MODELS=1
+    /// that scripts/test-mlx-integration.sh injects — the same belt-and-braces
+    /// guard `test_quantizedEmbedding_branch_convertsOnlyWhenScalesPresent` uses
+    /// so no `quantize`/`MLXArray` call runs without the Xcode-compiled metallib.
+    func test_loadModel_4bitBundle_peakMemoryUnderCeiling() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["MANIFOLD_DISCOVER_LOCAL_MODELS"] == "1",
+            "Metal-bound; run via scripts/test-mlx-integration.sh")
+        let url = try requireFluxModelURL()
+
+        // Only meaningful for a complete pre-quantized 4-bit bundle. fp16 and the
+        // metadata.json single-bundle layouts have different peaks, so skip them
+        // rather than fail.
+        let hasMetadataJson = FileManager.default.fileExists(
+            atPath: url.appending(component: "metadata.json").path)
+        try XCTSkipIf(hasMetadataJson, "metadata.json single-bundle layout — not the pre-quantized diffusers branch.")
+        try XCTSkipUnless(
+            FluxBundleLayout.validate(url) == .complete,
+            "MANIFOLD_FLUX_MODEL is not a complete diffusers bundle.")
+        try XCTSkipUnless(
+            FluxModelCore.quantizationConfig(in: url.appending(path: "transformer")) != nil,
+            "MANIFOLD_FLUX_MODEL is an fp16 bundle — point it at a 4-bit bundle.")
+
+        // 20 GB ceiling: comfortably below fp16 ~33.7 GB, above the ~17 GB the
+        // validated mflux 4-bit load peaked at.
+        let ceilingBytes: UInt64 = 20 * 1024 * 1024 * 1024
+
+        let baseline = residentMemoryBytes()
+        let backend = FluxDiffusionBackend()
+        try await backend.loadModel(from: url)
+        defer { backend.unloadModel() }
+        XCTAssertTrue(backend.isLoaded)
+        XCTAssertTrue(
+            backend.loadedQuantizedWeights,
+            "A 4-bit bundle must take the pre-quantized branch; an fp16-then-quantize round-trip would blow the memory ceiling.")
+
+        let peak = try XCTUnwrap(residentMemoryBytes(), "Resident memory unavailable")
+        let peakGB = Double(peak) / 1_073_741_824.0
+        if let baseline {
+            let deltaGB = Double(Int64(peak) - Int64(baseline)) / 1_073_741_824.0
+            print("[mem-guard] baseline \(Double(baseline) / 1_073_741_824.0) GB -> peak \(peakGB) GB (delta \(deltaGB) GB)")
+        }
+        XCTAssertLessThan(
+            peak, ceilingBytes,
+            "Loading a 4-bit bundle peaked at \(peakGB) GB resident, over the 20 GB ceiling — likely a regression to the fp16-then-quantize path (issue #39).")
     }
 
     func test_generate_realSnapshot_writesPNG() async throws {

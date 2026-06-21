@@ -43,16 +43,22 @@
 #
 # Usage
 # -----
-#   # 1. Assemble a bundle (downloads + quantizes; needs Python + mlx + Apple Silicon):
-#   scripts/assemble-flux-4bit-bundle.sh /path/to/flux-schnell-4bit
+#   # 1. Assemble a bundle. This drives the real quantizer
+#   #    scripts/quantize-flux-4bit.py (needs Python + mlx + Apple Silicon).
+#   #    Reuse an existing fp16 snapshot to skip the ~34 GB download:
+#   FLUX_FP16_SRC=/path/to/fp16 scripts/assemble-flux-4bit-bundle.sh /path/to/flux-schnell-4bit
+#   #    ...or omit FLUX_FP16_SRC to download black-forest-labs/FLUX.1-schnell.
 #
 #   # 2. Run the gated integration tests against it:
 #   MANIFOLD_FLUX_MODEL=/path/to/flux-schnell-4bit scripts/test-mlx-integration.sh
 #
-# The quantization step below is a REFERENCE recipe. Producing real 4-bit
-# weights requires Apple Silicon + MLX and ~34 GB of transient disk for the fp16
-# source download. If you already have a complete 4-bit bundle, just skip to
-# step 2 and point MANIFOLD_FLUX_MODEL at it.
+# The quantization is performed by scripts/quantize-flux-4bit.py, which streams
+# component-by-component / tensor-by-tensor so peak RSS stays a few hundred MB
+# even for the ~24 GB fp16 transformer (24 GB-RAM safe). Producing real 4-bit
+# weights requires Apple Silicon + MLX and ~34 GB transient disk for the fp16
+# source (unless FLUX_FP16_SRC points at one already on disk). If you already
+# have a complete 4-bit bundle, skip to step 2 and point MANIFOLD_FLUX_MODEL at
+# it.
 set -euo pipefail
 
 DEST="${1:-}"
@@ -102,35 +108,51 @@ if verify_bundle "$DEST" 2>/dev/null; then
     exit 0
 fi
 
-cat >&2 <<EOF
-==> $DEST is not (yet) a complete bundle.
+# Real quantizer: scripts/quantize-flux-4bit.py does the fp16 -> 4-bit pass
+# component-by-component / tensor-by-tensor so peak RSS stays a few hundred MB
+# on a 24 GB box (see its header). Drive it from here so callers have one entry
+# point. Set FLUX_FP16_SRC to an already-downloaded fp16 snapshot to skip the
+# ~34 GB download. The per-component config.json `quantization` block it writes
+# is what FluxModelCore.quantizationConfig(in:) reads to take the pre-quantized
+# branch and skip the in-memory quantize pass.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+QUANTIZER="$SCRIPT_DIR/quantize-flux-4bit.py"
+PYTHON="${PYTHON:-python3}"
+FP16_SRC="${FLUX_FP16_SRC:-}"
 
-To assemble one you need: Apple Silicon, Python 3, and \`pip install mlx
-mlx-lm huggingface_hub\`, plus ~34 GB transient disk for the fp16 source.
+echo "==> $DEST is not (yet) a complete bundle; running the 4-bit quantizer." >&2
 
-Reference recipe (run manually; this script intentionally does NOT auto-
-download tens of GB):
+if [[ ! -f "$QUANTIZER" ]]; then
+    echo "ERROR: quantizer not found at $QUANTIZER" >&2
+    exit 1
+fi
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
+    echo "ERROR: '$PYTHON' not found. Install Python 3 and \`pip install mlx" >&2
+    echo "       safetensors huggingface_hub\`. Set PYTHON=... for a venv." >&2
+    exit 1
+fi
+if ! "$PYTHON" -c "import mlx.core, safetensors, huggingface_hub" 2>/dev/null; then
+    echo "ERROR: missing Python deps. Run:" >&2
+    echo "         $PYTHON -m pip install mlx safetensors huggingface_hub" >&2
+    echo "       (Apple Silicon required for mlx.)" >&2
+    exit 1
+fi
 
-  # a. Pull the fp16 diffusers snapshot (transformer/vae/text_encoder/
-  #    text_encoder_2/tokenizer/tokenizer_2/model_index.json):
-  huggingface-cli download black-forest-labs/FLUX.1-schnell \\
-      --local-dir "$DEST.fp16"
+if [[ -n "$FP16_SRC" ]]; then
+    echo "==> using fp16 source: $FP16_SRC (no download)" >&2
+    "$PYTHON" "$QUANTIZER" --src "$FP16_SRC" --out "$DEST"
+else
+    echo "==> no FLUX_FP16_SRC set; the quantizer will download" >&2
+    echo "    black-forest-labs/FLUX.1-schnell (~34 GB transient). Ctrl-C to" >&2
+    echo "    abort and re-run with FLUX_FP16_SRC=<snapshot> to reuse a download." >&2
+    "$PYTHON" "$QUANTIZER" --out "$DEST"
+fi
 
-  # b. Quantize the memory-dominant components to 4-bit (group_size 64) with
-  #    MLX, writing each component's safetensors + a config.json carrying:
-  #        {"quantization": {"group_size": 64, "bits": 4}}
-  #    for: transformer/  and  text_encoder_2/   (T5-XXL).
-  #    Keep vae/ and text_encoder/ (CLIP) as fp16 — they are small.
-  #    See mzbac/flux.swift and the MLX quantize() docs for the exact API.
-
-  # c. Copy the unmodified tokenizer/, tokenizer_2/, and model_index.json
-  #    from "$DEST.fp16" into "$DEST".
-
-  # d. Re-run this script to verify the assembled layout:
-  #        $0 "$DEST"
-
-The per-component config.json \`quantization\` block is what FluxModelCore reads
-to take the pre-quantized branch and skip the in-memory quantize pass — see
-FluxModelCore.quantizationConfig(in:).
-EOF
+echo "==> verifying assembled bundle layout ..."
+if verify_bundle "$DEST"; then
+    echo "==> $DEST is a complete 4-bit FLUX bundle."
+    echo "    Run: MANIFOLD_FLUX_MODEL=$DEST scripts/test-mlx-integration.sh"
+    exit 0
+fi
+echo "ERROR: quantizer ran but $DEST is still incomplete (see MISSING above)." >&2
 exit 1
