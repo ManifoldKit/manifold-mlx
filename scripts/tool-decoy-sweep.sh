@@ -95,7 +95,7 @@ for model in "$@"; do
     # Don't let a non-zero exit (assertion failure) abort the sweep.
     set +e
     summary="$("$BIN" --model "$model" --scenario "$SCENARIO" \
-      --extra-tools "$n" --output "$log" "${fixtures_args[@]}" 2>&2 \
+      --extra-tools "$n" --output "$log" "${fixtures_args[@]}" \
       | grep '^SUMMARY ')"
     set -e
     # SUMMARY extra_tools=N passed=X/Y clean=A/Y precision=P recall=R f1=F decoy_calls=K scored=S
@@ -127,5 +127,5 @@ for model in "$@"; do
 done
 
 echo
-echo "(clean = passed AND no decoy called; see SUMMARY lines on stderr for precision/recall/decoy_calls)"
+echo "(clean = passed AND no decoy called; see precision/recall/decoy_calls in SUMMARY above)"
 echo "Transcripts: $OUT_DIR/<model>.n<N>.jsonl"
