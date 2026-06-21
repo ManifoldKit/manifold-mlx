@@ -244,6 +244,101 @@ final class FluxDiffusionBackendTests: XCTestCase {
         XCTAssertEqual(cfg?.groupSize, 64)
     }
 
+    // MARK: - Bundle-layout detection (issue #39)
+    //
+    // Pure filesystem checks over tiny SYNTHETIC directories (empty placeholder
+    // files, no real weights). They cover the required-files wiring for a
+    // complete diffusers bundle and the detection of the incomplete argmax
+    // single-file shape — without any assets, MLX, or Metal.
+
+    /// Builds a synthetic bundle: every entry is a relative path created as an
+    /// empty file (directories are made implicitly).
+    private func makeSyntheticBundle(_ relativePaths: [String]) throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appending(component: "FluxBundle-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        for rel in relativePaths {
+            let fileURL = root.appending(path: rel)
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: fileURL)
+        }
+        return root
+    }
+
+    /// The minimal set of files a complete diffusers bundle must carry.
+    private static let completeBundleFiles: [String] = [
+        "model_index.json",
+        "transformer/diffusion_pytorch_model.safetensors",
+        "vae/diffusion_pytorch_model.safetensors",
+        "text_encoder/model.safetensors",
+        "text_encoder_2/model-00001-of-00002.safetensors",
+        "text_encoder_2/model-00002-of-00002.safetensors",
+        "tokenizer/vocab.json",
+        "tokenizer_2/tokenizer.json",
+    ]
+
+    func test_bundleLayout_complete_isComplete() throws {
+        let root = try makeSyntheticBundle(Self.completeBundleFiles)
+        defer { try? FileManager.default.removeItem(at: root) }
+        XCTAssertEqual(FluxBundleLayout.validate(root), .complete)
+        XCTAssertTrue(FluxBundleLayout.isCompleteBundle(root))
+    }
+
+    func test_bundleLayout_argmaxStyle_missingT5AndTokenizers_isIncomplete() throws {
+        // The argmax single-file shape: transformer + VAE only, no T5, no
+        // tokenizers, no model_index.json.
+        let root = try makeSyntheticBundle([
+            "transformer/diffusion_pytorch_model.safetensors",
+            "vae/diffusion_pytorch_model.safetensors",
+        ])
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        guard case let .incompleteArgmaxStyle(missing) = FluxBundleLayout.validate(root) else {
+            return XCTFail("Transformer-present-but-T5-absent must read as incompleteArgmaxStyle")
+        }
+        XCTAssertTrue(missing.contains("text_encoder_2"))
+        XCTAssertTrue(missing.contains("tokenizer"))
+        XCTAssertTrue(missing.contains("tokenizer_2"))
+        XCTAssertFalse(FluxBundleLayout.isCompleteBundle(root))
+    }
+
+    func test_bundleLayout_emptyDirectory_isNotABundle() throws {
+        let root = try makeSyntheticBundle([])
+        defer { try? FileManager.default.removeItem(at: root) }
+        guard case .notABundle = FluxBundleLayout.validate(root) else {
+            return XCTFail("An empty directory is not a FLUX bundle")
+        }
+    }
+
+    func test_bundleLayout_missingOneTokenizer_reportsItMissing() throws {
+        // A bundle complete except for tokenizer_2 must NOT be .complete and
+        // must enumerate the single missing piece.
+        let files = Self.completeBundleFiles.filter { !$0.hasPrefix("tokenizer_2/") }
+        let root = try makeSyntheticBundle(files)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        guard case let .incompleteArgmaxStyle(missing) = FluxBundleLayout.validate(root) else {
+            return XCTFail("Missing tokenizer_2 must be incomplete (transformer present)")
+        }
+        XCTAssertEqual(missing, ["tokenizer_2"])
+    }
+
+    func test_bundleLayout_transformerNeedsSafetensors_notJustFolder() throws {
+        // A transformer folder with a non-safetensors file present does not
+        // count — the loader globs *.safetensors.
+        let files = Self.completeBundleFiles
+            .filter { !$0.hasPrefix("transformer/") }
+            + ["transformer/config.json"]
+        let root = try makeSyntheticBundle(files)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        guard case let .notABundle(missing) = FluxBundleLayout.validate(root) else {
+            return XCTFail("No transformer *.safetensors → notABundle")
+        }
+        XCTAssertTrue(missing.contains("transformer"))
+    }
+
     // MARK: - Error descriptions
 
     func test_errorDescription_notLoaded_mentionsLoadModel() {
