@@ -11,6 +11,10 @@ import Foundation
 /// - `.qwen25` — Qwen 2.5 / Qwen 3 format: tools injected as a
 ///   `<tools>…</tools>` JSON block appended to the system message; model
 ///   emits `<tool_call>{"name":"…","arguments":{…}}</tool_call>`.
+/// - `.llama` — Llama 3.x format: tools injected as a JSON list with the
+///   official "respond with a JSON object" instruction; model emits a
+///   `<|python_tag|>{"name":…,"parameters":…}` block (or a bare
+///   `{"name":…,"parameters":…}` JSON object).
 /// - `.unknown` — no recognised tool dialect; tool calling is a no-op.
 public enum MLXToolDialect: Equatable, Sendable {
     /// Qwen 2.5 / Qwen 3 tool-call format.
@@ -21,6 +25,19 @@ public enum MLXToolDialect: Equatable, Sendable {
     /// The model responds with one or more `<tool_call>…</tool_call>` blocks,
     /// each containing a JSON object with `"name"` and `"arguments"` keys.
     case qwen25
+
+    /// Llama 3.x tool-call format.
+    ///
+    /// Tool definitions are serialised as a JSON list and appended to the
+    /// system message with Llama's "you have access to the following
+    /// functions … respond with a JSON for a function call" instruction. The
+    /// model emits the call either prefixed with the `<|python_tag|>` special
+    /// token or as a bare top-level JSON object, with `"name"` and
+    /// `"parameters"` keys (Llama uses `parameters`, not Qwen's `arguments`).
+    /// Without this injection Llama-3.2 never produces a parseable tool call —
+    /// it narrates the call as prose or invents its own `<tool>…</tool>`
+    /// wrapper (issue #59).
+    case llama
 
     /// No recognised tool dialect — tool calling is disabled for this model.
     case unknown
@@ -35,7 +52,8 @@ public enum MLXToolDialect: Equatable, Sendable {
     /// - Parameter url: The model directory URL (same one passed to
     ///   `MLXBackend.loadModel(from:plan:)`).
     /// - Returns: `.qwen25` when `config.json` reports `model_type == "qwen2"`
-    ///   or `"qwen3"`; `.unknown` otherwise.
+    ///   or `"qwen3"`; `.llama` when it reports `"llama"` / `"mllama"`;
+    ///   `.unknown` otherwise.
     public static func detect(at url: URL) -> MLXToolDialect {
         let configURL = url.appendingPathComponent("config.json")
         guard let data = try? Data(contentsOf: configURL),
@@ -52,6 +70,16 @@ public enum MLXToolDialect: Equatable, Sendable {
         // qwen3 / qwen3_* are also compatible with the same prompt format.
         if modelType.hasPrefix("qwen2") || modelType.hasPrefix("qwen3") {
             return .qwen25
+        }
+
+        // Llama 3.x (`model_type == "llama"`) and the multimodal Llama 3.2
+        // vision checkpoints (`"mllama"`) share the `<|python_tag|>` + JSON
+        // tool-call format. Llama 2 predates tool calling but uses the same
+        // `model_type`, so the prefix match is intentionally broad — a Llama 2
+        // checkpoint simply won't emit calls, which is the same no-op outcome
+        // as `.unknown`.
+        if modelType.hasPrefix("llama") || modelType.hasPrefix("mllama") {
+            return .llama
         }
 
         return .unknown

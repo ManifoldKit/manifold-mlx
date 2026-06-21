@@ -105,14 +105,40 @@ import ManifoldInference
         return [.system(merged)] + nonSystem
     }
 
-    /// Returns the Qwen 2.5 `<tools>…</tools>` block to append to the system
-    /// prompt, or `nil` when the dialect doesn't use this mechanism or the
-    /// caller supplied no tools.
+    /// Returns the tool-definition block to append to the system prompt for the
+    /// active dialect, or `nil` when the dialect doesn't inject tools this way
+    /// or the caller supplied no tools.
+    ///
+    /// - `.qwen25` emits a `<tools>…</tools>` JSON block with the
+    ///   `<tool_call>`-XML response instruction.
+    /// - `.llama` emits a Llama 3.x function block listing the tools as JSON and
+    ///   instructing a `<tool_call>{"name":…,"parameters":…}</tool_call>`
+    ///   response (issue #59 — without it Llama never produces a parseable
+    ///   call). See ``llamaToolBlock(config:)`` for why the textual wrapper is
+    ///   used instead of Llama's native `<|python_tag|>`.
+    /// - `.unknown` returns `nil`.
+    ///
+    /// The name retains the historical `buildQwenToolBlock` spelling for source
+    /// compatibility with existing call sites and tests; it now dispatches on
+    /// `dialect`.
     public static func buildQwenToolBlock(
         config: GenerationConfig,
         dialect: MLXToolDialect
     ) -> String? {
-        guard !config.tools.isEmpty, dialect == .qwen25 else { return nil }
+        guard !config.tools.isEmpty else { return nil }
+        switch dialect {
+        case .qwen25:
+            return qwenToolBlock(config: config)
+        case .llama:
+            return llamaToolBlock(config: config)
+        case .unknown:
+            return nil
+        }
+    }
+
+    /// Serialises `tools` to a pretty-printed JSON array of `{name, description,
+    /// parameters}` function descriptors. Shared by both dialect blocks.
+    private static func toolFunctionsJSON(_ config: GenerationConfig, wrapInFunctionType: Bool) -> String {
         let toolObjects: [[String: Any]] = config.tools.map { tool -> [String: Any] in
             var function_: [String: Any] = [
                 "name": tool.name,
@@ -122,18 +148,52 @@ import ManifoldInference
                let paramsObj = try? JSONSerialization.jsonObject(with: paramsData) {
                 function_["parameters"] = paramsObj
             } else {
-                function_["parameters"] = ["type": "object", "properties": [String: Any]()] 
+                function_["parameters"] = ["type": "object", "properties": [String: Any]()]
             }
-            return ["type": "function", "function": function_]
+            return wrapInFunctionType ? ["type": "function", "function": function_] : function_
         }
-        let toolsJSON: String
         if let data = try? JSONSerialization.data(withJSONObject: toolObjects, options: [.prettyPrinted]),
            let str = String(data: data, encoding: .utf8) {
-            toolsJSON = str
-        } else {
-            toolsJSON = "[]"
+            return str
         }
+        return "[]"
+    }
+
+    private static func qwenToolBlock(config: GenerationConfig) -> String {
+        let toolsJSON = toolFunctionsJSON(config, wrapInFunctionType: true)
         return "\n\n# Tools\n\nYou may call one or more functions to assist with the user query. Don't make assumptions about what values to plug into functions. Here are the available tools:\n\n<tools>\n\(toolsJSON)\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags as follows:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>"
+    }
+
+    /// Llama 3.x function-calling system block.
+    ///
+    /// Lists the available functions as JSON, then instructs the model to emit
+    /// a single `<tool_call>{"name":…,"parameters":…}</tool_call>` block.
+    ///
+    /// Why the textual wrapper instead of Llama's native format: Llama's own
+    /// tool path uses the `<|python_tag|>` special token followed by JSON,
+    /// terminated by `<|eom_id|>` / `<|eot_id|>` — all special tokens the MLX
+    /// streaming detokenizer drops, so the call body never reaches our
+    /// `ToolCallTransform` as visible text and is silently lost (issue #59). The
+    /// `<tool_call>…</tool_call>` delimiters DO survive detokenisation, and
+    /// Llama-3.2 follows the instruction to use them on the arithmetic / time /
+    /// multi-tool scenarios. The body keeps Llama's `parameters` key;
+    /// `MLXToolMarkers` accepts both `parameters` and `arguments`.
+    private static func llamaToolBlock(config: GenerationConfig) -> String {
+        let toolsJSON = toolFunctionsJSON(config, wrapInFunctionType: false)
+        return """
+
+
+        You have access to the following functions. To call a function, emit \
+        EXACTLY one block of the form:
+        <tool_call>{"name": <function-name>, "parameters": <arguments-json-object>}</tool_call>
+        Emit the literal `<tool_call>` and `</tool_call>` tags around a single \
+        JSON object. Do not narrate the call, do not wrap it in code fences, and \
+        do not invent your own tags. Use the exact function name. Only call a \
+        function when one can answer the request; otherwise reply normally.
+
+        Available functions:
+        \(toolsJSON)
+        """
     }
 
     /// Encodes a ``ToolAwareHistoryEntry`` into a plain `[String: String]` message
@@ -149,17 +209,22 @@ import ManifoldInference
     ///
     /// For the `.unknown` dialect (and plain text turns) the entry collapses to
     /// a simple `{role, content}` pair.
-    static func encodeToolAwareEntryAsText(
+    // `@_spi(Testing) public` so backend test targets can assert the
+    // dialect-specific replay encoding directly (issue #59 Llama coverage).
+    @_spi(Testing) public static func encodeToolAwareEntryAsText(
         _ entry: ToolAwareHistoryEntry,
         dialect: MLXToolDialect
     ) -> [String: String] {
-        // For non-Qwen dialects or plain turns, fall back to the bare shape.
-        guard dialect == .qwen25 else {
+        // For dialects without a recognised tool wire-format (`.unknown`) or
+        // plain turns, fall back to the bare shape.
+        guard dialect == .qwen25 || dialect == .llama else {
             return ["role": entry.role, "content": entry.content]
         }
 
         if let calls = entry.toolCalls, !calls.isEmpty {
-            // Assistant turn that triggered tool calls: encode calls as text.
+            // Assistant turn that triggered tool calls: encode calls as text in
+            // the dialect the model itself emits, so a replayed transcript is
+            // self-consistent with what generation produced.
             var parts: [String] = []
             if !entry.content.isEmpty {
                 parts.append(entry.content)
@@ -172,17 +237,32 @@ import ManifoldInference
                 } else {
                     argsValue = [String: Any]()
                 }
-                let callObj: [String: Any] = ["name": call.toolName, "arguments": argsValue]
-                if let data = try? JSONSerialization.data(withJSONObject: callObj),
-                   let jsonStr = String(data: data, encoding: .utf8) {
-                    parts.append("<tool_call>\n\(jsonStr)\n</tool_call>")
+                switch dialect {
+                case .qwen25:
+                    let callObj: [String: Any] = ["name": call.toolName, "arguments": argsValue]
+                    if let data = try? JSONSerialization.data(withJSONObject: callObj),
+                       let jsonStr = String(data: data, encoding: .utf8) {
+                        parts.append("<tool_call>\n\(jsonStr)\n</tool_call>")
+                    }
+                case .llama:
+                    // Llama uses the `parameters` key; we replay the call in the
+                    // same textual `<tool_call>` wrapper we instruct it to emit
+                    // (Llama's native `<|python_tag|>`/`<|eom_id|>` terminator is
+                    // a special token that doesn't round-trip through plain text).
+                    let callObj: [String: Any] = ["name": call.toolName, "parameters": argsValue]
+                    if let data = try? JSONSerialization.data(withJSONObject: callObj),
+                       let jsonStr = String(data: data, encoding: .utf8) {
+                        parts.append("<tool_call>\n\(jsonStr)\n</tool_call>")
+                    }
+                case .unknown:
+                    break
                 }
             }
             return ["role": "assistant", "content": parts.joined(separator: "\n")]
         }
 
-        // Tool result turn: pass role and content as-is.
-        // The Qwen tokenizer template handles `role: "tool"` natively.
+        // Tool result turn: pass role and content as-is. Both the Qwen and
+        // Llama tokenizer templates handle `role: "tool"` natively.
         return ["role": entry.role, "content": entry.content]
     }
 

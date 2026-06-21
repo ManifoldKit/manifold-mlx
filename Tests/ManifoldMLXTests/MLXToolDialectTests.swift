@@ -71,10 +71,16 @@ final class MLXToolDialectTests: XCTestCase {
         XCTAssertEqual(MLXToolDialect.detect(at: dir), .unknown)
     }
 
-    func test_detect_llama_isUnknown() throws {
+    // MARK: - Llama → .llama
+
+    /// `model_type == "llama"` now maps to `.llama` (issue #59): it previously
+    /// fell through to `.unknown`, which suppressed all tool injection/parsing
+    /// so Llama models never dispatched a tool. Detailed Llama coverage lives in
+    /// `MLXLlamaToolDialectTests`.
+    func test_detect_llama_isLlama() throws {
         let dir = try makeModelDir(configContents: #"{ "model_type": "llama" }"#)
         defer { try? FileManager.default.removeItem(at: dir) }
-        XCTAssertEqual(MLXToolDialect.detect(at: dir), .unknown)
+        XCTAssertEqual(MLXToolDialect.detect(at: dir), .llama)
     }
 
     func test_detect_missingModelTypeKey_isUnknown() throws {

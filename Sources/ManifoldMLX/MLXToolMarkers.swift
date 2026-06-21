@@ -1,40 +1,99 @@
 import Foundation
 import ManifoldInference
 
-/// MLX tool-call dialect for ``ToolCallTransform``.
+/// MLX tool-call dialect markers for ``ToolCallTransform``.
 ///
 /// Replaces the former `MLXToolCallParser`: the scanning / holdback / chunk
 /// safety now lives once in `ToolCallTransform`, and only the MLX-specific
 /// delimiters and JSON body parsing stay here, injected as a `@Sendable`
 /// closure.
 ///
-/// MLX models (Qwen 2.5 / Qwen 3 format) wrap tool calls in
-/// `<tool_call>` / `</tool_call>` with a `{"name":…,"arguments":…}` JSON body.
+/// Two model families are supported:
+/// - **Qwen 2.5 / Qwen 3** wrap tool calls in `<tool_call>` / `</tool_call>`
+///   with a `{"name":…,"arguments":{…}}` JSON body.
+/// - **Llama 3.x** emit a `<|python_tag|>`-prefixed JSON object (closed by the
+///   `<|eom_id|>` / `<|eot_id|>` special tokens) — or a bare top-level JSON
+///   object — with a `{"name":…,"parameters":{…}}` body. Without dialect-aware
+///   markers Llama calls were never parsed (issue #59).
 // @_spi(Testing): published only for backend test targets (companion-package split, #1749).
 @_spi(Testing) public enum MLXToolMarkers {
 
-    private static let openTag  = "<tool_call>"
-    private static let closeTag = "</tool_call>"
+    // Qwen 2.5 / Qwen 3 delimiters.
+    private static let qwenOpenTag  = "<tool_call>"
+    private static let qwenCloseTag = "</tool_call>"
 
-    /// The single-dialect marker set MLX hands to a `ToolCallTransform`.
-    public static func markers() -> [ToolCallMarker] {
-        [
-            ToolCallMarker(open: openTag, close: closeTag) { body in
-                parseToolCall(body)
-            }
-        ]
+    // Llama 3.x native delimiters — kept as *fallback* markers. The MLX
+    // streaming detokenizer usually drops `<|python_tag|>` / `<|eom_id|>` /
+    // `<|eot_id|>` as special tokens, so the primary Llama path is the textual
+    // `<tool_call>` wrapper we steer the model onto (see
+    // `MLXChatMessageEncoder.llamaToolBlock`). When a build *does* surface these
+    // tokens we still parse them: `<|python_tag|>` opens a call terminated by
+    // either `<|eom_id|>` (documented tool terminator) or `<|eot_id|>`.
+    private static let llamaOpenTag  = "<|python_tag|>"
+    private static let llamaEomTag   = "<|eom_id|>"
+    private static let llamaEotTag   = "<|eot_id|>"
+
+    /// The marker set MLX hands to a `ToolCallTransform` for `dialect`.
+    ///
+    /// `.qwen25` → the single `<tool_call>` dialect. `.llama` → the
+    /// `<|python_tag|>` dialect (two markers, one per close token). `.unknown`
+    /// → an empty set (the driver never builds a tool stage for `.unknown`,
+    /// but returning `[]` keeps this total and side-effect-free).
+    public static func markers(dialect: MLXToolDialect) -> [ToolCallMarker] {
+        switch dialect {
+        case .qwen25:
+            return [
+                ToolCallMarker(open: qwenOpenTag, close: qwenCloseTag) { body in
+                    parseToolCall(body)
+                }
+            ]
+        case .llama:
+            // Primary: the textual `<tool_call>…</tool_call>` delimiters we
+            // instruct Llama to emit (see `MLXChatMessageEncoder.llamaToolBlock`)
+            // — these survive detokenisation, unlike Llama's native `<|eom_id|>`
+            // terminator. Fallback markers cover a model that still reaches for
+            // the `<|python_tag|>` prefix: if it does emit a visible `<|eom_id|>`
+            // / `<|eot_id|>` close we parse it, but the primary path is what the
+            // overnight scenarios exercise. The body parser accepts both the
+            // Llama `parameters` key and the Qwen `arguments` key.
+            return [
+                ToolCallMarker(open: qwenOpenTag, close: qwenCloseTag) { body in
+                    parseToolCall(body)
+                },
+                ToolCallMarker(open: llamaOpenTag, close: llamaEomTag) { body in
+                    parseToolCall(body)
+                },
+                ToolCallMarker(open: llamaOpenTag, close: llamaEotTag) { body in
+                    parseToolCall(body)
+                },
+            ]
+        case .unknown:
+            return []
+        }
     }
 
-    /// Attempts to parse a buffered `<tool_call>` body into a `ToolCall`.
+    /// Back-compat overload: the original single-dialect (Qwen) marker set.
     ///
-    /// Expects `{"name":"…","arguments":{…}}`. The `arguments` object is
-    /// re-serialised to a JSON string so `ToolCall.arguments` always carries a
-    /// valid JSON string regardless of how the model formatted it. Moved
-    /// verbatim from `MLXToolCallParser.parseToolCall` — the `try?
-    /// JSONSerialization` idiom here is audit-approved (decoding at a trust
-    /// boundary).
+    /// Retained so existing call sites and tests that predate the dialect
+    /// parameter keep compiling. New code should pass an explicit `dialect:`.
+    public static func markers() -> [ToolCallMarker] {
+        markers(dialect: .qwen25)
+    }
+
+    /// Attempts to parse a buffered tool-call body into a `ToolCall`.
+    ///
+    /// Expects `{"name":"…","arguments":{…}}` (Qwen) or `{"name":"…",
+    /// "parameters":{…}}` (Llama). The argument object is re-serialised to a
+    /// JSON string so `ToolCall.arguments` always carries a valid JSON string
+    /// regardless of how the model formatted it. The `try? JSONSerialization`
+    /// idiom here is audit-approved (decoding at a trust boundary).
     private static func parseToolCall(_ json: String) -> ToolCall? {
-        let trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
+        var trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Llama sometimes leaves a trailing `<|eot_id|>`/`<|eom_id|>` in the
+        // body when the close token that fired was the *other* one, and may
+        // emit several space- or semicolon-separated calls. Parse only the
+        // first balanced JSON object so a trailing tail never breaks decoding.
+        trimmed = firstJSONObject(in: trimmed) ?? trimmed
         guard !trimmed.isEmpty,
               let data = trimmed.data(using: .utf8),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -43,16 +102,18 @@ import ManifoldInference
             return nil
         }
 
-        // `arguments` may be a pre-parsed dictionary or (rarely) a JSON string.
+        // The argument payload lives under `arguments` (Qwen) or `parameters`
+        // (Llama). It may be a pre-parsed dictionary or (rarely) a JSON string.
+        let rawArgs = obj["arguments"] ?? obj["parameters"]
         let argumentsString: String
-        if let argsDict = obj["arguments"] as? [String: Any] {
+        if let argsDict = rawArgs as? [String: Any] {
             if let serialised = try? JSONSerialization.data(withJSONObject: argsDict),
                let str = String(data: serialised, encoding: .utf8) {
                 argumentsString = str
             } else {
                 argumentsString = "{}"
             }
-        } else if let argsString = obj["arguments"] as? String {
+        } else if let argsString = rawArgs as? String {
             argumentsString = argsString
         } else {
             argumentsString = "{}"
@@ -60,5 +121,43 @@ import ManifoldInference
 
         let id = "mlx-\(name)-\(UUID().uuidString.prefix(8))"
         return ToolCall(id: id, toolName: name, arguments: argumentsString)
+    }
+
+    /// Returns the substring spanning the first balanced top-level `{…}` JSON
+    /// object in `text`, or `nil` if none. Brace counting respects JSON string
+    /// literals (and their escapes) so a `}` inside a quoted value doesn't
+    /// close the object early. Used to peel one Llama call off a body that may
+    /// carry trailing special-token text or a second concatenated call.
+    private static func firstJSONObject(in text: String) -> String? {
+        guard let start = text.firstIndex(of: "{") else { return nil }
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var index = start
+        while index < text.endIndex {
+            let ch = text[index]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if ch == "\\" {
+                    escaped = true
+                } else if ch == "\"" {
+                    inString = false
+                }
+            } else {
+                switch ch {
+                case "\"": inString = true
+                case "{": depth += 1
+                case "}":
+                    depth -= 1
+                    if depth == 0 {
+                        return String(text[start...index])
+                    }
+                default: break
+                }
+            }
+            index = text.index(after: index)
+        }
+        return nil
     }
 }
