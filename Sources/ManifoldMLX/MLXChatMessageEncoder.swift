@@ -105,6 +105,39 @@ import ManifoldInference
         return [.system(merged)] + nonSystem
     }
 
+    /// Composes the full effective system prompt for an MLX generation turn:
+    /// the `preferTools` imperative preamble (when tools are present) joined
+    /// with the application system prompt and the dialect's wire-format tool
+    /// block.
+    ///
+    /// This is the single-call replacement for the inline assembly that lived
+    /// in `MLXGenerationDriver`. Pulling it here lets unit tests verify the
+    /// preamble injection without spinning up a live model.
+    ///
+    /// - Parameters:
+    ///   - systemPrompt: The app-level system prompt (may be nil or empty).
+    ///   - config: The generation config whose `tools` array drives preamble and
+    ///     tool-block injection.
+    ///   - dialect: Active tool wire-format dialect.
+    /// - Returns: The assembled system prompt, or `nil` when the result would be
+    ///   empty (no system prompt, no tools, no preamble).
+    @_spi(Testing) public static func effectiveSystemPrompt(
+        systemPrompt: String?,
+        config: GenerationConfig,
+        dialect: MLXToolDialect
+    ) -> String? {
+        let preamble = ToolSystemPromptBuilder.preferTools(for: config.tools)
+        let toolBlock = buildQwenToolBlock(config: config, dialect: dialect)
+
+        var parts: [String] = []
+        if !preamble.isEmpty { parts.append(preamble) }
+        if let sp = systemPrompt, !sp.isEmpty { parts.append(sp) }
+        if let tb = toolBlock { parts.append(tb) }
+
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: "\n\n")
+    }
+
     /// Returns the tool-definition block to append to the system prompt for the
     /// active dialect, or `nil` when the dialect doesn't inject tools this way
     /// or the caller supplied no tools.

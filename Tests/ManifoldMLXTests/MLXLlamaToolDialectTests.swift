@@ -320,4 +320,64 @@ final class MLXLlamaToolDialectTests: XCTestCase {
         _ = none.process("just some prose")
         XCTAssertEqual(none.finalize(), "", "no python_tag means no injected close")
     }
+
+    // MARK: - prefer-tools preamble injection (issue #71)
+    //
+    // The MLX backend sets `rendersFullPrompt: true`, so core's
+    // `GenerationQueue.toolAugmentedSystemPrompt` — which folds the
+    // `ToolSystemPromptBuilder.preferTools` imperative steering — never fires
+    // for MLX turns. Without it, Llama-3.2-3B opens `<tool_call>` and then emits
+    // an empty body for under-described tools (e.g. list_dir), so the call is
+    // never dispatched. The fix adds the preamble MLX-side via
+    // `MLXChatMessageEncoder.effectiveSystemPrompt`.
+
+    /// With a tool registered, the assembled system prompt must contain:
+    ///   1. The imperative "you MUST call the tool" steering from the standard
+    ///      `ToolSystemPromptBuilder.preferTools` preamble.
+    ///   2. The tool name from the preamble's enumeration.
+    ///   3. The original app system prompt (passed through unchanged).
+    ///   4. The wire-format `<tool_call>` marker from the Llama tool block.
+    func test_effectiveSystemPrompt_containsPreferToolsPreamble_forTools() throws {
+        let cfg = config(withTools: [calcTool()])
+        let appSystemPrompt = "You are a helpful assistant."
+        let result = MLXChatMessageEncoder.effectiveSystemPrompt(
+            systemPrompt: appSystemPrompt,
+            config: cfg,
+            dialect: .llama
+        )
+        let output = try XCTUnwrap(result, "effectiveSystemPrompt must not be nil when tools are present")
+        XCTAssertTrue(
+            output.contains("you MUST call the tool"),
+            "standard prefer-tools preamble imperative must appear; got: \(output)"
+        )
+        XCTAssertTrue(
+            output.contains("calc"),
+            "tool name must be listed in the preamble; got: \(output)"
+        )
+        XCTAssertTrue(
+            output.contains(appSystemPrompt),
+            "app system prompt must be retained in the output; got: \(output)"
+        )
+        XCTAssertTrue(
+            output.contains("<tool_call>"),
+            "Llama wire-format tool block marker must still be present; got: \(output)"
+        )
+    }
+
+    /// With no tools, `effectiveSystemPrompt` must return the bare app system
+    /// prompt — no preamble injected, tool block omitted.
+    func test_effectiveSystemPrompt_noPreamble_whenNoTools() {
+        let cfg = config(withTools: [])
+        let appSystemPrompt = "You are a helpful assistant."
+        let result = MLXChatMessageEncoder.effectiveSystemPrompt(
+            systemPrompt: appSystemPrompt,
+            config: cfg,
+            dialect: .llama
+        )
+        XCTAssertEqual(
+            result,
+            appSystemPrompt,
+            "with no tools, the output must equal the bare app system prompt"
+        )
+    }
 }

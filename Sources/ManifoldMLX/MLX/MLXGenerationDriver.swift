@@ -155,12 +155,11 @@ import ManifoldInference
             prefillStepSize: loadOptions.prefillBatchSize ?? 512
         )
 
-        let effectiveSystemPrompt: String? = {
-            if let toolBlock = MLXChatMessageEncoder.buildQwenToolBlock(config: config, dialect: dialect) {
-                return (systemPrompt ?? "") + toolBlock
-            }
-            return systemPrompt
-        }()
+        let effectiveSystemPrompt: String? = MLXChatMessageEncoder.effectiveSystemPrompt(
+            systemPrompt: systemPrompt,
+            config: config,
+            dialect: dialect
+        )
 
         let (chatMessages, messages) = try MLXChatMessageEncoder.buildChatMessages(
             prompt: prompt,
