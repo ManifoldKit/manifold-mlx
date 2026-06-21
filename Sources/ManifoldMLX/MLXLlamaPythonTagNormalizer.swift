@@ -23,8 +23,8 @@ import Foundation
 /// rewrites only the raw text chunks for the `.llama` dialect. It tracks whether
 /// the stream has an *open* `<|python_tag|>` that has not yet been closed by a
 /// visible `<|eom_id|>` / `<|eot_id|>`. If the stream ends with such an open
-/// block, `finalize()` injects a synthetic `<|eot_id|>` close so the downstream
-/// `<|python_tag|>` → `<|eot_id|>` marker fires and the JSON body is parsed into
+/// block, `finalize()` injects a synthetic `<|eom_id|>` close so the downstream
+/// `<|python_tag|>` → `<|eom_id|>` marker fires and the JSON body is parsed into
 /// a `ToolCall`. The synthetic close is appended only at stream end and only
 /// when a python-tag block is genuinely open, so a normal turn (no python tag,
 /// or one already closed by a *visible* terminator) is passed through byte-for-byte.
@@ -89,7 +89,7 @@ import Foundation
     }
 
     /// Flush the held-back tail and, when a `<|python_tag|>` block is still open,
-    /// inject a synthetic `<|eot_id|>` close so the downstream marker fires.
+    /// inject a synthetic `<|eom_id|>` close so the downstream marker fires.
     public mutating func finalize() -> String {
         guard enabled else { return "" }
         // The retained tail may itself complete a tag; re-scan it so a python tag

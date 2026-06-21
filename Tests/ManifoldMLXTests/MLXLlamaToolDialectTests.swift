@@ -207,7 +207,7 @@ final class MLXLlamaToolDialectTests: XCTestCase {
     // close tokens (they are stop tokens, so the generate loop breaks before
     // detokenising them). `<|python_tag|>` survives, so a native tool call
     // arrives as an *unterminated* `<|python_tag|>{json…}` block and was
-    // discarded. `MLXLlamaPythonTagNormalizer` injects a synthetic `<|eot_id|>`
+    // discarded. `MLXLlamaPythonTagNormalizer` injects a synthetic `<|eom_id|>`
     // close at stream end so the body parses. These tests run the normaliser in
     // front of `ToolCallTransform` exactly as the driver does.
 
