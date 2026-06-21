@@ -338,6 +338,26 @@ final class MLXLlamaToolDialectTests: XCTestCase {
             config: config
         )
 
+        // Verify that setPhase(.streaming) is called in the normalizer-tail path.
+        //
+        // Architecture: MLXGenerationDriver is @MainActor. Both setPhase(.streaming)
+        // (in the tail loop) and setPhase(.done) (in MLXBackend after driver returns)
+        // execute in the same main-actor run before the consumer task ever resumes.
+        // Observing the intermediate .streaming state from outside that turn via
+        // @Observable phase polling is architecturally impossible — both mutations
+        // happen before the consumer is ever resumed. Instead, we use the
+        // @_spi(Testing) synchronous callback MLXGenerationDriver._streamingPhaseSetInTailHook,
+        // which fires on the main actor immediately after setPhase(.streaming) in the
+        // tail path — before any further mutations.
+        //
+        // With the fix:    hook fires → streamingWasSet = true
+        // Without the fix: hook never fires → streamingWasSet = false
+        nonisolated(unsafe) var streamingWasSet = false
+        MLXGenerationDriver._streamingPhaseSetInTailHook = {
+            streamingWasSet = true
+        }
+        defer { MLXGenerationDriver._streamingPhaseSetInTailHook = nil }
+
         var collectedEvents: [GenerationEvent] = []
         for try await event in stream.events {
             collectedEvents.append(event)
@@ -350,19 +370,11 @@ final class MLXLlamaToolDialectTests: XCTestCase {
         XCTAssertEqual(toolCalls.map(\.toolName), ["f"],
             "A python_tag tool call with no preceding text must dispatch via the normalizer tail")
 
-        // (b) The stream must have transitioned to .streaming.
-        // Without the fix, setPhase(.streaming) was never called in the tail
-        // path, leaving the stream stuck at .preparing for callers gating on phase.
-        let phase = await MainActor.run { stream.phase }
-        // Accept .streaming or .done — .done means the stream finished but did
-        // pass through .streaming (GenerationStream transitions: .streaming → .done).
-        // The bug leaves it at .preparing, which is neither .streaming nor .done.
-        switch phase {
-        case .streaming, .done:
-            break // Correct: the tail path called setPhase(.streaming) before finishing.
-        default:
-            XCTFail("Stream phase must reach .streaming (or .done) when the only event is a tool call via the normalizer tail; got \(phase). This indicates setPhase(.streaming) was never called.")
-        }
+        // (b) The driver must have called setPhase(.streaming) in the tail path.
+        // Without the fix, the tail loop has no phase-transition logic, so
+        // _streamingPhaseSetInTailHook never fires and streamingWasSet stays false.
+        XCTAssertTrue(streamingWasSet,
+            "setPhase(.streaming) must be called in the normalizer-tail path when a tool call is the first (and only) event. Without the fix, the stream goes directly from .connecting to .done, breaking callers that gate on stream.phase == .streaming.")
     }
 
     // MARK: - Normaliser unit behaviour (no transform)

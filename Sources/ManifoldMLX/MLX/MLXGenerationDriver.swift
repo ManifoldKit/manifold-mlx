@@ -18,6 +18,16 @@ import ManifoldInference
 
     public nonisolated init() {}
 
+    // MARK: - Test seams
+
+    /// Invoked synchronously on the main actor immediately after
+    /// `generationStream.setPhase(.streaming)` is called in the normalizer-tail
+    /// path. Tests use this to verify the phase transition happened without
+    /// racing against the unconditional `setPhase(.done)` that follows.
+    ///
+    /// `nil` in production.
+    @_spi(Testing) public nonisolated(unsafe) static var _streamingPhaseSetInTailHook: (() -> Void)?
+
     private static let logger = Logger(
         subsystem: ManifoldConfiguration.shared.logSubsystem,
         category: "inference"
@@ -426,6 +436,7 @@ import ManifoldInference
                     switch event {
                     case .token, .thinkingToken, .toolCall:
                         generationStream.setPhase(.streaming)
+                        Self._streamingPhaseSetInTailHook?()
                         isFirstToken = false
                     default: break
                     }
