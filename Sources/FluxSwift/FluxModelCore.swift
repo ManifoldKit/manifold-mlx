@@ -159,11 +159,20 @@ public class FluxModelCore: @unchecked Sendable {
     /// the loaded weight dict carries a `<path>.scales` tensor for it — this
     /// matches `applySelectiveQuantization` used by the metadata.json path and
     /// keeps non-quantized layers (e.g. small embeddings) in fp16.
+    ///
+    /// mflux additionally 4-bit-quantizes the CLIP token/position embeddings and
+    /// the T5 `shared` embedding (issue #39, GAP 2), so `Embedding` layers are
+    /// converted to `QuantizedEmbedding` as well — but only when a matching
+    /// `.scales` tensor is present, so fp16 bundles (and the diffusers-quantized
+    /// bundles that keep embeddings in fp16) are unaffected. `quantizeSingle`
+    /// (the default `apply`) already produces a `QuantizedEmbedding` for an
+    /// `Embedding` because `Embedding` is `Quantizable`.
     private func applyPreQuantization(
         to module: Module, weights: [String: MLXArray], groupSize: Int, bits: Int
     ) {
         quantize(model: module, filter: { path, m in
-            guard m is Linear, weights["\(path).scales"] != nil else { return nil }
+            guard m is Linear || m is Embedding,
+                  weights["\(path).scales"] != nil else { return nil }
             return (groupSize: groupSize, bits: bits)
         })
     }
@@ -209,13 +218,26 @@ public class FluxModelCore: @unchecked Sendable {
     @discardableResult
     private func loadVAEWeights(from directory: URL, dtype: DType) throws -> Bool {
         let vaeURL = directory.appending(path: "diffusion_pytorch_model.safetensors")
-        var vaeWeights = try loadArrays(url: vaeURL)
+        let rawVAEWeights = try loadArrays(url: vaeURL)
+
+        // mflux wraps each VAE conv/group-norm in an extra `.conv2d.`/`.norm.`
+        // segment (`decoder.conv_in.conv2d.weight`); strip it to match our
+        // module tree. HF-diffusers VAE keys lack the segment, so this is a
+        // no-op there (issue #39, GAP 3).
+        let isMflux = FLUX.isMfluxVAE(rawVAEWeights.keys)
+        var vaeWeights = [String: MLXArray]()
+        for (key, value) in rawVAEWeights {
+            vaeWeights[FLUX.remapVAEKey(key)] = value
+        }
 
         for (key, value) in vaeWeights {
             if value.dtype != .bfloat16 && value.dtype != .uint32 {
                 vaeWeights[key] = value.asType(dtype)
             }
-            if value.ndim == 4 {
+            // HF-diffusers conv weights are `[out, in, kh, kw]` and need a
+            // channels-last transpose; mflux already stores them channels-last
+            // (`[out, kh, kw, in]`), so transposing would corrupt them.
+            if value.ndim == 4 && !isMflux {
                 vaeWeights[key] = value.transposed(0, 2, 3, 1)
             }
         }
@@ -244,19 +266,40 @@ public class FluxModelCore: @unchecked Sendable {
             if url.pathExtension == "safetensors" {
                 let w = try loadArrays(url: url)
                 for (key, value) in w {
+                    // Translate mflux-flattened T5 keys (`t5_blocks.N...`,
+                    // `final_layer_norm.*`) into our nested HF-diffusers schema.
+                    // HF-diffusers keys pass through unchanged (issue #39, GAP 1).
+                    let newKey = FLUX.remapT5EncoderKey(key)
                     if value.dtype != .bfloat16 && value.dtype != .uint32 {
-                        weights[key] = value.asType(dtype)
+                        weights[newKey] = value.asType(dtype)
                     } else {
-                        weights[key] = value
+                        weights[newKey] = value
                     }
                 }
             }
         }
 
-        if let relativeAttentionBias = weights[
-            "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"
-        ] {
-            weights["relative_attention_bias.weight"] = relativeAttentionBias
+        // Both HF-diffusers and mflux nest relative_attention_bias inside block
+        // 0's SelfAttention; hoist it (and, for a quantized bundle, its
+        // `.scales`/`.biases`) to the top level our `T5Encoder` module expects.
+        // Hoisting the quantization tensors lets `applyPreQuantization` convert
+        // the top-level `relative_attention_bias` Embedding to a
+        // QuantizedEmbedding (issue #39, GAP 2); fp16 bundles only carry
+        // `.weight`, so the `.scales`/`.biases` copies are simply absent.
+        for suffix in ["weight", "scales", "biases"] {
+            let src = "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.\(suffix)"
+            if let tensor = weights[src] {
+                weights["relative_attention_bias.\(suffix)"] = tensor
+            }
+        }
+        // mflux ships a `relative_attention_bias` inside EVERY T5 block, but our
+        // `MultiHeadAttention` module has no such submodule (only q/k/v/o) — the
+        // bias is shared and lives once at the top level. Drop the per-block
+        // copies so `update(parameters:)` doesn't try to bind keys with no
+        // matching module. (HF-diffusers only ships block 0's, already hoisted.)
+        for key in weights.keys
+        where key.contains(".SelfAttention.relative_attention_bias.") {
+            weights.removeValue(forKey: key)
         }
 
         let isQuantized = quantizationConfig(in: directory) != nil

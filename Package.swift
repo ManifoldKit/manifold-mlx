@@ -114,6 +114,8 @@ let package = Package(
             dependencies: [
                 "ManifoldMLX",
                 "FluxSwift",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "ManifoldInference", package: "ManifoldKit"),
                 .product(name: "ManifoldRuntime", package: "ManifoldKit"),
                 .product(name: "ManifoldPersistenceSwiftData", package: "ManifoldKit"),

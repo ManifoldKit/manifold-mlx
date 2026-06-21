@@ -4,6 +4,7 @@ import ManifoldMLX
 @_spi(Testing) import ManifoldMLX
 import ManifoldInference
 import FluxSwift
+@testable import FluxSwift
 
 /// Unit tests for ``FluxDiffusionBackend``.
 ///
@@ -243,6 +244,95 @@ final class FluxDiffusionBackendTests: XCTestCase {
         XCTAssertEqual(cfg?.bits, 4)
         XCTAssertEqual(cfg?.groupSize, 64)
     }
+
+    // MARK: - mflux weight-key remaps (issue #39)
+    //
+    // Pure string→string transforms over SYNTHETIC key names (no weights, MLX,
+    // or Metal). They prove each remap closes its gap AND is a no-op on the
+    // already-supported HF-diffusers schema, so the fp16 / diffusers-quantized
+    // paths stay backward-compatible.
+
+    // GAP 1 — T5 encoder key schema (mflux flat → our nested HF-diffusers).
+    func test_remapT5_attentionSelfAttention_qkvo() {
+        for proj in ["q", "k", "v", "o"] {
+            XCTAssertEqual(
+                FLUX.remapT5EncoderKey("t5_blocks.7.attention.SelfAttention.\(proj).weight"),
+                "encoder.block.7.layer.0.SelfAttention.\(proj).weight")
+        }
+    }
+
+    func test_remapT5_attentionLayerNorm() {
+        XCTAssertEqual(
+            FLUX.remapT5EncoderKey("t5_blocks.0.attention.layer_norm.weight"),
+            "encoder.block.0.layer.0.layer_norm.weight")
+    }
+
+    func test_remapT5_feedForwardDenseReluDense() {
+        for w in ["wi_0", "wi_1", "wo"] {
+            XCTAssertEqual(
+                FLUX.remapT5EncoderKey("t5_blocks.23.ff.DenseReluDense.\(w).weight"),
+                "encoder.block.23.layer.1.DenseReluDense.\(w).weight")
+        }
+    }
+
+    func test_remapT5_feedForwardLayerNorm() {
+        XCTAssertEqual(
+            FLUX.remapT5EncoderKey("t5_blocks.5.ff.layer_norm.weight"),
+            "encoder.block.5.layer.1.layer_norm.weight")
+    }
+
+    func test_remapT5_finalLayerNorm() {
+        XCTAssertEqual(
+            FLUX.remapT5EncoderKey("final_layer_norm.weight"),
+            "encoder.final_layer_norm.weight")
+    }
+
+    func test_remapT5_preservesQuantizationSuffixes() {
+        // The quantized-tensor pass pairs `.weight`/`.scales`/`.biases`; the
+        // remap must keep the suffix verbatim so they still co-locate.
+        for suffix in ["weight", "scales", "biases"] {
+            XCTAssertEqual(
+                FLUX.remapT5EncoderKey("t5_blocks.3.attention.SelfAttention.q.\(suffix)"),
+                "encoder.block.3.layer.0.SelfAttention.q.\(suffix)")
+        }
+    }
+
+    func test_remapT5_sharedAndRelativeBias_passThrough() {
+        // mflux ships these top-level already; remap is a no-op.
+        XCTAssertEqual(FLUX.remapT5EncoderKey("shared.weight"), "shared.weight")
+        XCTAssertEqual(
+            FLUX.remapT5EncoderKey("relative_attention_bias.weight"),
+            "relative_attention_bias.weight")
+    }
+
+    func test_remapT5_diffusersKeys_areNoOp() {
+        // Already-nested HF-diffusers keys must pass through unchanged so the
+        // existing diffusers-compatible path is untouched.
+        let k = "encoder.block.0.layer.0.SelfAttention.q.weight"
+        XCTAssertEqual(FLUX.remapT5EncoderKey(k), k)
+    }
+
+    // GAP 3 — VAE conv nesting (mflux's extra `.conv2d.` segment).
+    func test_remapVAE_stripsConv2dSegment() {
+        XCTAssertEqual(
+            FLUX.remapVAEKey("decoder.conv_in.conv2d.weight"),
+            "decoder.conv_in.weight")
+        XCTAssertEqual(
+            FLUX.remapVAEKey("encoder.conv_out.conv2d.bias"),
+            "encoder.conv_out.bias")
+    }
+
+    func test_remapVAE_diffusersKeys_areNoOp() {
+        let k = "decoder.conv_in.weight"
+        XCTAssertEqual(FLUX.remapVAEKey(k), k)
+        XCTAssertEqual(
+            FLUX.remapVAEKey("decoder.up_blocks.0.resnets.0.conv1.weight"),
+            "decoder.up_blocks.0.resnets.0.conv1.weight")
+    }
+
+    // GAP 2 — quantized-embedding conversion is covered in
+    // `FluxDiffusionIntegrationTests` (the `quantize`/`MLXArray` path requires a
+    // Metal device and metallib that a plain `swift test` runner lacks).
 
     // MARK: - Bundle-layout detection (issue #39)
     //
