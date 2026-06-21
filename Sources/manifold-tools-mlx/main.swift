@@ -24,6 +24,9 @@ struct CLI {
     var output: URL = defaultOutputURL()
     var fixturesRoot: URL? = nil
     var list: Bool = false
+    /// Number of decoy tools to advertise alongside each scenario's required
+    /// tools, to measure correct-tool selection under distractor pressure.
+    var extraTools: Int = 0
 
     static func defaultOutputURL() -> URL {
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -60,6 +63,14 @@ struct CLI {
                 i += 1
                 guard i < argv.count else { fail("--fixtures-root requires a value") }
                 cli.fixturesRoot = URL(fileURLWithPath: argv[i], isDirectory: true)
+            case "--extra-tools":
+                i += 1
+                guard i < argv.count else { fail("--extra-tools requires a value") }
+                guard let n = Int(argv[i]), n >= 0 else { fail("--extra-tools requires a non-negative integer") }
+                guard n <= DecoyTools.maxCount else {
+                    fail("--extra-tools \(n) exceeds the decoy pool size (\(DecoyTools.maxCount))")
+                }
+                cli.extraTools = n
             case "--list":
                 cli.list = true
             case "--help", "-h":
@@ -90,6 +101,9 @@ struct CLI {
                                 Default: tmp/manifold-tools-mlx/<iso>.jsonl.
           --fixtures-root <dir> Root for read_file / list_dir / repo_search tools.
                                 Default: the fixtures bundled with this CLI.
+          --extra-tools <N>     Advertise N decoy tools alongside each scenario's
+                                required tools to probe correct-tool selection
+                                under distractor pressure. Default: 0 (no decoys).
           --list                Print available scenarios and exit (no model needed).
           --help                Show this text.
 
@@ -151,7 +165,7 @@ func loadScenarios() throws -> [Scenario] {
 /// than trapping, so a future scenario referencing a tool this CLI doesn't know
 /// degrades gracefully instead of crashing the whole run.
 @MainActor
-func makeRegistry(for scenario: Scenario, fixturesRoot: URL) -> ToolRegistry {
+func makeRegistry(for scenario: Scenario, fixturesRoot: URL, extraTools: Int = 0) -> ToolRegistry {
     let registry = ToolRegistry()
     for name in scenario.requiredTools {
         switch name {
@@ -172,7 +186,39 @@ func makeRegistry(for scenario: Scenario, fixturesRoot: URL) -> ToolRegistry {
                 "manifold-tools-mlx: scenario '\(scenario.id)' requires unknown tool '\(name)' — skipping\n".utf8))
         }
     }
+    // Pad the registry with N decoys so the model has plausible-but-wrong tools
+    // to (mis)select among. Advertising them additionally requires augmenting
+    // the scenario's requiredTools — see `scenarioAdvertising(_:extraToolNames:)`.
+    for decoy in DecoyTools.executors(count: extraTools) {
+        registry.register(decoy)
+    }
     return registry
+}
+
+/// Returns a copy of `scenario` whose `requiredTools` also lists `extraToolNames`.
+///
+/// `ScenarioRunner` filters the advertised tool definitions to
+/// `requiredTools.contains($0.name)` (ManifoldKit, read-only), so decoys added
+/// to the registry are invisible to the model unless their names appear in
+/// `requiredTools` too. `Scenario`'s memberwise init is internal to ManifoldKit,
+/// so we patch the one field through its `Codable` representation. Augmenting
+/// `requiredTools` does not affect assertions — those key off `assertion.value`,
+/// not this list. A no-op when there are no decoys.
+func scenarioAdvertising(_ scenario: Scenario, extraToolNames: [String]) -> Scenario {
+    guard !extraToolNames.isEmpty else { return scenario }
+    do {
+        let data = try JSONEncoder().encode(scenario)
+        var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        var required = (object["requiredTools"] as? [String]) ?? []
+        required.append(contentsOf: extraToolNames)
+        object["requiredTools"] = required
+        let patched = try JSONSerialization.data(withJSONObject: object)
+        return try JSONDecoder().decode(Scenario.self, from: patched)
+    } catch {
+        FileHandle.standardError.write(Data(
+            "manifold-tools-mlx: could not augment requiredTools for '\(scenario.id)' (\(error)); decoys will be filtered out\n".utf8))
+        return scenario
+    }
 }
 
 @MainActor
@@ -239,12 +285,22 @@ func runCLI() async -> Int32 {
     }
     defer { backend.unloadModel() }
 
+    let decoyNames = Set(DecoyTools.names(count: cli.extraTools))
+    if cli.extraTools > 0 {
+        print("Advertising \(cli.extraTools) decoy tool(s) per scenario: \(decoyNames.sorted().joined(separator: ", "))")
+    }
+
     var allPassed = true
+    var total = 0
+    var passedCount = 0
+    var cleanCount = 0
     for scenario in filtered {
         print("\n── \(scenario.id) via mlx ──")
-        // Build a fresh registry scoped to just this scenario's required tools,
-        // so we advertise only what the task needs (not all six) to the model.
-        let registry = makeRegistry(for: scenario, fixturesRoot: fixturesRoot)
+        total += 1
+        // Build a fresh registry scoped to this scenario's required tools, padded
+        // with N decoys, then advertise the decoys by augmenting requiredTools.
+        let registry = makeRegistry(for: scenario, fixturesRoot: fixturesRoot, extraTools: cli.extraTools)
+        let advertised = scenarioAdvertising(scenario, extraToolNames: DecoyTools.names(count: cli.extraTools))
         do {
             // MK 0.57 (#1985) reshaped the harness: `ScenarioRunner` now drives a
             // production `InferenceService` instead of dispatching tools itself.
@@ -262,11 +318,22 @@ func runCLI() async -> Int32 {
                 toolRegistry: registry
             )
             let runner = ScenarioRunner(service: service, logger: logger)
-            let outcome = try await runner.run(scenario)
+            // Run the decoy-augmented scenario so the runner advertises the
+            // decoys; assertions are identical (only requiredTools changed).
+            let outcome = try await runner.run(advertised)
             for assertion in outcome.assertions {
                 let marker = assertion.passed ? "  PASS" : "  FAIL"
                 print("\(marker) \(assertion.message)")
             }
+            // Correct-tool selection: a clean dispatch passes every assertion AND
+            // never invokes a decoy. Calling a decoy is always a wrong selection
+            // (the pool is orthogonal to every scenario's real task).
+            let decoysCalled = Set(outcome.toolCallsExecuted.filter { decoyNames.contains($0) })
+            if !decoysCalled.isEmpty {
+                print("  WRONG-TOOL (decoy): \(decoysCalled.sorted().joined(separator: ", "))")
+            }
+            if outcome.passed { passedCount += 1 }
+            if outcome.passed && decoysCalled.isEmpty { cleanCount += 1 }
             if !outcome.passed {
                 allPassed = false
                 print("  final answer: \(outcome.finalAnswer.prefix(200))")
@@ -276,6 +343,11 @@ func runCLI() async -> Int32 {
             print("  ERROR \(error)")
         }
     }
+
+    // Machine-readable one-liner the sweep script greps to build the per-model
+    // "correct up to ~K tools" table. `clean_dispatch` is the headline metric:
+    // scenarios that passed AND avoided every decoy at this decoy count.
+    print("SUMMARY extra_tools=\(cli.extraTools) passed=\(passedCount)/\(total) clean_dispatch=\(cleanCount)/\(total)")
 
     if allPassed {
         print("\nAll scenarios passed.")
