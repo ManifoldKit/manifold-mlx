@@ -54,6 +54,74 @@ final class MLXChatMessageEncoderTests: XCTestCase {
         XCTAssertTrue(block!.contains("</tool_call>"))
     }
 
+    // MARK: - Single tool-injection invariant (ManifoldKit 0.57 / #1985)
+
+    /// Pins the no-double-injection contract after the MK 0.57 harness reshape
+    /// (#1985 moved `ScenarioRunner` onto `InferenceService`).
+    ///
+    /// MK's `GenerationQueue.dispatchToBackend` only renders the chat template +
+    /// injects tools through `PromptRenderer` / `ToolSystemPromptBuilder` when the
+    /// backend reports `capabilities.requiresPromptTemplate == true`. `MLXBackend`
+    /// reports `false` (and `rendersFullPrompt == true`), so the service takes the
+    /// non-template branch: it forwards the *bare* last user message as `prompt`
+    /// and the *raw* `systemPrompt` (no tool augmentation), then installs structured
+    /// history. The MLX driver alone owns input-side templating + tool injection via
+    /// `buildQwenToolBlock`. This test reproduces that exact branch's inputs and
+    /// asserts the tool block is injected **exactly once** — guarding against a
+    /// regression where MK starts double-injecting (or MLX starts honouring a
+    /// pre-rendered tool prompt) and the model sees its tools twice.
+    func test_singleToolInjection_serviceForwardsBarePromptAndRawSystem() throws {
+        var config = GenerationConfig()
+        config.tools = [
+            ToolDefinition(
+                name: "get_weather",
+                description: "Look up current weather",
+                parameters: .object(["type": .string("object")])
+            )
+        ]
+
+        // Mirror MLXGenerationDriver.generate: effectiveSystemPrompt = raw system
+        // prompt + the single tool block the driver appends for the dialect.
+        let toolBlock = MLXChatMessageEncoder.buildQwenToolBlock(config: config, dialect: .qwen25)
+        let rawSystemPrompt = "You are a helpful assistant."
+        let effectiveSystemPrompt = (rawSystemPrompt) + (toolBlock ?? "")
+
+        let (_, messages) = try MLXChatMessageEncoder.buildChatMessages(
+            // The service passes the bare last user message here (non-template
+            // branch), NOT a pre-rendered prompt carrying tools.
+            prompt: "What's the weather in Paris?",
+            effectiveSystemPrompt: effectiveSystemPrompt,
+            conversationHistory: [],
+            toolAwareHistory: nil,
+            structuredHistory: nil,
+            dialect: .qwen25
+        )
+
+        // Exactly one system message, sitting first.
+        let systemMessages = messages.filter { $0["role"] == "system" }
+        XCTAssertEqual(systemMessages.count, 1, "tools must not produce a second system turn")
+        XCTAssertEqual(messages.first?["role"], "system")
+
+        // The <tools> block — the tool-definition injection — appears exactly once
+        // across the entire assembled message set. A double-injection regression
+        // would surface here as 2.
+        let assembled = messages.map { ($0["content"] ?? "") }.joined(separator: "\n")
+        let toolsBlockCount = assembled.components(separatedBy: "<tools>").count - 1
+        XCTAssertEqual(toolsBlockCount, 1, "tool definitions must be injected exactly once")
+        XCTAssertEqual(
+            assembled.components(separatedBy: "get_weather").count - 1, 1,
+            "the tool name must not appear twice (no double-injection)"
+        )
+
+        // The bare user prompt is carried verbatim and is NOT itself tool-laden.
+        let userMessage = messages.first { $0["role"] == "user" }
+        XCTAssertEqual(userMessage?["content"], "What's the weather in Paris?")
+        XCTAssertFalse(
+            (userMessage?["content"] ?? "").contains("<tools>"),
+            "the user turn must stay a bare prompt — tools live only in the system turn"
+        )
+    }
+
     // MARK: - buildChatMessages
 
     func test_buildChatMessages_fallsBackToBarePromptWhenNoHistory() throws {
