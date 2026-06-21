@@ -422,6 +422,14 @@ import ManifoldInference
         let normalizerTail = llamaNormalizer.finalize()
         if !normalizerTail.isEmpty {
             for event in session.ingest(normalizerTail) {
+                if isFirstToken {
+                    switch event {
+                    case .token, .thinkingToken, .toolCall:
+                        generationStream.setPhase(.streaming)
+                        isFirstToken = false
+                    default: break
+                    }
+                }
                 if case .token = event { outputTokenCount += 1 }
                 continuation.yield(event)
             }

@@ -299,6 +299,72 @@ final class MLXLlamaToolDialectTests: XCTestCase {
         XCTAssertEqual(toolCalls(events).map(\.toolName), ["calc"])
     }
 
+    // MARK: - Streaming-phase regression: tool-call-only via normalizer tail
+
+    /// Regression test for the bug where a Llama `<|python_tag|>` tool call with
+    /// NO preceding visible text caused `generationStream.setPhase(.streaming)` to
+    /// be skipped entirely. The main generation loop swallows all the content into
+    /// the tool parser, leaving `isFirstToken == true`; then `llamaNormalizer.finalize()`
+    /// fires the synthetic close that produces the `.toolCall` event — but the old
+    /// code never called `setPhase(.streaming)` in that tail path.
+    ///
+    /// This test drives `MLXBackend` end-to-end via `MockMLXModelContainer` (no
+    /// Metal/GPU required), injecting a single chunk that is entirely the open
+    /// python_tag with no text before it. The normalizer tail emits the synthetic
+    /// close and session produces the `.toolCall`. We assert:
+    ///   (a) a `.toolCall` event is emitted naming "f"
+    ///   (b) `stream.phase` reached `.streaming` (not stuck at `.preparing`)
+    func test_pythonTag_toolCallOnly_setsStreamingPhase() async throws {
+        let mock = MockMLXModelContainer()
+        // Single chunk: entire output is a bare python_tag tool call body.
+        // No text precedes it, so `isFirstToken` stays `true` through the main
+        // loop — the `.toolCall` event can only come from the normalizer tail.
+        mock.generationsToYield = [
+            .chunk(#"<|python_tag|>{"name":"f","parameters":{}}"#),
+        ]
+
+        let backend = MLXBackend()
+        // Inject with .llama dialect so `MLXLlamaPythonTagNormalizer` activates.
+        backend._inject(mock, dialect: .llama)
+
+        var config = GenerationConfig()
+        config.tools = [
+            ToolDefinition(name: "f", description: "no-op tool", parameters: .object([:]))
+        ]
+
+        let stream = try backend.generate(
+            prompt: "call f",
+            systemPrompt: nil,
+            config: config
+        )
+
+        var collectedEvents: [GenerationEvent] = []
+        for try await event in stream.events {
+            collectedEvents.append(event)
+        }
+
+        // (a) A .toolCall event naming "f" must be emitted.
+        let toolCalls = collectedEvents.compactMap { ev -> ToolCall? in
+            if case .toolCall(let c) = ev { return c } else { return nil }
+        }
+        XCTAssertEqual(toolCalls.map(\.toolName), ["f"],
+            "A python_tag tool call with no preceding text must dispatch via the normalizer tail")
+
+        // (b) The stream must have transitioned to .streaming.
+        // Without the fix, setPhase(.streaming) was never called in the tail
+        // path, leaving the stream stuck at .preparing for callers gating on phase.
+        let phase = await MainActor.run { stream.phase }
+        // Accept .streaming or .done — .done means the stream finished but did
+        // pass through .streaming (GenerationStream transitions: .streaming → .done).
+        // The bug leaves it at .preparing, which is neither .streaming nor .done.
+        switch phase {
+        case .streaming, .done:
+            break // Correct: the tail path called setPhase(.streaming) before finishing.
+        default:
+            XCTFail("Stream phase must reach .streaming (or .done) when the only event is a tool call via the normalizer tail; got \(phase). This indicates setPhase(.streaming) was never called.")
+        }
+    }
+
     // MARK: - Normaliser unit behaviour (no transform)
 
     func test_normaliser_qwenDialect_isIdentity() {
