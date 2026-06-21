@@ -1,0 +1,38 @@
+Llama 3.2 native python_tag tool-call fixture (issue #59 tail)
+==============================================================
+
+This file captures the *visible text* the MLX streaming detokeniser surfaces
+when llama-3.2-3b falls back to its NATIVE tool-call format for the `03-read`
+(read_file) and `04-list` (list_dir) scenarios.
+
+The model emits, at the token level:
+
+    <|python_tag|>  {"name":"read_file","parameters":{"path":"example.txt"}}  <|eom_id|>
+    (128010)        … JSON body tokens …                                    (128008)
+
+`<|eom_id|>` (128008) and `<|eot_id|>` (128009) are STOP tokens. mlx-swift-lm's
+`generateLoopTask` breaks the generation loop on a stop token WITHOUT
+detokenising it (Evaluate.swift, `includeStopToken == false`), so the close
+token never reaches the visible stream. `<|python_tag|>` (128010) is NOT a stop
+token, so it survives `decode(skipSpecialTokens: false)`.
+
+Net visible text the `MLXToolMarkers` / `ToolCallTransform` parser therefore
+sees — an UNTERMINATED python-tag block:
+
+    <|python_tag|>{"name":"read_file","parameters":{"path":"example.txt"}}
+
+Before the fix the parser opened a `<|python_tag|>` block, buffered the body,
+and discarded it at finalize (no close ever arrived) — so read_file/list_dir
+never dispatched.
+
+The fix (`MLXLlamaPythonTagNormalizer`, gated to the `.llama` dialect) injects a
+synthetic `<|eom_id|>` close at stream end when a python-tag block is still open,
+yielding:
+
+    <|python_tag|>{"name":"read_file","parameters":{"path":"example.txt"}}<|eom_id|>
+
+which the `<|python_tag|>` → `<|eom_id|>` marker parses into a `read_file`
+ToolCall. The machine-checked regression coverage lives in
+`Tests/ManifoldMLXTests/MLXLlamaToolDialectTests.swift`
+(`test_pythonTag_withoutVisibleClose_dispatchesAfterNormalisation`,
+`test_pythonTag_listDir_splitChunks_dispatches`, and the normaliser unit tests).

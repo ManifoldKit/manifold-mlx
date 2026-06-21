@@ -200,4 +200,124 @@ final class MLXLlamaToolDialectTests: XCTestCase {
         XCTAssertTrue(content.contains("\"parameters\""), "replayed Llama calls use the `parameters` key")
         XCTAssertFalse(content.contains("\"arguments\""))
     }
+
+    // MARK: - python_tag recovery (issue #59 tail)
+    //
+    // The MLX streaming detokeniser drops Llama's `<|eom_id|>` / `<|eot_id|>`
+    // close tokens (they are stop tokens, so the generate loop breaks before
+    // detokenising them). `<|python_tag|>` survives, so a native tool call
+    // arrives as an *unterminated* `<|python_tag|>{json…}` block and was
+    // discarded. `MLXLlamaPythonTagNormalizer` injects a synthetic `<|eot_id|>`
+    // close at stream end so the body parses. These tests run the normaliser in
+    // front of `ToolCallTransform` exactly as the driver does.
+
+    /// Drives `MLXLlamaPythonTagNormalizer` → `ToolCallTransform`, mirroring the
+    /// MLX driver: each chunk is normalised, fed to the transform, then the
+    /// normaliser's finalize tail is fed in before the transform finalizes.
+    private struct NormalizingParser {
+        private var normalizer: MLXLlamaPythonTagNormalizer
+        private var transform: ToolCallTransform
+        init(dialect: MLXToolDialect) {
+            normalizer = MLXLlamaPythonTagNormalizer(dialect: dialect)
+            transform = ToolCallTransform(markers: MLXToolMarkers.markers(dialect: dialect))
+        }
+        mutating func process(_ chunk: String) -> [GenerationEvent] {
+            transform.process([.token(normalizer.process(chunk))])
+        }
+        mutating func finalize() -> [GenerationEvent] {
+            var events = transform.process([.token(normalizer.finalize())])
+            events += transform.finalize()
+            return events
+        }
+    }
+
+    /// The whole point of issue #59's tail: a `<|python_tag|>` body whose close
+    /// token MLX dropped still dispatches once the normaliser injects the close.
+    func test_pythonTag_withoutVisibleClose_dispatchesAfterNormalisation() throws {
+        var parser = NormalizingParser(dialect: .llama)
+        // No `<|eom_id|>` / `<|eot_id|>` — exactly what reaches us after MLX
+        // breaks the loop on the (dropped) stop token.
+        var events = parser.process(#"<|python_tag|>{"name":"read_file","parameters":{"path":"a.txt"}}"#)
+        events += parser.finalize()
+        let calls = toolCalls(events)
+        XCTAssertEqual(calls.map(\.toolName), ["read_file"],
+                       "an unterminated python_tag block must dispatch after the synthetic close is injected")
+        XCTAssertEqual(calls.first?.arguments, #"{"path":"a.txt"}"#)
+        XCTAssertTrue(visible(events).isEmpty, "the recovered call must not leak into visible text")
+    }
+
+    /// The list_dir scenario shape, streamed across several chunks (including a
+    /// chunk boundary inside the `<|python_tag|>` open tag).
+    func test_pythonTag_listDir_splitChunks_dispatches() throws {
+        var parser = NormalizingParser(dialect: .llama)
+        var events = parser.process("<|python")
+        events += parser.process(#"_tag|>{"name":"list_dir","#)
+        events += parser.process(#""parameters":{"path":"."}}"#)
+        events += parser.finalize()
+        XCTAssertEqual(toolCalls(events).map(\.toolName), ["list_dir"])
+    }
+
+    /// A python_tag block the model *did* close with a visible `<|eom_id|>` is
+    /// parsed without a doubled close (the normaliser sees the close and does
+    /// not inject another).
+    func test_pythonTag_withVisibleEomClose_dispatchesOnce() throws {
+        var parser = NormalizingParser(dialect: .llama)
+        var events = parser.process(#"<|python_tag|>{"name":"now","parameters":{}}<|eom_id|>"#)
+        events += parser.finalize()
+        XCTAssertEqual(toolCalls(events).map(\.toolName), ["now"],
+                       "a visibly-closed python_tag must dispatch exactly once")
+    }
+
+    /// An empty `<tool_call></tool_call>` (the failure symptom: special tokens
+    /// stripped leaving an empty body) must NOT produce a spurious tool call.
+    func test_emptyToolCall_producesNoSpuriousCall() throws {
+        var parser = NormalizingParser(dialect: .llama)
+        var events = parser.process("<tool_call></tool_call>")
+        events += parser.finalize()
+        XCTAssertTrue(toolCalls(events).isEmpty,
+                      "an empty tool_call body must not be mistaken for a call")
+    }
+
+    /// Plain prose with no python tag is passed through byte-for-byte and yields
+    /// no tool call and no injected close.
+    func test_plainProse_isUnchanged_andNoCall() throws {
+        var parser = NormalizingParser(dialect: .llama)
+        let prose = "I cannot read files, but here is some Python: open('a.txt')."
+        var events = parser.process(prose)
+        events += parser.finalize()
+        XCTAssertTrue(toolCalls(events).isEmpty)
+        XCTAssertEqual(visible(events), prose, "prose must survive normalisation verbatim")
+    }
+
+    /// The textual `<tool_call>` wrapper (the steered Llama path that already
+    /// worked) is unaffected: the normaliser never opens a python-tag block, so
+    /// no synthetic close is injected and the call parses exactly once.
+    func test_textualToolCallWrapper_stillDispatchesUnderNormaliser() throws {
+        var parser = NormalizingParser(dialect: .llama)
+        var events = parser.process(Self.realLlamaCalcCall)
+        events += parser.finalize()
+        XCTAssertEqual(toolCalls(events).map(\.toolName), ["calc"])
+    }
+
+    // MARK: - Normaliser unit behaviour (no transform)
+
+    func test_normaliser_qwenDialect_isIdentity() {
+        var n = MLXLlamaPythonTagNormalizer(dialect: .qwen25)
+        XCTAssertEqual(n.process(#"<|python_tag|>{"name":"x"}"#), #"<|python_tag|>{"name":"x"}"#)
+        XCTAssertEqual(n.finalize(), "", "non-Llama dialects never inject a close")
+    }
+
+    func test_normaliser_injectsCloseOnlyWhenBlockOpen() {
+        var open = MLXLlamaPythonTagNormalizer(dialect: .llama)
+        _ = open.process(#"<|python_tag|>{"name":"x","parameters":{}}"#)
+        XCTAssertEqual(open.finalize(), "<|eom_id|>", "an open python_tag gets a synthetic close")
+
+        var closed = MLXLlamaPythonTagNormalizer(dialect: .llama)
+        _ = closed.process(#"<|python_tag|>{"name":"x"}<|eom_id|>"#)
+        XCTAssertEqual(closed.finalize(), "", "a visibly-closed python_tag gets no extra close")
+
+        var none = MLXLlamaPythonTagNormalizer(dialect: .llama)
+        _ = none.process("just some prose")
+        XCTAssertEqual(none.finalize(), "", "no python_tag means no injected close")
+    }
 }
