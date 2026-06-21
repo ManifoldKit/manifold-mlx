@@ -246,7 +246,22 @@ func runCLI() async -> Int32 {
         // so we advertise only what the task needs (not all six) to the model.
         let registry = makeRegistry(for: scenario, fixturesRoot: fixturesRoot)
         do {
-            let runner = ScenarioRunner(backend: backend, registry: registry, logger: logger)
+            // MK 0.57 (#1985) reshaped the harness: `ScenarioRunner` now drives a
+            // production `InferenceService` instead of dispatching tools itself.
+            // We construct a fresh service per scenario, injecting the already-
+            // loaded MLX backend directly via `InferenceService(backend:…)` (the
+            // harness/offline init, which marks the model loaded immediately) and
+            // attaching this scenario's scoped `ToolRegistry`. The runner reads
+            // `service.toolRegistry` to derive the advertised tool definitions and
+            // dispatches each emitted `.toolCall` through it — no per-scenario
+            // re-load of the model (the backend instance is reused).
+            let service = InferenceService(
+                backend: backend,
+                name: "mlx",
+                modelName: modelURL.lastPathComponent,
+                toolRegistry: registry
+            )
+            let runner = ScenarioRunner(service: service, logger: logger)
             let outcome = try await runner.run(scenario)
             for assertion in outcome.assertions {
                 let marker = assertion.passed ? "  PASS" : "  FAIL"
