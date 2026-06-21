@@ -299,6 +299,84 @@ final class MLXLlamaToolDialectTests: XCTestCase {
         XCTAssertEqual(toolCalls(events).map(\.toolName), ["calc"])
     }
 
+    // MARK: - Streaming-phase regression: tool-call-only via normalizer tail
+
+    /// Regression test for the bug where a Llama `<|python_tag|>` tool call with
+    /// NO preceding visible text caused `generationStream.setPhase(.streaming)` to
+    /// be skipped entirely. The main generation loop swallows all the content into
+    /// the tool parser, leaving `isFirstToken == true`; then `llamaNormalizer.finalize()`
+    /// fires the synthetic close that produces the `.toolCall` event — but the old
+    /// code never called `setPhase(.streaming)` in that tail path.
+    ///
+    /// This test drives `MLXBackend` end-to-end via `MockMLXModelContainer` (no
+    /// Metal/GPU required), injecting a single chunk that is entirely the open
+    /// python_tag with no text before it. The normalizer tail emits the synthetic
+    /// close and session produces the `.toolCall`. We assert:
+    ///   (a) a `.toolCall` event is emitted naming "f"
+    ///   (b) `stream.phase` reached `.streaming` (not stuck at `.preparing`)
+    func test_pythonTag_toolCallOnly_setsStreamingPhase() async throws {
+        let mock = MockMLXModelContainer()
+        // Single chunk: entire output is a bare python_tag tool call body.
+        // No text precedes it, so `isFirstToken` stays `true` through the main
+        // loop — the `.toolCall` event can only come from the normalizer tail.
+        mock.generationsToYield = [
+            .chunk(#"<|python_tag|>{"name":"f","parameters":{}}"#),
+        ]
+
+        let backend = MLXBackend()
+        // Inject with .llama dialect so `MLXLlamaPythonTagNormalizer` activates.
+        backend._inject(mock, dialect: .llama)
+
+        var config = GenerationConfig()
+        config.tools = [
+            ToolDefinition(name: "f", description: "no-op tool", parameters: .object([:]))
+        ]
+
+        let stream = try backend.generate(
+            prompt: "call f",
+            systemPrompt: nil,
+            config: config
+        )
+
+        // Verify that setPhase(.streaming) is called in the normalizer-tail path.
+        //
+        // Architecture: MLXGenerationDriver is @MainActor. Both setPhase(.streaming)
+        // (in the tail loop) and setPhase(.done) (in MLXBackend after driver returns)
+        // execute in the same main-actor run before the consumer task ever resumes.
+        // Observing the intermediate .streaming state from outside that turn via
+        // @Observable phase polling is architecturally impossible — both mutations
+        // happen before the consumer is ever resumed. Instead, we use the
+        // @_spi(Testing) synchronous callback MLXGenerationDriver._streamingPhaseSetInTailHook,
+        // which fires on the main actor immediately after setPhase(.streaming) in the
+        // tail path — before any further mutations.
+        //
+        // With the fix:    hook fires → streamingWasSet = true
+        // Without the fix: hook never fires → streamingWasSet = false
+        nonisolated(unsafe) var streamingWasSet = false
+        MLXGenerationDriver._streamingPhaseSetInTailHook = {
+            streamingWasSet = true
+        }
+        defer { MLXGenerationDriver._streamingPhaseSetInTailHook = nil }
+
+        var collectedEvents: [GenerationEvent] = []
+        for try await event in stream.events {
+            collectedEvents.append(event)
+        }
+
+        // (a) A .toolCall event naming "f" must be emitted.
+        let toolCalls = collectedEvents.compactMap { ev -> ToolCall? in
+            if case .toolCall(let c) = ev { return c } else { return nil }
+        }
+        XCTAssertEqual(toolCalls.map(\.toolName), ["f"],
+            "A python_tag tool call with no preceding text must dispatch via the normalizer tail")
+
+        // (b) The driver must have called setPhase(.streaming) in the tail path.
+        // Without the fix, the tail loop has no phase-transition logic, so
+        // _streamingPhaseSetInTailHook never fires and streamingWasSet stays false.
+        XCTAssertTrue(streamingWasSet,
+            "setPhase(.streaming) must be called in the normalizer-tail path when a tool call is the first (and only) event. Without the fix, the stream goes directly from .connecting to .done, breaking callers that gate on stream.phase == .streaming.")
+    }
+
     // MARK: - Normaliser unit behaviour (no transform)
 
     func test_normaliser_qwenDialect_isIdentity() {
