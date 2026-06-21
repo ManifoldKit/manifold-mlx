@@ -316,7 +316,7 @@ import ManifoldInference
         let useToolParser = !config.tools.isEmpty && dialect != .unknown
         var stages: [Stage] = []
         if useToolParser {
-            stages.append(.tool(ToolCallTransform(markers: MLXToolMarkers.markers())))
+            stages.append(.tool(ToolCallTransform(markers: MLXToolMarkers.markers(dialect: dialect))))
         }
         if useThinkingParser {
             stages.append(.thinking(ThinkingTransform(markers: markers ?? .qwen3)))

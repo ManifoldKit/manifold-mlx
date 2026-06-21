@@ -1,0 +1,12 @@
+{"kind":"prompt","scenario":"02-calc","system":"You have tools. When a tool can answer, call it. Never perform arithmetic in your head — always call `calc` and quote its answer.","ts":"2026-06-20T23:29:59Z","user":"What is 7823 multiplied by 41? Reply with only the number the tool returns."}
+{"arguments":"{\"a\":7823,\"b\":41,\"op\":\"*\"}","kind":"tool_call","name":"calc","scenario":"02-calc","ts":"2026-06-20T23:30:01Z"}
+{"content":"{\"answer\":320743}","errorKind":null,"kind":"tool_result","name":"calc","scenario":"02-calc","ts":"2026-06-20T23:30:01Z"}
+{"arguments":"{\"b\":41,\"a\":7823,\"op\":\"*\"}","kind":"tool_call","name":"calc","scenario":"02-calc","ts":"2026-06-20T23:30:02Z"}
+{"content":"{\"answer\":320743}","errorKind":null,"kind":"tool_result","name":"calc","scenario":"02-calc","ts":"2026-06-20T23:30:02Z"}
+{"arguments":"{\"a\":7823,\"op\":\"*\",\"b\":41}","kind":"tool_call","name":"calc","scenario":"02-calc","ts":"2026-06-20T23:30:04Z"}
+{"content":"{\"answer\":320743}","errorKind":null,"kind":"tool_result","name":"calc","scenario":"02-calc","ts":"2026-06-20T23:30:04Z"}
+{"kind":"token_delta","scenario":"02-calc","text":"320","ts":"2026-06-20T23:30:04Z"}
+{"kind":"token_delta","scenario":"02-calc","text":"743","ts":"2026-06-20T23:30:04Z"}
+{"kind":"final","scenario":"02-calc","text":"320743","ts":"2026-06-20T23:30:04Z"}
+{"kind":"assertion","message":"Scenario requires `calc` to actually be dispatched — dispatched","passed":true,"scenario":"02-calc","ts":"2026-06-20T23:30:04Z"}
+{"kind":"assertion","message":"Final answer should quote the calc result 320743 — found","passed":true,"scenario":"02-calc","ts":"2026-06-20T23:30:04Z"}
