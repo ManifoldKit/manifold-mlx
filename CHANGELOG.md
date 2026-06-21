@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.9](https://github.com/roryford/manifold-mlx/compare/v0.2.8...v0.2.9) (2026-06-21)
+
+
+### Features
+
+* **tools:** advertise N decoy tools to measure tool-selection accuracy ([#73](https://github.com/roryford/manifold-mlx/issues/73)) ([868f6b7](https://github.com/roryford/manifold-mlx/commit/868f6b719632f188bc65b45266ed7f31d470bad7))
+* **tools:** score decoy tool-selection with 0.58 classification metrics ([#76](https://github.com/roryford/manifold-mlx/issues/76)) ([cbb4bcf](https://github.com/roryford/manifold-mlx/commit/cbb4bcf754f8ee0986139c41e2e8f412baa48045))
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.58.0 ([#75](https://github.com/roryford/manifold-mlx/issues/75)) ([f81145c](https://github.com/roryford/manifold-mlx/commit/f81145c5244645434fb8b1c9d59b2bc0970cfcf4))
+
 ## [0.2.8](https://github.com/roryford/manifold-mlx/compare/v0.2.7...v0.2.8) (2026-06-21)
 
 
