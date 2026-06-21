@@ -323,6 +323,15 @@ import ManifoldInference
         }
         var session = OutputParserSession(stages)
 
+        // Recover Llama's native `<|python_tag|>` tool-call channel: MLX drops
+        // the `<|eom_id|>` / `<|eot_id|>` close tokens (they are stop tokens, so
+        // the generate loop breaks before detokenising them), leaving the
+        // python-tag block unterminated. The normaliser injects a synthetic close
+        // at stream end so the `<|python_tag|>` marker can fire (issue #59 tail).
+        // Identity for every non-`.llama` dialect and for the textual
+        // `<tool_call>` wrapper, so Qwen and the steered-Llama path are unchanged.
+        var llamaNormalizer = MLXLlamaPythonTagNormalizer(dialect: dialect)
+
         // A thinking model that runs away on a 16 GB Mac can OOM mid-generation;
         // the budget gate breaks out of the stream once the limit is reached.
         var thinkingTokenCount = 0
@@ -363,7 +372,12 @@ import ManifoldInference
                 capturedCompletionInfo = info
                 continue
             }
-            guard let text = generation.chunk else { continue }
+            guard let rawText = generation.chunk else { continue }
+            // Normalise the Llama python-tag channel (identity for other dialects).
+            // The result can be empty when the whole chunk is a held-back partial
+            // tag suffix; the ingest loop below is a no-op in that case, but the
+            // per-chunk yield cadence still counts this as real generation work.
+            let text = llamaNormalizer.process(rawText)
 
             for finalEvent in session.ingest(text) {
                 if isFirstToken {
@@ -398,6 +412,18 @@ import ManifoldInference
                 } else {
                     await Task.yield()
                 }
+            }
+        }
+
+        // Flush the python-tag normaliser first: if a `<|python_tag|>` block was
+        // left open (its `<|eom_id|>` / `<|eot_id|>` close dropped by MLX), this
+        // emits the held-back tail plus a synthetic close so the tool marker
+        // fires during the session finalize below. Identity for other dialects.
+        let normalizerTail = llamaNormalizer.finalize()
+        if !normalizerTail.isEmpty {
+            for event in session.ingest(normalizerTail) {
+                if case .token = event { outputTokenCount += 1 }
+                continuation.yield(event)
             }
         }
 
