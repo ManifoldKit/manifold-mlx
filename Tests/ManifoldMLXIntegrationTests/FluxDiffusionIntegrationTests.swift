@@ -55,6 +55,17 @@ final class FluxDiffusionIntegrationTests: XCTestCase {
     /// Metal-bound (`quantize`/`MLXArray`) so it lives in the integration suite
     /// but needs no model snapshot.
     func test_quantizedEmbedding_branch_convertsOnlyWhenScalesPresent() throws {
+        // Per the integration-target contract (Package.swift): every test here
+        // must XCTSkip under plain `swift test` unless run through the Xcode
+        // harness (scripts/test-mlx-integration.sh), which injects this marker
+        // AND the compiled metallib. Hardware checks alone are insufficient: the
+        // CI macOS runner reports a Metal device but has no metallib under
+        // `swift test`, so the `quantize`/`MLXArray` calls below would abort the
+        // process. Unlike the other tests this one needs no model, so it can't
+        // lean on the MANIFOLD_FLUX_MODEL guard.
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["MANIFOLD_DISCOVER_LOCAL_MODELS"] == "1",
+            "Metal-bound; run via scripts/test-mlx-integration.sh")
         try XCTSkipUnless(HardwareRequirements.isAppleSilicon, "Requires Apple Silicon")
         try XCTSkipUnless(HardwareRequirements.hasMetalDevice, "Requires Metal GPU")
 
