@@ -20,6 +20,21 @@
 #   SCENARIO      --scenario value           (default: all)
 #   FIXTURES_ROOT --fixtures-root value      (default: bundled)
 #   CONFIG        swift build -c value       (default: release)
+#   MTOOLS_BIN    pre-built manifold-tools-mlx binary to use as-is
+#
+# IMPORTANT: MLX generation needs mlx-swift's Metal `metallib`, which only the
+# Xcode/xcodebuild build compiles+bundles — a plain `swift build` binary aborts
+# at model load with "Failed to load the default metallib". So to actually run
+# the eval, build the executable via xcodebuild and pass it through MTOOLS_BIN:
+#
+#   xcodebuild -scheme manifold-tools-mlx -configuration Release \
+#     -derivedDataPath .build/tools-mlx-derived \
+#     -destination 'platform=macOS,arch=arm64' build
+#   MTOOLS_BIN=.build/tools-mlx-derived/Build/Products/Release/manifold-tools-mlx \
+#     scripts/tool-decoy-sweep.sh MODEL_DIR ...
+#
+# Without MTOOLS_BIN the script falls back to `swift build` (compiles fine, but
+# can only run `--list`/`--help`; generation will fail).
 #
 # Exit: 0 if every run completed (regardless of pass/fail); 1 on a run error or
 # bad arguments. Per-run pass/fail is captured in the table, not the exit code.
@@ -37,9 +52,15 @@ CONFIG="${CONFIG:-release}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-echo "Building manifold-tools-mlx (-c $CONFIG) …" >&2
-swift build -c "$CONFIG" --product manifold-tools-mlx >&2
-BIN="$(swift build -c "$CONFIG" --product manifold-tools-mlx --show-bin-path)/manifold-tools-mlx"
+if [ -n "${MTOOLS_BIN:-}" ]; then
+  BIN="$MTOOLS_BIN"
+  [ -x "$BIN" ] || { echo "MTOOLS_BIN is not an executable: $BIN" >&2; exit 1; }
+  echo "Using pre-built binary: $BIN" >&2
+else
+  echo "Building manifold-tools-mlx (-c $CONFIG) … (NOTE: swift build can't generate — see header)" >&2
+  swift build -c "$CONFIG" --product manifold-tools-mlx >&2
+  BIN="$(swift build -c "$CONFIG" --product manifold-tools-mlx --show-bin-path)/manifold-tools-mlx"
+fi
 
 OUT_DIR="tmp/tool-decoy-sweep"
 mkdir -p "$OUT_DIR"
@@ -55,7 +76,15 @@ trap 'rm -f "$rows_file"' EXIT
 
 for model in "$@"; do
   model_name="$(basename "$model")"
+  baseline_clean=""
   for n in $LADDER; do
+    # Short-circuit: if the model can't cleanly dispatch with ZERO decoys
+    # (n==0), higher decoy counts only re-measure "can't tool-call" — skip them.
+    if [ "$n" != "0" ] && [ "$baseline_clean" = "0" ]; then
+      printf '%s\t%s\t%s\t%s\n' "$model_name" "$n" "skip" "$base_total" >>"$rows_file"
+      printf '%s\t%s\t(skipped — 0 clean dispatches at n=0)\n' "$model_name" "$n" >&2
+      continue
+    fi
     log="$OUT_DIR/${model_name}.n${n}.jsonl"
     echo "── $model_name × extra-tools=$n ──" >&2
     # Don't let a non-zero exit (assertion failure) abort the sweep.
@@ -69,6 +98,7 @@ for model in "$@"; do
     clean="$(printf '%s' "$summary" | sed -n 's/.*clean_dispatch=\([0-9]*\)\/.*/\1/p')"
     total="$(printf '%s' "$summary" | sed -n 's/.*clean_dispatch=[0-9]*\/\([0-9]*\).*/\1/p')"
     if [ -z "$clean" ]; then clean="?"; total="?"; passed="?"; fi
+    if [ "$n" = "0" ]; then baseline_clean="$clean"; base_total="$total"; fi
     printf '%s\t%s\t%s\t%s\n' "$model_name" "$n" "$clean" "$total" >>"$rows_file"
     printf '%s\t%s\t%s\n' "$model_name" "$n" "${summary:-<no SUMMARY line>}" >&2
   done
