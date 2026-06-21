@@ -36,7 +36,7 @@ struct CLI {
     /// Argument errors exit with status 2 via `exit(2)` + stderr rather than
     /// `precondition` / `fatalError` (those trap with SIGABRT in debug builds,
     /// producing a confusing stack trace instead of the documented exit code).
-    private static func fail(_ message: String) -> Never {
+    static func fail(_ message: String) -> Never {
         FileHandle.standardError.write(Data("manifold-tools-mlx: \(message)\n".utf8))
         exit(2)
     }
@@ -257,8 +257,7 @@ func runCLI() async -> Int32 {
     } else {
         filtered = scenarios.filter { $0.id == cli.scenarioFilter }
         if filtered.isEmpty {
-            FileHandle.standardError.write(Data("no scenario matches id '\(cli.scenarioFilter)'\n".utf8))
-            return 1
+            CLI.fail("no scenario matches id '\(cli.scenarioFilter)' — run --list for valid IDs")
         }
     }
 
