@@ -101,11 +101,39 @@ fi
 
 DERIVED="$REPO_ROOT/.build/mlx-integration-test-derived"
 
+# Resolve the SwiftPM-generated scheme. `xcodebuild` names the package-wide
+# scheme `<package>-Package` (e.g. `manifold-mlx-Package`); plain `manifold-mlx`
+# only exists in some Xcode versions / checkout layouts (and notably NOT when
+# the package is checked out under a differently named worktree directory).
+# Prefer an exact `manifold-mlx`, else the `*-Package` scheme, else bail with a
+# helpful list.
+pick_scheme() {
+    local schemes
+    schemes=$(xcodebuild -list 2>/dev/null | sed -n '/Schemes:/,$p' | tail -n +2 | sed 's/^[[:space:]]*//' | grep -v '^$')
+    if grep -qx "manifold-mlx" <<<"$schemes"; then
+        echo "manifold-mlx"
+    elif grep -qx "manifold-mlx-Package" <<<"$schemes"; then
+        echo "manifold-mlx-Package"
+    else
+        local pkgScheme
+        pkgScheme=$(grep -E -- '-Package$' <<<"$schemes" | head -1)
+        if [[ -n "$pkgScheme" ]]; then
+            echo "$pkgScheme"
+        else
+            echo "ERROR: no manifold-mlx / *-Package scheme found. Available:" >&2
+            echo "$schemes" >&2
+            exit 1
+        fi
+    fi
+}
+SCHEME="$(pick_scheme)"
+echo "==> Using xcodebuild scheme: $SCHEME"
+
 if [[ "$REBUILD" -eq 1 || ! -d "$DERIVED" ]]; then
     echo "==> Building test bundle (xcodebuild build-for-testing)…"
     rm -rf "$DERIVED"
     xcodebuild build-for-testing \
-        -scheme manifold-mlx \
+        -scheme "$SCHEME" \
         -only-testing ManifoldMLXIntegrationTests \
         -destination 'platform=macOS' \
         -derivedDataPath "$DERIVED" \

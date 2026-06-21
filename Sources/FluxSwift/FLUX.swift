@@ -59,7 +59,7 @@ open class FLUX {
         let blockIndex = components[1]
         let ffType = components[2]
         let netIndex = components[4]
-        
+
         if netIndex == "0" {
           return "transformer_blocks.\(blockIndex).\(ffType).linear1.\(components.last ?? "")"
         } else if netIndex == "2" {
@@ -68,6 +68,83 @@ open class FLUX {
       }
     }
     return key
+  }
+
+  /// Translates an mflux-flattened T5 encoder weight key into the nested
+  /// HF-diffusers schema our `T5Encoder` module exposes (issue #39, GAP 1).
+  ///
+  /// mflux exports the T5-XXL text encoder with a flat, mflux-specific schema;
+  /// our module tree (see `T5Encoder.swift`) mirrors HF diffusers nesting:
+  ///
+  ///   t5_blocks.N.attention.SelfAttention.{q,k,v,o}.X
+  ///       -> encoder.block.N.layer.0.SelfAttention.{q,k,v,o}.X
+  ///   t5_blocks.N.attention.layer_norm.X
+  ///       -> encoder.block.N.layer.0.layer_norm.X
+  ///   t5_blocks.N.ff.DenseReluDense.{wi_0,wi_1,wo}.X
+  ///       -> encoder.block.N.layer.1.DenseReluDense.{wi_0,wi_1,wo}.X
+  ///   t5_blocks.N.ff.layer_norm.X
+  ///       -> encoder.block.N.layer.1.layer_norm.X
+  ///   final_layer_norm.X        -> encoder.final_layer_norm.X
+  ///   shared.X                  -> shared.X               (unchanged)
+  ///   relative_attention_bias.X -> relative_attention_bias.X  (unchanged)
+  ///
+  /// Suffixes (`.weight`, `.scales`, `.biases`) are preserved verbatim so the
+  /// quantized-tensor pass downstream still pairs `.weight`/`.scales`/`.biases`.
+  /// Any key that is already in (or unrelated to) our schema is returned
+  /// unchanged — including HF-diffusers keys (`encoder.block.N...`) so an
+  /// already-nested checkpoint is a no-op.
+  public static func remapT5EncoderKey(_ key: String) -> String {
+    guard key.hasPrefix("t5_blocks.") else {
+      if key.hasPrefix("final_layer_norm.") {
+        return "encoder." + key
+      }
+      return key
+    }
+
+    let components = key.components(separatedBy: ".")
+    // t5_blocks . N . <attention|ff> . <...> . suffix
+    guard components.count >= 4 else { return key }
+    let blockIndex = components[1]
+    let section = components[2]
+    let rest = components.dropFirst(3).joined(separator: ".")
+
+    switch section {
+    case "attention":
+      // attention.SelfAttention.{q,k,v,o}.X  or  attention.layer_norm.X
+      return "encoder.block.\(blockIndex).layer.0.\(rest)"
+    case "ff":
+      // ff.DenseReluDense.{wi_0,wi_1,wo}.X  or  ff.layer_norm.X
+      return "encoder.block.\(blockIndex).layer.1.\(rest)"
+    default:
+      return key
+    }
+  }
+
+  /// Translates an mflux-flattened VAE weight key into our `VAE` module's key
+  /// schema (issue #39, GAP 3). mflux wraps each leaf in an extra module
+  /// segment:
+  ///   decoder.conv_in.conv2d.weight       -> decoder.conv_in.weight
+  ///   decoder.conv_norm_out.norm.weight   -> decoder.conv_norm_out.weight
+  /// Our `VAE` module declares the conv/group-norm directly
+  /// (`conv_in: Conv2d`, `conv_norm_out: GroupNorm`), so the intermediate
+  /// `.conv2d.` / `.norm.` wrapper segment must be removed. The `.norm.`
+  /// stripping is scoped to the `conv_norm_out.norm.` prefix so resnet `norm1`/
+  /// `norm2` leaves (which contain no nested `.norm.` segment) are untouched.
+  /// Keys without these segments are returned unchanged (HF-diffusers VAE
+  /// checkpoints are a no-op).
+  public static func remapVAEKey(_ key: String) -> String {
+    var k = key.replacingOccurrences(of: ".conv2d.", with: ".")
+    k = k.replacingOccurrences(of: "conv_norm_out.norm.", with: "conv_norm_out.")
+    return k
+  }
+
+  /// `true` when a VAE weight dictionary came from an mflux bundle, detected by
+  /// the `.conv2d.` wrapper segment mflux inserts into every conv key. mflux
+  /// already stores conv weights channels-last (`[out, kh, kw, in]`, MLX's
+  /// native layout), so the HF-diffusers `[out, in, kh, kw]` → channels-last
+  /// transpose MUST be skipped for these bundles (issue #39, GAP 3).
+  internal static func isMfluxVAE(_ rawKeys: some Sequence<String>) -> Bool {
+    rawKeys.contains { $0.contains(".conv2d.") }
   }
   
   internal static func loadTokenizers(directory: URL, hub: HubApi) throws -> (

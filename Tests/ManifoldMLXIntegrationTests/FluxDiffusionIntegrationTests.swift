@@ -4,6 +4,8 @@ import ManifoldMLX
 import ManifoldInference
 import ManifoldTestSupport
 import FluxSwift
+import MLX
+import MLXNN
 
 /// Metal-bound integration tests for ``FluxDiffusionBackend``.
 ///
@@ -44,6 +46,60 @@ final class FluxDiffusionIntegrationTests: XCTestCase {
             throw XCTSkip("MANIFOLD_FLUX_MODEL did not resolve to a directory: \(raw)")
         }
         return url
+    }
+
+    /// GAP 2 (issue #39): an mflux `Embedding` carrying a matching `.scales`
+    /// tensor must be converted to a `QuantizedEmbedding` by the same gating
+    /// predicate `applyPreQuantization` uses, while an fp16 embedding (no
+    /// `.scales`) stays a plain `Embedding` (backward compatible). This is
+    /// Metal-bound (`quantize`/`MLXArray`) so it lives in the integration suite
+    /// but needs no model snapshot.
+    func test_quantizedEmbedding_branch_convertsOnlyWhenScalesPresent() throws {
+        // Per the integration-target contract (Package.swift): every test here
+        // must XCTSkip under plain `swift test` unless run through the Xcode
+        // harness (scripts/test-mlx-integration.sh), which injects this marker
+        // AND the compiled metallib. Hardware checks alone are insufficient: the
+        // CI macOS runner reports a Metal device but has no metallib under
+        // `swift test`, so the `quantize`/`MLXArray` calls below would abort the
+        // process. Unlike the other tests this one needs no model, so it can't
+        // lean on the MANIFOLD_FLUX_MODEL guard.
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["MANIFOLD_DISCOVER_LOCAL_MODELS"] == "1",
+            "Metal-bound; run via scripts/test-mlx-integration.sh")
+        try XCTSkipUnless(HardwareRequirements.isAppleSilicon, "Requires Apple Silicon")
+        try XCTSkipUnless(HardwareRequirements.hasMetalDevice, "Requires Metal GPU")
+
+        final class EmbHolder: Module {
+            // `@ModuleInfo` is required so `quantize`'s `update(modules:)` can
+            // swap the leaf for a `QuantizedEmbedding`.
+            @ModuleInfo var emb: Embedding
+            override init() {
+                self._emb.wrappedValue = Embedding(embeddingCount: 128, dimensions: 64)
+                super.init()
+            }
+        }
+
+        func runGatedQuantize(_ holder: EmbHolder, weights: [String: MLXArray]) {
+            quantize(model: holder, filter: { path, m in
+                guard m is Linear || m is Embedding,
+                      weights["\(path).scales"] != nil else { return nil }
+                return (groupSize: 64, bits: 4)
+            })
+        }
+
+        // fp16 (no .scales): stays a plain Embedding.
+        let fp16Holder = EmbHolder()
+        runGatedQuantize(fp16Holder, weights: [:])
+        XCTAssertFalse(
+            fp16Holder.emb is QuantizedEmbedding,
+            "No .scales tensor ⇒ embedding must stay fp16 (backward compatible).")
+
+        // Quantized (.scales present): converted to QuantizedEmbedding.
+        let qHolder = EmbHolder()
+        runGatedQuantize(qHolder, weights: ["emb.scales": MLXArray([Float(1.0)])])
+        XCTAssertTrue(
+            qHolder.emb is QuantizedEmbedding,
+            "An Embedding with a matching .scales tensor must become a QuantizedEmbedding.")
     }
 
     func test_loadModel_realSnapshot_setsIsLoaded() async throws {
