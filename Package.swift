@@ -18,8 +18,10 @@ let package = Package(
         .executable(name: "manifold-tools-mlx", targets: ["manifold-tools-mlx"]),
     ],
     dependencies: [
-        // The ManifoldBackendTestKit / ManifoldTestSupport products this package
-        // needs exist only on main until the 0.48 tags ship.
+        // Pulls ManifoldInference/Tools/Runtime/PersistenceSwiftData plus the
+        // ManifoldTestSupport / ManifoldBackendTestKit products this package
+        // consumes. 0.58 adds the ConfusionCounts / MacroAveragedMetrics eval
+        // surface the decoy tool-selection harness scores against.
         // traits: [] builds core's products trait-less (the post-C2 world).
         .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.58.0"), traits: []),
         // Pins copied from core's Package.swift.

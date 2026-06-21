@@ -6,9 +6,11 @@
 #
 # For each model and each N in the decoy ladder, this advertises the scenario's
 # required tool(s) plus N plausible-but-wrong decoys (--extra-tools N) and
-# records `clean_dispatch` — scenarios that passed AND never called a decoy.
-# The point at which clean_dispatch starts dropping is the model's practical
-# "calls correctly up to ~K tools" ceiling.
+# records the macro-F1 of correct-tool selection (ManifoldInference 0.58's
+# ConfusionCounts/MacroAveragedMetrics): precision drops as the model grabs
+# decoys, recall drops as it misses the required tool. The decoy count at which
+# F1 starts falling is the model's practical "selects correctly up to ~K tools"
+# ceiling.
 #
 # CI runners ship Bash 3.2 (no `declare -A`); this script stays 3.2-compatible.
 #
@@ -70,19 +72,22 @@ if [ -n "${FIXTURES_ROOT:-}" ]; then
   fixtures_args=(--fixtures-root "$FIXTURES_ROOT")
 fi
 
-# Collected "model<TAB>N<TAB>clean<TAB>passed<TAB>total" rows for the final table.
+# Collected "model<TAB>N<TAB>f1<TAB>clean<TAB>passed" rows for the final table.
+# Headline metric is macro-F1 of correct-tool selection (ManifoldInference 0.58).
 rows_file="$(mktemp)"
 trap 'rm -f "$rows_file"' EXIT
 
 for model in "$@"; do
   model_name="$(basename "$model")"
-  baseline_clean=""
+  baseline_f1=""
   for n in $LADDER; do
-    # Short-circuit: if the model can't cleanly dispatch with ZERO decoys
-    # (n==0), higher decoy counts only re-measure "can't tool-call" — skip them.
-    if [ "$n" != "0" ] && [ "$baseline_clean" = "0" ]; then
-      printf '%s\t%s\t%s\t%s\n' "$model_name" "$n" "skip" "$base_total" >>"$rows_file"
-      printf '%s\t%s\t(skipped — 0 clean dispatches at n=0)\n' "$model_name" "$n" >&2
+    # Short-circuit: if the model can't select the required tool with ZERO decoys
+    # (f1==0 at n==0), higher decoy counts only re-measure "can't tool-call" —
+    # skip them. Keyed on F1, not assertion pass: a model that selects the tool
+    # but fails a content assertion still yields meaningful decoy-pressure data.
+    if [ "$n" != "0" ] && [ "$baseline_f1" = "0.000" ]; then
+      printf '%s\t%s\t%s\t%s\t%s\n' "$model_name" "$n" "skip" "skip" "skip" >>"$rows_file"
+      printf '%s\t%s\t(skipped — f1=0.000 at n=0)\n' "$model_name" "$n" >&2
       continue
     fi
     log="$OUT_DIR/${model_name}.n${n}.jsonl"
@@ -93,35 +98,34 @@ for model in "$@"; do
       --extra-tools "$n" --output "$log" "${fixtures_args[@]}" 2>&2 \
       | grep '^SUMMARY ')"
     set -e
-    # SUMMARY extra_tools=N passed=X/Y clean_dispatch=A/Y
+    # SUMMARY extra_tools=N passed=X/Y clean=A/Y precision=P recall=R f1=F decoy_calls=K scored=S
+    f1="$(printf '%s' "$summary" | sed -n 's/.*[^_]f1=\([0-9.]*\).*/\1/p')"
+    clean="$(printf '%s' "$summary" | sed -n 's/.*clean=\([0-9]*\/[0-9]*\).*/\1/p')"
     passed="$(printf '%s' "$summary" | sed -n 's/.*passed=\([0-9]*\/[0-9]*\).*/\1/p')"
-    clean="$(printf '%s' "$summary" | sed -n 's/.*clean_dispatch=\([0-9]*\)\/.*/\1/p')"
-    total="$(printf '%s' "$summary" | sed -n 's/.*clean_dispatch=[0-9]*\/\([0-9]*\).*/\1/p')"
-    if [ -z "$clean" ]; then clean="?"; total="?"; passed="?"; fi
-    if [ "$n" = "0" ]; then baseline_clean="$clean"; base_total="$total"; fi
-    printf '%s\t%s\t%s\t%s\n' "$model_name" "$n" "$clean" "$total" >>"$rows_file"
+    if [ -z "$f1" ]; then f1="?"; clean="?"; passed="?"; fi
+    if [ "$n" = "0" ]; then baseline_f1="$f1"; fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$model_name" "$n" "$f1" "$clean" "$passed" >>"$rows_file"
     printf '%s\t%s\t%s\n' "$model_name" "$n" "${summary:-<no SUMMARY line>}" >&2
   done
 done
 
 echo
-echo "=== Clean-dispatch (passed AND no decoy called) by decoy count ==="
+echo "=== Macro-F1 of correct-tool selection by decoy count (higher = better) ==="
 # Header: model + one column per ladder step.
 printf 'model'
 for n in $LADDER; do printf '\t+%s' "$n"; done
-printf '\ttotal\n'
+printf '\n'
 
 for model in "$@"; do
   model_name="$(basename "$model")"
   printf '%s' "$model_name"
-  total_seen="?"
   for n in $LADDER; do
-    clean="$(awk -F'\t' -v m="$model_name" -v nn="$n" '$1==m && $2==nn {print $3}' "$rows_file")"
-    total_seen="$(awk -F'\t' -v m="$model_name" -v nn="$n" '$1==m && $2==nn {print $4}' "$rows_file")"
-    printf '\t%s' "${clean:-?}"
+    f1="$(awk -F'\t' -v m="$model_name" -v nn="$n" '$1==m && $2==nn {print $3}' "$rows_file")"
+    printf '\t%s' "${f1:-?}"
   done
-  printf '\t%s\n' "$total_seen"
+  printf '\n'
 done
 
 echo
+echo "(clean = passed AND no decoy called; see SUMMARY lines on stderr for precision/recall/decoy_calls)"
 echo "Transcripts: $OUT_DIR/<model>.n<N>.jsonl"

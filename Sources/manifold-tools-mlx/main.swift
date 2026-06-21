@@ -221,6 +221,10 @@ func scenarioAdvertising(_ scenario: Scenario, extraToolNames: [String]) -> Scen
     }
 }
 
+/// Fixed 3-decimal formatting for the precision/recall/F1 values so the
+/// `SUMMARY` line is stable and greppable (e.g. `f1=0.900`, never `f1=0.9`).
+func fmt3(_ value: Double) -> String { String(format: "%.3f", value) }
+
 @MainActor
 func runCLI() async -> Int32 {
     let argv = Array(CommandLine.arguments.dropFirst())
@@ -294,6 +298,16 @@ func runCLI() async -> Int32 {
     var total = 0
     var passedCount = 0
     var cleanCount = 0
+    // Tool-selection scored as classification (ManifoldInference 0.58): one
+    // `ConfusionCounts` per tool-bearing scenario — tp = required tool invoked,
+    // fp = a non-required tool (a decoy, or any other) invoked, fn = required
+    // tool missed. Macro-averaged across scenarios into precision/recall/F1.
+    // No-tool scenarios (empty requiredTools) are excluded from the macro metric
+    // because `ConfusionCounts`'s empty-set semantics score 0.0, which would
+    // wrongly penalise correct abstention; their decoy mis-fires still land in
+    // `decoyCallTotal`.
+    var perScenarioCounts: [ConfusionCounts] = []
+    var decoyCallTotal = 0
     for scenario in filtered {
         print("\n── \(scenario.id) via mlx ──")
         total += 1
@@ -328,9 +342,19 @@ func runCLI() async -> Int32 {
             // Correct-tool selection: a clean dispatch passes every assertion AND
             // never invokes a decoy. Calling a decoy is always a wrong selection
             // (the pool is orthogonal to every scenario's real task).
-            let decoysCalled = Set(outcome.toolCallsExecuted.filter { decoyNames.contains($0) })
+            let invoked = Set(outcome.toolCallsExecuted)
+            let decoysCalled = invoked.intersection(decoyNames)
+            decoyCallTotal += decoysCalled.count
             if !decoysCalled.isEmpty {
                 print("  WRONG-TOOL (decoy): \(decoysCalled.sorted().joined(separator: ", "))")
+            }
+            // Classification counts vs the ORIGINAL required tools (not the
+            // decoy-augmented set) — decoys must count as false positives.
+            let expected = Set(scenario.requiredTools)
+            if !expected.isEmpty {
+                let counts = ConfusionCounts.compute(actual: invoked, expected: expected)
+                perScenarioCounts.append(counts)
+                print("  tools: tp=\(counts.tp) fp=\(counts.fp) fn=\(counts.fn) (p=\(fmt3(counts.precision)) r=\(fmt3(counts.recall)) f1=\(fmt3(counts.f1)))")
             }
             if outcome.passed { passedCount += 1 }
             if outcome.passed && decoysCalled.isEmpty { cleanCount += 1 }
@@ -344,10 +368,13 @@ func runCLI() async -> Int32 {
         }
     }
 
-    // Machine-readable one-liner the sweep script greps to build the per-model
-    // "correct up to ~K tools" table. `clean_dispatch` is the headline metric:
-    // scenarios that passed AND avoided every decoy at this decoy count.
-    print("SUMMARY extra_tools=\(cli.extraTools) passed=\(passedCount)/\(total) clean_dispatch=\(cleanCount)/\(total)")
+    // Machine-readable one-liner the sweep script greps. Headline metric is the
+    // macro-averaged F1 of correct-tool selection across tool-bearing scenarios
+    // (precision falls as the model grabs decoys; recall falls as it misses the
+    // required tool). `clean` and `passed` are kept as coarser companions, and
+    // `decoy_calls` is the raw count of decoy invocations across all scenarios.
+    let macro = MacroAveragedMetrics(perClass: perScenarioCounts)
+    print("SUMMARY extra_tools=\(cli.extraTools) passed=\(passedCount)/\(total) clean=\(cleanCount)/\(total) precision=\(fmt3(macro.precision)) recall=\(fmt3(macro.recall)) f1=\(fmt3(macro.f1)) decoy_calls=\(decoyCallTotal) scored=\(perScenarioCounts.count)")
 
     if allPassed {
         print("\nAll scenarios passed.")
