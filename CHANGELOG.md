@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.2.8](https://github.com/roryford/manifold-mlx/compare/v0.2.7...v0.2.8) (2026-06-21)
+
+
+### Features
+
+* add manifold-tools-mlx CLI for running tool-calling scenarios against real MLX models ([#54](https://github.com/roryford/manifold-mlx/issues/54)) ([10dfc0e](https://github.com/roryford/manifold-mlx/commit/10dfc0e2631ac468e38e034bbf62ae67778a3954))
+* **flux:** load pre-quantized 4-bit FLUX weights ([#63](https://github.com/roryford/manifold-mlx/issues/63)) ([a76b481](https://github.com/roryford/manifold-mlx/commit/a76b4816bb1e65a5878cc28761501cce7c97d26d))
+* **flux:** load real mflux MLX-4bit FLUX.1-schnell bundles ([#39](https://github.com/roryford/manifold-mlx/issues/39)) ([#66](https://github.com/roryford/manifold-mlx/issues/66)) ([c96b5e5](https://github.com/roryford/manifold-mlx/commit/c96b5e5b506e2da644386a1e73db7bbe2bc7522d))
+* **flux:** self-quantize fp16-&gt;4-bit + peak-memory regression guard ([#68](https://github.com/roryford/manifold-mlx/issues/68)) ([2694c15](https://github.com/roryford/manifold-mlx/commit/2694c153409c4b5e2ac3c6050c684722c57950ff)), closes [#39](https://github.com/roryford/manifold-mlx/issues/39)
+* **flux:** wire 4-bit bundle integration test + document complete layout ([#64](https://github.com/roryford/manifold-mlx/issues/64)) ([ed7c99e](https://github.com/roryford/manifold-mlx/commit/ed7c99e98589872ec2909252a519c310309d7230))
+
+
+### Bug Fixes
+
+* **mlx:** keep system message first in chat template assembly ([#61](https://github.com/roryford/manifold-mlx/issues/61)) ([fe91cc8](https://github.com/roryford/manifold-mlx/commit/fe91cc88e0b3763f92bc5b259f93acbfedd08a87))
+* **mlx:** recognise Llama tool-call dialect so llama-3.2 dispatches tools ([#65](https://github.com/roryford/manifold-mlx/issues/65)) ([8150bec](https://github.com/roryford/manifold-mlx/commit/8150bec9ec9d67da95dc263515c7d8b480d113cf))
+* **mlx:** recover Llama python_tag tool channel dropped by MLX detokenizer ([#69](https://github.com/roryford/manifold-mlx/issues/69)) ([8804949](https://github.com/roryford/manifold-mlx/commit/88049495a5b4a5447e3eaa64dc7be53cff404aad))
+* **mlx:** route multimodal gemma3n checkpoints to the LLM factory ([#62](https://github.com/roryford/manifold-mlx/issues/62)) ([874d20d](https://github.com/roryford/manifold-mlx/commit/874d20dd03031e4876f2543a1cbbba93dd28138f))
+* register only each scenario's requiredTools in manifold-tools-mlx (was advertising all 6, overloading small models) ([#60](https://github.com/roryford/manifold-mlx/issues/60)) ([e5fb594](https://github.com/roryford/manifold-mlx/commit/e5fb59442ae7af9faad3373e58670a0a1cee58d2))
+* **release:** resync release-please manifest to 0.2.7 ([#72](https://github.com/roryford/manifold-mlx/issues/72)) ([a0a7cc5](https://github.com/roryford/manifold-mlx/commit/a0a7cc5930272dfa11736e8563b547d5dfccdc88))
+
 ## [0.2.6](https://github.com/roryford/manifold-mlx/compare/v0.2.5...v0.2.6) (2026-06-20)
 
 
