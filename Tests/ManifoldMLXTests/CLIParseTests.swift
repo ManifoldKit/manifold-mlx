@@ -31,41 +31,8 @@ final class CLIParseTests: XCTestCase {
         let stderr: String
     }
 
-    /// Run the manifold-tools-mlx binary with the given arguments.
-    /// Returns nil and skips the calling test if the binary is not found.
-    private func runBinary(
-        args: [String],
-        file: StaticString = #file,
-        line: UInt = #line
-    ) -> RunResult? {
-        guard let bin = binaryPath(file: file, line: line) else { return nil }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: bin)
-        process.arguments = args
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            XCTFail("Failed to launch binary at \(bin): \(error)", file: file, line: line)
-            return nil
-        }
-
-        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return RunResult(exitCode: process.terminationStatus, stdout: stdout, stderr: stderr)
-    }
-
-    /// Resolve the path to the built manifold-tools-mlx binary.
-    /// Returns nil (and marks the test skipped) if it can't be found.
-    private func binaryPath(file: StaticString, line: UInt) -> String? {
-        // Ask SwiftPM where it puts binaries for the current configuration.
+    /// Resolve the path to the built manifold-tools-mlx binary, or nil if missing.
+    private static let cachedBinaryPath: String? = {
         let showBin = Process()
         showBin.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
         showBin.arguments = ["build", "--product", "manifold-tools-mlx", "--show-bin-path"]
@@ -76,22 +43,40 @@ final class CLIParseTests: XCTestCase {
 
         do {
             try showBin.run()
-            showBin.waitUntilExit()
         } catch {
-            throw XCTSkip("Could not invoke `swift build --show-bin-path`: \(error)")
+            return nil
         }
+        showBin.waitUntilExit()
 
         let rawPath = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !rawPath.isEmpty else {
-            throw XCTSkip("swift build --show-bin-path returned empty output")
-        }
+        guard !rawPath.isEmpty else { return nil }
 
         let bin = (rawPath as NSString).appendingPathComponent("manifold-tools-mlx")
-        guard FileManager.default.fileExists(atPath: bin) else {
-            throw XCTSkip("manifold-tools-mlx binary not found at \(bin) — run `swift build` first")
+        return FileManager.default.fileExists(atPath: bin) ? bin : nil
+    }()
+
+    /// Run the manifold-tools-mlx binary with the given arguments, or skip the test if unavailable.
+    private func runBinary(args: [String]) throws -> RunResult {
+        guard let bin = CLIParseTests.cachedBinaryPath else {
+            throw XCTSkip("manifold-tools-mlx binary not found — run `swift build` first")
         }
-        return bin
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: bin)
+        process.arguments = args
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return RunResult(exitCode: process.terminationStatus, stdout: stdout, stderr: stderr)
     }
 
     // MARK: - Tests
@@ -102,9 +87,7 @@ final class CLIParseTests: XCTestCase {
     /// This is the core regression guard for the fix that replaced the old
     /// `exit(1)` + bare stderr write with `CLI.fail(…)`.
     func test_unknownScenario_exits2_withStandardPrefix() throws {
-        guard let result = runBinary(args: ["--scenario", "no-such-scenario-xyz", "--model", "/dev/null"]) else {
-            throw XCTSkip("binary not available")
-        }
+        let result = try runBinary(args: ["--scenario", "no-such-scenario-xyz", "--model", "/dev/null"])
         // Exit code must be 2 (arg error), NOT 1 (runtime failure).
         XCTAssertEqual(result.exitCode, 2,
             "unknown --scenario must exit 2 (bad argument); got \(result.exitCode). stderr: \(result.stderr)")
@@ -118,9 +101,7 @@ final class CLIParseTests: XCTestCase {
 
     /// Missing --model must also exit 2 (regression guard: established contract).
     func test_missingModel_exits2() throws {
-        guard let result = runBinary(args: ["--scenario", "all"]) else {
-            throw XCTSkip("binary not available")
-        }
+        let result = try runBinary(args: ["--scenario", "all"])
         XCTAssertEqual(result.exitCode, 2,
             "missing --model must exit 2; got \(result.exitCode). stderr: \(result.stderr)")
         XCTAssertTrue(result.stderr.contains("manifold-tools-mlx:"),
@@ -129,9 +110,7 @@ final class CLIParseTests: XCTestCase {
 
     /// --list must exit 0 and print at least one scenario line (no model needed).
     func test_listFlag_exits0_andPrintsScenarios() throws {
-        guard let result = runBinary(args: ["--list"]) else {
-            throw XCTSkip("binary not available")
-        }
+        let result = try runBinary(args: ["--list"])
         XCTAssertEqual(result.exitCode, 0,
             "--list must exit 0; got \(result.exitCode). stderr: \(result.stderr)")
         XCTAssertTrue(result.stdout.contains("Available scenarios:"),
