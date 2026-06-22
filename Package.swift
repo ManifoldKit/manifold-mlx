@@ -20,8 +20,7 @@ let package = Package(
     dependencies: [
         // Pulls ManifoldInference/Tools/Runtime/PersistenceSwiftData plus the
         // ManifoldTestSupport / ManifoldBackendTestKit products this package
-        // consumes. 0.58 adds the ConfusionCounts / MacroAveragedMetrics eval
-        // surface the decoy tool-selection harness scores against.
+        // consumes.
         // traits: [] builds core's products trait-less (the post-C2 world).
         .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.59.0"), traits: []),
         // Pins copied from core's Package.swift.
