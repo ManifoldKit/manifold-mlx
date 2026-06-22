@@ -272,22 +272,18 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         // explicit and lets `ChatError` map it to `.selectModel`.
         try MLXModelProbe.validateArchitecture(at: url)
 
-        // Refuse Gemma 4 up front. Every variant loads fine but crashes on the
-        // first generation tick in mlx-swift-lm — a sliding-window/KV-shared
-        // cache slice is broadcast against the prompt length, raising an
-        // uncatchable C++ abort + Swift fatal that takes down the whole process.
-        // Both the dense/multimodal e4b path (upstream ml-explore/mlx-swift-lm
-        // #282 "Gap 3") and the MoE 26B path (#802) are affected, with no
-        // released fix. Throwing here turns a process-killing mid-generation
-        // crash into a catchable load error.
-        if MLXModelProbe.isUnsupportedGemma4(at: url) {
+        // Refuse architectures that load fine but crash on the first generation
+        // tick in mlx-swift-lm — a tensor is broadcast against the prompt length,
+        // raising an uncatchable C++ abort + Swift fatal that takes down the
+        // whole process. Covers Gemma 4 (sliding-window/KV-shared cache, upstream
+        // #282/#802) and Qwen 3.5 (gated-DeltaNet linear attention, #157). None
+        // have a released fix. Throwing here turns a process-killing
+        // mid-generation crash into a catchable load error.
+        if let reason = MLXModelProbe.unsupportedGenerationReason(at: url) {
             throw InferenceError.modelLoadFailed(underlying: NSError(
                 domain: "ManifoldMLX",
-                code: 282,
-                userInfo: [NSLocalizedDescriptionKey:
-                    "Gemma 4 (gemma4) generation crashes in mlx-swift-lm — "
-                    + "sliding-window/KV-shared broadcast mismatch "
-                    + "(upstream ml-explore/mlx-swift-lm#282 / #802). Unsupported until an upstream fix lands."]
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: reason]
             ))
         }
 
