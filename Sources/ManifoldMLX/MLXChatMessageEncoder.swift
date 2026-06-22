@@ -86,6 +86,44 @@ import ManifoldInference
         return [["role": "system", "content": merged]] + nonSystem
     }
 
+    /// Folds a leading `system` message into the first `user` turn, for chat
+    /// templates that reject a standalone `system` role.
+    ///
+    /// Mistral v0.3's Jinja template has no `system` branch and enforces strict
+    /// user/assistant alternation, so a `system`-first array raises
+    /// *"Conversation roles must alternate user/assistant/…"* at render time,
+    /// before any generation. Rather than hardcode a model-type list, the
+    /// caller (``MLXPromptCacheCoordinator``) attempts the real template first
+    /// and only invokes this fallback when the render throws — so it adapts to
+    /// any system-hostile template, not just Mistral's.
+    ///
+    /// Mistral v0.3 has no `<<SYS>>` markers (that's a Llama-2 idiom), so the
+    /// system text is prepended to the first user message as a plain paragraph.
+    /// When there is no user turn to fold into, the system content is re-tagged
+    /// as a leading `user` turn so the instruction is still delivered rather
+    /// than dropped. A no-op (returns the input unchanged) when there is no
+    /// `system` message — the caller relies on this to detect "nothing to retry"
+    /// and rethrow the original error.
+    @_spi(Testing) public static func foldSystemIntoFirstUser(
+        _ messages: [[String: String]]
+    ) -> [[String: String]] {
+        guard let systemIndex = messages.firstIndex(where: { $0["role"] == "system" }) else {
+            return messages
+        }
+        let systemContent = messages[systemIndex]["content"] ?? ""
+        var result = messages
+        result.remove(at: systemIndex)
+
+        guard let userIndex = result.firstIndex(where: { $0["role"] == "user" }) else {
+            result.insert(["role": "user", "content": systemContent], at: 0)
+            return result
+        }
+        let existing = result[userIndex]["content"] ?? ""
+        let merged = systemContent.isEmpty ? existing : "\(systemContent)\n\n\(existing)"
+        result[userIndex] = ["role": "user", "content": merged]
+        return result
+    }
+
     /// `Chat.Message` analogue of ``normalizeSystemMessages(_:)``: folds every
     /// `.system` turn into a single leading message so the vision / structured
     /// history path obeys the same "system message must be first" contract.

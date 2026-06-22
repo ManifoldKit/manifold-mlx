@@ -386,6 +386,57 @@ final class MLXChatMessageEncoderTests: XCTestCase {
         XCTAssertTrue(systemContent.contains("stray system"))
         XCTAssertEqual(messages.dropFirst().map { $0["role"] }, ["user", "assistant"])
     }
+
+    // MARK: - foldSystemIntoFirstUser (Mistral-style system-hostile templates)
+
+    /// The system content is prepended to the first user turn as a plain
+    /// paragraph and the `system` role is removed entirely — the shape Mistral
+    /// v0.3's alternation-only template accepts.
+    func test_foldSystemIntoFirstUser_mergesIntoFirstUserTurn() {
+        let folded = MLXChatMessageEncoder.foldSystemIntoFirstUser([
+            ["role": "system", "content": "You are a pirate."],
+            ["role": "user", "content": "Hello"]
+        ])
+        XCTAssertEqual(folded.count, 1)
+        XCTAssertEqual(folded[0]["role"], "user")
+        XCTAssertEqual(folded[0]["content"], "You are a pirate.\n\nHello")
+        XCTAssertFalse(folded.contains { $0["role"] == "system" })
+    }
+
+    /// Folds ahead of the *first* user turn while leaving the rest of a
+    /// multi-turn conversation (and its alternation) untouched.
+    func test_foldSystemIntoFirstUser_preservesRemainingHistory() {
+        let folded = MLXChatMessageEncoder.foldSystemIntoFirstUser([
+            ["role": "system", "content": "sys"],
+            ["role": "user", "content": "first"],
+            ["role": "assistant", "content": "ack"],
+            ["role": "user", "content": "second"]
+        ])
+        XCTAssertEqual(folded.map { $0["role"] }, ["user", "assistant", "user"])
+        XCTAssertEqual(folded[0]["content"], "sys\n\nfirst")
+        XCTAssertEqual(folded.map { $0["content"] }, ["sys\n\nfirst", "ack", "second"])
+    }
+
+    /// With no user turn to fold into, the system content is re-tagged as a
+    /// leading `user` turn so the instruction is delivered rather than dropped.
+    func test_foldSystemIntoFirstUser_retagsSystemWhenNoUserTurn() {
+        let folded = MLXChatMessageEncoder.foldSystemIntoFirstUser([
+            ["role": "system", "content": "only system"]
+        ])
+        XCTAssertEqual(folded.count, 1)
+        XCTAssertEqual(folded[0]["role"], "user")
+        XCTAssertEqual(folded[0]["content"], "only system")
+    }
+
+    /// No system turn → returned unchanged. The coordinator relies on this
+    /// identity to detect "nothing to retry" and rethrow the original error.
+    func test_foldSystemIntoFirstUser_noOpWithoutSystemTurn() {
+        let input = [
+            ["role": "user", "content": "first"],
+            ["role": "assistant", "content": "ack"]
+        ]
+        XCTAssertEqual(MLXChatMessageEncoder.foldSystemIntoFirstUser(input), input)
+    }
 }
 
 /// Unit tests for the small thinking-marker resolution helper retained on `MLXBackend`.
