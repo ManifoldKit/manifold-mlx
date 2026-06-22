@@ -100,6 +100,36 @@ import ManifoldInference
         throw InferenceError.unsupportedModelArchitecture(reported)
     }
 
+    /// `true` for any Gemma 4 model (`model_type: gemma4`).
+    ///
+    /// Every Gemma 4 variant crashes on this mlx-swift-lm version and there is
+    /// no released fix, so the whole family is refused at load. Confirmed
+    /// against `gemma-4-e4b-it-4bit` (dense, VLM-routed because it carries
+    /// `vision_config`/`audio_config`) and `gemma-4-26B-A4B-it-MLX-4bit` (MoE):
+    /// both load but crash on the first generation tick with a
+    /// `[broadcast_shapes] Shapes (20) and (N)` C++ abort followed by an
+    /// uncatchable Swift `Index out of range` that kills the host process (app
+    /// *or* xctest runner). Upstream issues: dense is ml-explore/mlx-swift-lm
+    /// #282 ("Gap 3"), MoE is #802 — both open, no released fix (current `main`
+    /// `Gemma4Text.swift` is unchanged). The fix shape (`layerIdxToCacheIdx`
+    /// cache-slot mapping) lives only on the VLM-side decoder and was never
+    /// ported. Callers refuse the load up front so the failure is a catchable
+    /// error instead of a process-killing crash mid-generation.
+    ///
+    /// Routing is deliberately NOT consulted: Gemma 4 crashes whether it lands
+    /// on the LLM or the VLM factory, so a routing-based exclusion would let the
+    /// multimodal `e4b` checkpoint (which routes VLM) slip through and crash.
+    public static func isUnsupportedGemma4(modelType: String?) -> Bool {
+        guard let modelType else { return false }
+        return normalizeArchitectureKey(modelType) == normalizeArchitectureKey("gemma4")
+    }
+
+    /// Disk-reading convenience for ``isUnsupportedGemma4(modelType:)`` — reads
+    /// the top-level `model_type` from `config.json` at `url`.
+    public static func isUnsupportedGemma4(at url: URL) -> Bool {
+        isUnsupportedGemma4(modelType: readModelType(at: url))
+    }
+
     /// Returns `true` when the model at `url` must load through the VLM factory.
     ///
     /// This covers both explicit multimodal models (`vision_config`) and the

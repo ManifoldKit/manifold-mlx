@@ -224,4 +224,21 @@ final class MLXManifestProbeTests: XCTestCase {
         XCTAssertTrue(manifest.supportsThinking,
                       "supportsThinking is implied by non-nil thinkingMarkers")
     }
+
+    // MARK: - isUnsupportedGemma4 (upstream #282/#802 crash guard)
+
+    /// Every Gemma 4 model is refused — both the dense/multimodal e4b path
+    /// (#282) and the MoE path (#802) crash, regardless of factory routing.
+    func test_isUnsupportedGemma4_trueForGemma4() {
+        XCTAssertTrue(MLXModelProbe.isUnsupportedGemma4(modelType: "gemma4"))
+    }
+
+    /// Neighbouring Gemma generations and other architectures are unaffected,
+    /// as is a missing model_type.
+    func test_isUnsupportedGemma4_falseForOtherArchitectures() {
+        XCTAssertFalse(MLXModelProbe.isUnsupportedGemma4(modelType: "gemma3"))
+        XCTAssertFalse(MLXModelProbe.isUnsupportedGemma4(modelType: "gemma3n"))
+        XCTAssertFalse(MLXModelProbe.isUnsupportedGemma4(modelType: "llama"))
+        XCTAssertFalse(MLXModelProbe.isUnsupportedGemma4(modelType: nil))
+    }
 }

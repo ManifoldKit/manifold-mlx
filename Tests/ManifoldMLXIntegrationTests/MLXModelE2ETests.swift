@@ -4,6 +4,7 @@ import ManifoldPersistenceSwiftData
 import ManifoldInference
 import ManifoldTestSupport
 import ManifoldMLX
+@_spi(Testing) import ManifoldMLX
 
 /// True end-to-end tests using a real MLX model on Apple Silicon.
 ///
@@ -41,6 +42,18 @@ final class MLXModelE2ETests: XCTestCase {
             )
         }
         modelURL = mlxDir
+
+        // Gemma 4 crashes on the first generation tick in mlx-swift-lm
+        // (sliding-window/KV-shared broadcast mismatch — upstream #282/#802, no
+        // released fix). The crash is an uncatchable C++ abort + Swift fatal
+        // that would kill the xctest runner mid-suite, so skip before any load
+        // when discovery resolves a gemma4 snapshot. `MLXBackend.loadModel` also
+        // refuses it defensively (catchable error), but skipping here keeps the
+        // lane green rather than red.
+        try XCTSkipIf(
+            MLXModelProbe.isUnsupportedGemma4(at: mlxDir),
+            "Gemma 4 generation crashes in mlx-swift-lm (upstream #282/#802); skipping until fixed. Model: \(mlxDir.lastPathComponent)"
+        )
 
         backend = MLXBackend()
         try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 2048))
