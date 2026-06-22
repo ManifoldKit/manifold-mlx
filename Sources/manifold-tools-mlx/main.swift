@@ -251,6 +251,28 @@ func runCLI() async -> Int32 {
         return 2
     }
 
+    // Pre-flight: refuse VL model directories before attempting to load them.
+    // Loading a vision-language model via the text-only MLX backend path causes
+    // a hard SIGSEGV (exit 139) with an empty log, making failures undebuggable.
+    // The reliable marker of a VL model dir is any of these config files —
+    // extend the array to cover future VL architectures as needed.
+    let vlMarkerFiles: [String] = [
+        "preprocessor_config.json",
+        "processor_config.json",
+        "video_preprocessor_config.json",
+    ]
+    let fm = FileManager.default
+    var isDirectory: ObjCBool = false
+    if fm.fileExists(atPath: modelPath, isDirectory: &isDirectory), isDirectory.boolValue {
+        for marker in vlMarkerFiles {
+            let markerPath = (modelPath as NSString).appendingPathComponent(marker)
+            if fm.fileExists(atPath: markerPath) {
+                CLI.fail("'\(modelPath)' looks like a vision-language model (found \(marker)); "
+                    + "this is a text-only tool harness and would crash on load — skipped")
+            }
+        }
+    }
+
     let filtered: [Scenario]
     if cli.scenarioFilter == "all" {
         filtered = scenarios
