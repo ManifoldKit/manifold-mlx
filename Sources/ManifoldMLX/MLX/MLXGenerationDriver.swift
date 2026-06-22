@@ -381,6 +381,24 @@ import ManifoldInference
                 capturedCompletionInfo = info
                 continue
             }
+            // Forward tool calls that mlx-swift-lm's own `ToolCallProcessor`
+            // already parsed. For inline formats (Llama 3 `<|python_tag|>`/JSON,
+            // bare JSON) it swallows the call text upstream and emits a
+            // structured `.toolCall` instead of a `.chunk`, so the textual
+            // marker path below never sees those bytes. Without this the parsed
+            // call was silently dropped (empty answer, 0 tools dispatched).
+            // This is mutually exclusive with the chunk path — a swallowed call
+            // produces no `.chunk`, so there is no double-emit with the session
+            // parser; the `<tool_call>` text path remains a fallback for formats
+            // MLX surfaces as visible text.
+            if let nativeCall = generation.toolCall {
+                if isFirstToken {
+                    generationStream.setPhase(.streaming)
+                    isFirstToken = false
+                }
+                continuation.yield(.toolCall(MLXToolMarkers.toolCall(fromNative: nativeCall)))
+                continue
+            }
             guard let rawText = generation.chunk else { continue }
             // Normalise the Llama python-tag channel (identity for other dialects).
             // The result can be empty when the whole chunk is a held-back partial

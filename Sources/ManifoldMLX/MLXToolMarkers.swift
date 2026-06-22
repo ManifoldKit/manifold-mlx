@@ -1,5 +1,6 @@
 import Foundation
 import ManifoldInference
+import MLXLMCommon
 
 /// MLX tool-call dialect markers for ``ToolCallTransform``.
 ///
@@ -82,12 +83,39 @@ import ManifoldInference
 
     /// Attempts to parse a buffered tool-call body into a `ToolCall`.
     ///
+    /// Maps an `MLXLMCommon.ToolCall` — produced when mlx-swift-lm's own
+    /// `ToolCallProcessor` parses an *inline* tool call — into our ``ToolCall``.
+    ///
+    /// For inline tool-call formats (Llama 3's `<|python_tag|>`/JSON, and bare
+    /// top-level JSON) mlx-swift-lm's loop handler intercepts and *swallows* the
+    /// call text upstream and emits it as a structured `Generation.toolCall`
+    /// rather than delivering it as a `.chunk`. The textual `<tool_call>` /
+    /// `<|python_tag|>` markers above therefore never see those bytes, so
+    /// ``MLXGenerationDriver`` forwards MLX's already-parsed call through this
+    /// mapper instead (issue #59 follow-up: the call was being silently dropped).
+    ///
+    /// The argument dictionary is re-serialised to the JSON string that
+    /// ``ToolCall/arguments`` carries, mirroring ``parseToolCall(_:)``. The `id`
+    /// uses the same `mlx-<name>-<uuid8>` shape so downstream call-id handling is
+    /// uniform across the textual and native paths.
+    @_spi(Testing) public static func toolCall(fromNative native: MLXLMCommon.ToolCall) -> ManifoldInference.ToolCall {
+        let argumentsString: String
+        if let data = try? JSONEncoder().encode(native.function.arguments),
+           let str = String(data: data, encoding: .utf8) {
+            argumentsString = str
+        } else {
+            argumentsString = "{}"
+        }
+        let id = "mlx-\(native.function.name)-\(UUID().uuidString.prefix(8))"
+        return ManifoldInference.ToolCall(id: id, toolName: native.function.name, arguments: argumentsString)
+    }
+
     /// Expects `{"name":"…","arguments":{…}}` (Qwen) or `{"name":"…",
     /// "parameters":{…}}` (Llama). The argument object is re-serialised to a
     /// JSON string so `ToolCall.arguments` always carries a valid JSON string
     /// regardless of how the model formatted it. The `try? JSONSerialization`
     /// idiom here is audit-approved (decoding at a trust boundary).
-    private static func parseToolCall(_ json: String) -> ToolCall? {
+    private static func parseToolCall(_ json: String) -> ManifoldInference.ToolCall? {
         var trimmed = json.trimmingCharacters(in: .whitespacesAndNewlines)
         // Llama sometimes leaves a trailing `<|eot_id|>`/`<|eom_id|>` in the
         // body when the close token that fired was the *other* one, and may
@@ -120,7 +148,7 @@ import ManifoldInference
         }
 
         let id = "mlx-\(name)-\(UUID().uuidString.prefix(8))"
-        return ToolCall(id: id, toolName: name, arguments: argumentsString)
+        return ManifoldInference.ToolCall(id: id, toolName: name, arguments: argumentsString)
     }
 
     /// Returns the substring spanning the first balanced top-level `{…}` JSON

@@ -1201,4 +1201,62 @@ final class MLXBackendGenerationTests: XCTestCase {
         XCTAssertGreaterThan(usage.completionTokens, 0,
             "completionTokens must be positive when tokens were generated")
     }
+
+    // MARK: - Native tool-call forwarding (#59 follow-up)
+
+    /// `MLXToolMarkers.toolCall(fromNative:)` maps an `MLXLMCommon.ToolCall`
+    /// (the structured call mlx-swift-lm emits for inline formats) into our
+    /// `ToolCall`, re-serialising the `[String: JSONValue]` arguments to a JSON
+    /// string.
+    func test_toolCallFromNative_mapsNameAndArguments() throws {
+        let native = MLXLMCommon.ToolCall(
+            function: .init(name: "calc", arguments: ["op": "*", "a": 7823, "b": 41])
+        )
+        let mapped = MLXToolMarkers.toolCall(fromNative: native)
+
+        XCTAssertEqual(mapped.toolName, "calc")
+        XCTAssertTrue(mapped.id.hasPrefix("mlx-calc-"), "id should follow the mlx-<name>-<uuid> shape")
+        let data = try XCTUnwrap(mapped.arguments.data(using: .utf8))
+        let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(obj["op"] as? String, "*")
+        XCTAssertEqual(obj["a"] as? Int, 7823)
+        XCTAssertEqual(obj["b"] as? Int, 41)
+    }
+
+    /// When mlx-swift-lm swallows an inline tool call and emits it as a
+    /// structured `Generation.toolCall` (no `.chunk` text), the driver must
+    /// forward it as a `GenerationEvent.toolCall`. Before the fix the driver
+    /// only read `.chunk`/`.info`, so the parsed call was silently dropped —
+    /// the cause of Llama-3.2's empty answers / 0 dispatched tools.
+    func test_generate_forwardsNativeToolCallEvent() async throws {
+        let mock = MockMLXModelContainer()
+        mock.generationsToYield = [
+            .toolCall(MLXLMCommon.ToolCall(
+                function: .init(name: "calc", arguments: ["op": "*", "a": 7823, "b": 41])
+            ))
+        ]
+
+        let backend = MLXBackend()
+        backend._inject(mock, dialect: .llama)
+
+        var config = GenerationConfig()
+        config.tools = [ToolDefinition(name: "calc", description: "calculator", parameters: .object([:]))]
+
+        let events = try await collectAllEvents(from: try backend.generate(
+            prompt: "What is 7823 * 41?",
+            systemPrompt: nil,
+            config: config
+        ))
+
+        let toolCalls = events.compactMap { event -> ManifoldInference.ToolCall? in
+            if case .toolCall(let call) = event { return call }
+            return nil
+        }
+        XCTAssertEqual(toolCalls.count, 1,
+            "a native MLX tool call must surface as exactly one .toolCall event")
+        XCTAssertEqual(toolCalls.first?.toolName, "calc")
+
+        // Sabotage check: removing the `generation.toolCall` forwarding in
+        // MLXGenerationDriver leaves `toolCalls` empty (the previous behavior).
+    }
 }
