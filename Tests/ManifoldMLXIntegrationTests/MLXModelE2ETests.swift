@@ -4,6 +4,7 @@ import ManifoldPersistenceSwiftData
 import ManifoldInference
 import ManifoldTestSupport
 import ManifoldMLX
+@_spi(Testing) import ManifoldMLX
 
 /// True end-to-end tests using a real MLX model on Apple Silicon.
 ///
@@ -41,6 +42,16 @@ final class MLXModelE2ETests: XCTestCase {
             )
         }
         modelURL = mlxDir
+
+        // Some architectures load but crash on the first generation tick in
+        // mlx-swift-lm (Gemma 4 — #282/#802; Qwen 3.5 — #157), an uncatchable
+        // C++ abort + Swift fatal that would kill the xctest runner mid-suite.
+        // Skip before any load when discovery resolves such a snapshot.
+        // `MLXBackend.loadModel` also refuses them defensively (catchable error),
+        // but skipping here keeps the lane green rather than red.
+        if let reason = MLXModelProbe.unsupportedGenerationReason(at: mlxDir) {
+            throw XCTSkip("\(reason) Skipping until fixed. Model: \(mlxDir.lastPathComponent)")
+        }
 
         backend = MLXBackend()
         try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 2048))

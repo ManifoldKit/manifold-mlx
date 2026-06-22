@@ -295,6 +295,35 @@ import ManifoldInference
         }
     }
 
+    /// Applies the tokenizer chat template to a `[[String: String]]` message
+    /// array, recovering from templates that reject a standalone `system` role.
+    ///
+    /// Some chat templates (Mistral v0.3) have no `system` branch and enforce
+    /// strict user/assistant alternation, so a leading `system` turn raises a
+    /// Jinja `TemplateException` at render time — before any generation. Rather
+    /// than maintain a model-type allowlist, we attempt the real template first
+    /// and, only if it throws, retry once with the system text folded into the
+    /// first user message (see ``MLXChatMessageEncoder/foldSystemIntoFirstUser``).
+    /// If the fold changes nothing (no system turn) or the retry also throws,
+    /// the original error is surfaced — so this never masks an unrelated failure.
+    @MainActor
+    private static func prepareMessagesWithSystemFallback(
+        container: any MLXModelContainerProtocol,
+        messages: [[String: String]]
+    ) async throws -> MLXPreparedInput {
+        do {
+            return try await container.prepare(messages: messages)
+        } catch let originalError {
+            let folded = MLXChatMessageEncoder.foldSystemIntoFirstUser(messages)
+            guard folded != messages else { throw originalError }
+            do {
+                return try await container.prepare(messages: folded)
+            } catch {
+                throw originalError
+            }
+        }
+    }
+
     /// Prepares the model input, allocates a KV cache, and applies the
     /// longest-common-prefix reuse heuristic when an eligible snapshot exists.
     ///
@@ -318,7 +347,7 @@ import ManifoldInference
             if let chatMessages {
                 try await container.prepare(chat: SendableChatMessages(chatMessages))
             } else {
-                try await container.prepare(messages: messages)
+                try await Self.prepareMessagesWithSystemFallback(container: container, messages: messages)
             }
         var cache = try await container.makeCache(parameters: generateConfig)
         let promptTokenIds: [Int]? = if kvCacheReuseEligible {

@@ -100,6 +100,74 @@ import ManifoldInference
         throw InferenceError.unsupportedModelArchitecture(reported)
     }
 
+    /// `true` for any Gemma 4 model (`model_type: gemma4`).
+    ///
+    /// Every Gemma 4 variant crashes on this mlx-swift-lm version and there is
+    /// no released fix, so the whole family is refused at load. Confirmed
+    /// against `gemma-4-e4b-it-4bit` (dense, VLM-routed because it carries
+    /// `vision_config`/`audio_config`) and `gemma-4-26B-A4B-it-MLX-4bit` (MoE):
+    /// both load but crash on the first generation tick with a
+    /// `[broadcast_shapes] Shapes (20) and (N)` C++ abort followed by an
+    /// uncatchable Swift `Index out of range` that kills the host process (app
+    /// *or* xctest runner). Upstream issues: dense is ml-explore/mlx-swift-lm
+    /// #282 ("Gap 3"), MoE is #802 — both open, no released fix (current `main`
+    /// `Gemma4Text.swift` is unchanged). The fix shape (`layerIdxToCacheIdx`
+    /// cache-slot mapping) lives only on the VLM-side decoder and was never
+    /// ported. Callers refuse the load up front so the failure is a catchable
+    /// error instead of a process-killing crash mid-generation.
+    ///
+    /// Routing is deliberately NOT consulted: Gemma 4 crashes whether it lands
+    /// on the LLM or the VLM factory, so a routing-based exclusion would let the
+    /// multimodal `e4b` checkpoint (which routes VLM) slip through and crash.
+    public static func isUnsupportedGemma4(modelType: String?) -> Bool {
+        guard let modelType else { return false }
+        return normalizeArchitectureKey(modelType) == normalizeArchitectureKey("gemma4")
+    }
+
+    /// Disk-reading convenience for ``isUnsupportedGemma4(modelType:)`` — reads
+    /// the top-level `model_type` from `config.json` at `url`.
+    public static func isUnsupportedGemma4(at url: URL) -> Bool {
+        isUnsupportedGemma4(modelType: readModelType(at: url))
+    }
+
+    /// `true` for Qwen 3.5 (`model_type: qwen3_5` / `qwen3_5_moe`).
+    ///
+    /// Qwen 3.5's hybrid backbone interleaves gated-DeltaNet **linear-attention**
+    /// (Mamba-style SSM) layers with full-attention. On this mlx-swift-lm version
+    /// the linear-attention path mis-shapes the SSM/conv-state mask and crashes
+    /// on the first generation tick with `[broadcast_shapes] Shapes (20) and (N)`
+    /// (N = prompt length) — the same *surface* as the Gemma 4 crash but a
+    /// different root cause (gated-DeltaNet, not KV-shared sliding-window). A
+    /// secondary `EXC_BAD_ACCESS` during teardown turns it into a process-killing
+    /// SIGTRAP. Upstream: ml-explore/mlx-swift-lm#157, open with no released fix.
+    /// Refused at load so the failure is catchable instead of crashing the host.
+    public static func isUnsupportedQwen35(modelType: String?) -> Bool {
+        guard let modelType else { return false }
+        let key = normalizeArchitectureKey(modelType)
+        return key == normalizeArchitectureKey("qwen3_5")
+            || key == normalizeArchitectureKey("qwen3_5_moe")
+    }
+
+    /// Returns a human-readable reason when the model at `url` is known to crash
+    /// during generation in the current mlx-swift-lm (3.31.3) and must be refused
+    /// at load, or `nil` when it is safe to attempt. Both families surface the
+    /// same `[broadcast_shapes]` error but have distinct root causes and upstream
+    /// issues. Reads `config.json` once and dispatches on the model type.
+    public static func unsupportedGenerationReason(at url: URL) -> String? {
+        let modelType = readModelType(at: url)
+        if isUnsupportedGemma4(modelType: modelType) {
+            return "Gemma 4 (gemma4) generation crashes in mlx-swift-lm — "
+                + "sliding-window/KV-shared broadcast mismatch "
+                + "(upstream ml-explore/mlx-swift-lm#282 / #802). Unsupported until an upstream fix lands."
+        }
+        if isUnsupportedQwen35(modelType: modelType) {
+            return "Qwen 3.5 (qwen3_5) generation crashes in mlx-swift-lm — "
+                + "gated-DeltaNet linear-attention broadcast mismatch "
+                + "(upstream ml-explore/mlx-swift-lm#157). Unsupported until an upstream fix lands."
+        }
+        return nil
+    }
+
     /// Returns `true` when the model at `url` must load through the VLM factory.
     ///
     /// This covers both explicit multimodal models (`vision_config`) and the

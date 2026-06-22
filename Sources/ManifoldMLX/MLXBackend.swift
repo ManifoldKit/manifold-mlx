@@ -272,6 +272,21 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         // explicit and lets `ChatError` map it to `.selectModel`.
         try MLXModelProbe.validateArchitecture(at: url)
 
+        // Refuse architectures that load fine but crash on the first generation
+        // tick in mlx-swift-lm — a tensor is broadcast against the prompt length,
+        // raising an uncatchable C++ abort + Swift fatal that takes down the
+        // whole process. Covers Gemma 4 (sliding-window/KV-shared cache, upstream
+        // #282/#802) and Qwen 3.5 (gated-DeltaNet linear attention, #157). None
+        // have a released fix. Throwing here turns a process-killing
+        // mid-generation crash into a catchable load error.
+        if let reason = MLXModelProbe.unsupportedGenerationReason(at: url) {
+            throw InferenceError.modelLoadFailed(underlying: NSError(
+                domain: "ManifoldMLX",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: reason]
+            ))
+        }
+
         let progressHandler = withStateLock { _loadProgressHandler }
 
         // Signal "load started". The `mlx-swift-lm` local-directory API has no granular
