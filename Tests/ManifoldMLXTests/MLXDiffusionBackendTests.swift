@@ -155,11 +155,18 @@ final class MLXDiffusionBackendTests: XCTestCase {
                        "isGenerating must return to false after early finish")
     }
 
-    func test_generate_noLatents_finishesWithoutCompleted() async throws {
+    func test_generate_noLatents_finishesWithError() async {
+        // MLXDiffusionBackend's contract throws noLatentsProduced when the loop yields nothing.
         let backend = MLXDiffusionBackend(generator: FakeDiffusionGenerator(steps: 0))
-        let stream = try backend.generate(prompt: "x", config: .init(steps: 0))
-        let events = try await DiffusionTestHelpers.collect(stream)
-        XCTAssertTrue(events.isEmpty, "Zero-step run yields no events and finishes")
+        do {
+            let stream = try backend.generate(prompt: "x", config: .init(steps: 0))
+            _ = try await DiffusionTestHelpers.collect(stream)
+            XCTFail("Expected noLatentsProduced")
+        } catch MLXDiffusionError.noLatentsProduced {
+            // expected
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
         XCTAssertFalse(backend.isGenerating)
     }
 

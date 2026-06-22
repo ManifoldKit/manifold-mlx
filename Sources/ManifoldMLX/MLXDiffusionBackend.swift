@@ -14,6 +14,7 @@ public enum MLXDiffusionError: Error, LocalizedError {
     case unsupportedModelLayout(URL)
     case insufficientMemory([ImageModelLoadPlan.Reason])
     case notLoaded
+    case noLatentsProduced
     case pngEncodingFailed(URL)
 
     public var errorDescription: String? {
@@ -24,6 +25,8 @@ public enum MLXDiffusionError: Error, LocalizedError {
             return "Insufficient memory: \(reasons.map { "\($0)" }.joined(separator: ", "))"
         case .notLoaded:
             return "No model loaded. Call loadModel(from:) first."
+        case .noLatentsProduced:
+            return "The denoising loop produced no latents."
         case .pngEncodingFailed(let url):
             return "Failed to write PNG to \(url.path)."
         }
@@ -186,7 +189,7 @@ public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Senda
                     }
 
                     guard producedAny else {
-                        continuation.finish()
+                        continuation.finish(throwing: MLXDiffusionError.noLatentsProduced)
                         return
                     }
 
