@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.12](https://github.com/roryford/manifold-mlx/compare/v0.2.11...v0.2.12) (2026-06-23)
+
+
+### Features
+
+* **mlx:** grammar-constrained sampling via a GBNF executor ([#96](https://github.com/roryford/manifold-mlx/issues/96)) ([#98](https://github.com/roryford/manifold-mlx/issues/98)) ([44723a1](https://github.com/roryford/manifold-mlx/commit/44723a1c031dbdd4af86bcafc3e419c02f949b1d))
+
 ## [0.2.11](https://github.com/roryford/manifold-mlx/compare/v0.2.10...v0.2.11) (2026-06-23)
 
 ### Highlights
