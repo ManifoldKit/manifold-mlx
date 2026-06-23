@@ -2,6 +2,12 @@
 
 ## [0.2.11](https://github.com/roryford/manifold-mlx/compare/v0.2.10...v0.2.11) (2026-06-23)
 
+### Highlights
+
+**Mistral tool-call dialect** ([#95](https://github.com/roryford/manifold-mlx/issues/95), [#91](https://github.com/roryford/manifold-mlx/issues/91)) — adds `.mistral` to `MLXToolDialect` with full `[TOOL_CALLS] [{…}]` parsing (single and parallel calls), tool-block injection, and history replay. Detection covers `mistral`, `ministral`, and `mixtral` `model_type` values. The tool-call dialect is also surfaced on `BackendCapabilities` so callers can inspect which wire format a loaded model uses.
+
+**MLX tool-call reliability** ([#93](https://github.com/roryford/manifold-mlx/issues/93), [#94](https://github.com/roryford/manifold-mlx/issues/94)) — an empty-args circuit breaker drops calls where the model clearly intended non-empty arguments but parsing produced `{}`; dispatching those caused tool errors and model retry loops. Llama tool-use steering is strengthened from hedging language to a directive "MUST call it" instruction, closing the `list_dir` empty-turn gap on Llama-3.2-3B.
+
 
 ### Features
 
