@@ -147,8 +147,90 @@ import MLXLMCommon
             argumentsString = "{}"
         }
 
+        // Circuit breaker: if the raw body text suggests the model intended
+        // non-empty arguments but parsing produced `{}`, the call is a parse
+        // failure. Emitting it would cause the tool to error and the model to
+        // loop trying to recover; returning nil breaks the loop instead.
+        if argumentsString == "{}" && looksLikeNonemptyArgsExpected(trimmed) {
+            return nil
+        }
+
         let id = "mlx-\(name)-\(UUID().uuidString.prefix(8))"
         return ManifoldInference.ToolCall(id: id, toolName: name, arguments: argumentsString)
+    }
+
+    /// Returns `true` when the raw tool-call body text contains an `"arguments"`
+    /// or `"parameters"` key whose value appears to be a non-trivial object (i.e.
+    /// the model intended to pass arguments but parsing collapsed them to `{}`).
+    ///
+    /// The check is a substring scan — fast, dialect-agnostic, and deliberately
+    /// conservative so it never fires on a legitimately empty-args call:
+    /// - If the key is absent the tool takes no args → pass through.
+    /// - If the value is `{}` or `null` the model passed no args → pass through.
+    /// - If the value object contains any non-whitespace content between `{` and
+    ///   the matching `}` the model intended non-empty args → circuit fires when
+    ///   `argumentsString == "{}"`.
+    private static func looksLikeNonemptyArgsExpected(_ json: String) -> Bool {
+        // Find the first occurrence of an "arguments" or "parameters" key.
+        let keyRanges: [Range<String.Index>] = ["\"arguments\"", "\"parameters\""].compactMap {
+            json.range(of: $0)
+        }
+        guard let keyRange = keyRanges.min(by: { $0.lowerBound < $1.lowerBound }) else {
+            // Neither key present — tool takes no parameters at all.
+            return false
+        }
+
+        // Scan forward from the end of the key for the value. Skip whitespace
+        // and the colon separator, then look for the object open brace.
+        var idx = keyRange.upperBound
+        while idx < json.endIndex, json[idx].isWhitespace || json[idx] == ":" {
+            idx = json.index(after: idx)
+        }
+        guard idx < json.endIndex, json[idx] == "{" else {
+            // Value is not an object (e.g. null, string, missing) → not args.
+            return false
+        }
+
+        // Walk the object, respecting string literals and brace nesting, and
+        // check whether the top-level object contains any non-whitespace content.
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var cursor = idx
+        // Track whether we've seen any non-whitespace inside the top object.
+        var seenContent = false
+        while cursor < json.endIndex {
+            let ch = json[cursor]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if ch == "\\" {
+                    escaped = true
+                } else if ch == "\"" {
+                    inString = false
+                }
+            } else {
+                switch ch {
+                case "\"":
+                    inString = true
+                    if depth == 1 { seenContent = true }
+                case "{":
+                    depth += 1
+                case "}":
+                    depth -= 1
+                    if depth == 0 {
+                        return seenContent
+                    }
+                default:
+                    if depth == 1 && !ch.isWhitespace {
+                        seenContent = true
+                    }
+                }
+            }
+            cursor = json.index(after: cursor)
+        }
+        // Unterminated object — treat as potentially non-empty to be safe.
+        return seenContent
     }
 
     /// Returns the substring spanning the first balanced top-level `{…}` JSON
