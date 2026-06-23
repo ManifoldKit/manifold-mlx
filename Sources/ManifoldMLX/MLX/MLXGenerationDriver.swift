@@ -63,6 +63,7 @@ import ManifoldInference
         maxOutputTokens: 4096,
         supportsStreaming: true,
         isRemote: false,
+        supportsGrammarConstrainedSampling: true,
         supportsThinking: true,
         sharesMLXProcessResources: true,
         rendersFullPrompt: true
@@ -127,6 +128,10 @@ import ManifoldInference
         // the prior turn's snapshot task writes to backend state, and a value captured
         // before the await is always stale on second turn. See driver lines 169-174.
         currentSnapshot: @MainActor @Sendable () -> MLXPromptCacheCoordinator.Snapshot?,
+        // Pre-parsed GBNF grammar (#96). Non-nil when the request set
+        // `config.grammar` and the backend parsed it; the inner loop builds an
+        // ``MLXGrammarLogitProcessor`` from it.
+        grammar: GBNFGrammar?,
         generationStream: GenerationStream,
         continuation: AsyncThrowingStream<GenerationEvent, Error>.Continuation,
         yieldHook: (@Sendable () async -> Void)?
@@ -223,6 +228,7 @@ import ManifoldInference
             config: config,
             dialect: dialect,
             markers: resolvedMarkers,
+            grammar: grammar,
             generationStream: generationStream,
             continuation: continuation,
             yieldHook: yieldHook
@@ -304,6 +310,7 @@ import ManifoldInference
         config: GenerationConfig,
         dialect: MLXToolDialect,
         markers: ThinkingMarkers?,
+        grammar: GBNFGrammar?,
         generationStream: GenerationStream,
         continuation: AsyncThrowingStream<GenerationEvent, Error>.Continuation,
         yieldHook: (@Sendable () async -> Void)?
@@ -366,7 +373,8 @@ import ManifoldInference
             try await container.generate(
                 input: generationInput,
                 cache: cache,
-                parameters: generateConfig
+                parameters: generateConfig,
+                grammar: grammar
             )
         }
         if let message = capture.message {

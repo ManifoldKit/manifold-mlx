@@ -84,6 +84,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 supportsStreaming: true,
                 isRemote: false,
                 supportsKVCachePersistence: enableKVCacheReuse,
+                supportsGrammarConstrainedSampling: true,
                 supportsThinking: true,
                 supportsVision: _supportsVision,
                 sharesMLXProcessResources: true,
@@ -414,17 +415,23 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         // touching backend state — so once we leave the lock, the driver call
         // is decoupled from `setLoadOptions` / `setConversationHistory` /
         // `setToolAwareHistory` racing in.
-        // Fail fast on an unsupported grammar request — before the no-model and
-        // already-generating checks — so a caller passing a non-nil GBNF grammar
-        // gets a precise `unsupportedGrammar` diagnostic rather than silently
-        // unconstrained output. MLX has no grammar-constrained sampling path and
-        // `capabilities.supportsGrammarConstrainedSampling` is `false`; the
-        // `InferenceBackend` contract requires this throw. Mirrors
-        // `SSECloudBackend.validateGenerationConfig`.
-        if config.grammar != nil, !capabilities.supportsGrammarConstrainedSampling {
-            throw InferenceError.unsupportedGrammar(
-                reason: "MLXBackend does not support grammar-constrained sampling."
-            )
+        // Parse the GBNF grammar up front — before the no-model and
+        // already-generating checks — so a grammar using a construct this
+        // executor does not support yields a precise `unsupportedGrammar`
+        // diagnostic rather than silently unconstrained output (issue #96
+        // decision). A nil grammar leaves `parsedGrammar` nil and the normal
+        // unconstrained path runs.
+        let parsedGrammar: GBNFGrammar?
+        if let gbnf = config.grammar {
+            do {
+                parsedGrammar = try GBNFGrammar(parsing: gbnf)
+            } catch {
+                throw InferenceError.unsupportedGrammar(
+                    reason: "MLXBackend could not compile the GBNF grammar: \(error)"
+                )
+            }
+        } else {
+            parsedGrammar = nil
         }
 
         let snapshot: GenerationCallSnapshot = try withStateLock {
@@ -444,7 +451,10 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 dialect: _dialect,
                 autoDetectedMarkers: _autoDetectedThinkingMarkers,
                 kvCacheReuseEligible: _kvCacheReuseEligible,
-                pendingSnapshotTask: _promptCacheState.pendingSnapshotTask
+                pendingSnapshotTask: _promptCacheState.pendingSnapshotTask,
+                grammar: Self.wrapToolCallGrammarIfNeeded(
+                    parsedGrammar, dialect: _dialect, tools: config.tools
+                )
             )
         }
         Self.logger.debug("MLX generate started")
@@ -478,6 +488,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                     currentSnapshot: { [weak self] in
                         self?.withStateLock { self?._promptCacheState.snapshot } ?? nil
                     },
+                    grammar: snapshot.grammar,
                     generationStream: generationStream,
                     continuation: continuation,
                     yieldHook: MLXBackend._yieldHookForTesting
@@ -538,6 +549,47 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         let autoDetectedMarkers: ThinkingMarkers?
         let kvCacheReuseEligible: Bool
         let pendingSnapshotTask: Task<Void, Never>?
+        let grammar: GBNFGrammar?
+    }
+
+    /// Wraps a *bare* tool-call envelope grammar (the `{"name":…,"arguments":…}`
+    /// union `ToolGrammarBuilder` emits) in the dialect's textual `<tool_call>`
+    /// delimiters so the model emits the wrapper the existing `ToolCallTransform`
+    /// extracts, while the grammar still constrains the inner JSON to each tool's
+    /// schema (#96). Only applied when a grammar is present, the request carries
+    /// tools, and the loaded model speaks a `<tool_call>` dialect — otherwise the
+    /// grammar passes through unwrapped (e.g. raw structured-output grammars).
+    private static func wrapToolCallGrammarIfNeeded(
+        _ grammar: GBNFGrammar?,
+        dialect: MLXToolDialect,
+        tools: [ToolDefinition]
+    ) -> GBNFGrammar? {
+        guard let grammar, !tools.isEmpty else { return grammar }
+        switch dialect {
+        case .qwen25, .llama:
+            // Only wrap a *forced-call* envelope, where every branch starts with
+            // `{` — so the grammar's sole acceptable first byte is `{`. A
+            // `.permissive` grammar (toolChoice == .auto) also admits a prose
+            // first byte; wrapping that would wrongly force a call, so it passes
+            // through unwrapped. Mirrors the `<tool_call>\n` … `\n</tool_call>`
+            // shape Qwen emits and `MLXToolMarkers.markers(dialect:)` parses.
+            guard GBNFMatcher(grammar: grammar).acceptableFirstBytes() == [UInt8(ascii: "{")] else {
+                return grammar
+            }
+            return grammar.wrappingRoot(
+                prefix: Array("<tool_call>\n".utf8),
+                suffix: Array("\n</tool_call>".utf8)
+            )
+        case .mistral:
+            // Mistral's tool-call channel is `[TOOL_CALLS] [ {…} ]` (a sentinel +
+            // JSON array, EOS-keyed — see `MLXToolMarkers`), not the `<tool_call>`
+            // object wrapper, so the wrap above does not apply. Pass the grammar
+            // through unwrapped (no regression vs. today's Mistral path); wrapping
+            // the bare envelope in the `[TOOL_CALLS]` array shape is a follow-up.
+            return grammar
+        case .unknown:
+            return grammar
+        }
     }
 
     /// Schedules an off-main capture of the prompt KV cache for next-turn reuse.
