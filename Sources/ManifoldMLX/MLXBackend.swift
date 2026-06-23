@@ -87,7 +87,8 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 supportsThinking: true,
                 supportsVision: _supportsVision,
                 sharesMLXProcessResources: true,
-                rendersFullPrompt: true
+                rendersFullPrompt: true,
+                toolDialect: _dialect.coreDialect
             )
         }
     }
