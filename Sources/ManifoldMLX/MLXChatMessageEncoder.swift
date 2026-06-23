@@ -259,8 +259,9 @@ import ManifoldInference
         <tool_call>{"name": <function-name>, "parameters": <arguments-json-object>}</tool_call>
         Emit the literal `<tool_call>` and `</tool_call>` tags around a single \
         JSON object. Do not narrate the call, do not wrap it in code fences, and \
-        do not invent your own tags. Use the exact function name. Only call a \
-        function when one can answer the request; otherwise reply normally.
+        do not invent your own tags. Use the exact function name. When a function \
+        can answer the request, you MUST call it — do not describe what you would \
+        do or answer from memory instead.
 
         Available functions:
         \(toolsJSON)

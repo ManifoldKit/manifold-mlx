@@ -458,4 +458,26 @@ final class MLXLlamaToolDialectTests: XCTestCase {
             "with no tools, the output must equal the bare app system prompt"
         )
     }
+
+    /// The `llamaToolBlock` instruction must use directive "MUST call it" language,
+    /// not hedging phrasing that lets a small model skip the call (issue #71:
+    /// Llama-3.2-3B emitted an empty assistant turn for `list_dir` when the
+    /// instruction said "Only call a function when one can answer the request;
+    /// otherwise reply normally" — the hedge gave the model permission to skip).
+    func test_llamaToolBlock_usesDirectiveMustLanguage() throws {
+        let block = try XCTUnwrap(
+            MLXChatMessageEncoder.buildQwenToolBlock(
+                config: config(withTools: [calcTool()]),
+                dialect: .llama
+            )
+        )
+        XCTAssertTrue(
+            block.contains("MUST"),
+            "llamaToolBlock must use directive 'MUST call it' language, not hedging; got: \(block)"
+        )
+        XCTAssertFalse(
+            block.contains("otherwise reply normally"),
+            "llamaToolBlock must not contain hedging 'otherwise reply normally' — it lets 3B models skip tool calls; got: \(block)"
+        )
+    }
 }
