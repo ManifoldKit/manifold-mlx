@@ -101,11 +101,9 @@ public enum MLXToolDialect: Equatable, Sendable {
             return .llama
         }
 
-        // Mistral and the Mixtral MoE family (`"mistral"`, `"ministral"`)
-        // share the `[TOOL_CALLS]` array format. `mixtral` and `mistral-nemo`
-        // also carry `"mistral"` in their `model_type` on most HuggingFace
-        // checkpoints, so the prefix match covers the whole family.
-        if modelType.hasPrefix("mistral") || modelType.hasPrefix("ministral") {
+        // Mistral (`"mistral"`), Mixtral MoE (`"mixtral"`), and Ministral
+        // (`"ministral"`) all share the `[TOOL_CALLS]` array wire format.
+        if modelType.hasPrefix("mistral") || modelType.hasPrefix("mixtral") || modelType.hasPrefix("ministral") {
             return .mistral
         }
 
