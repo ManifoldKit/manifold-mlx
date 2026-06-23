@@ -9,13 +9,17 @@ import MLXLMCommon
 /// delimiters and JSON body parsing stay here, injected as a `@Sendable`
 /// closure.
 ///
-/// Two model families are supported:
+/// Three model families are supported:
 /// - **Qwen 2.5 / Qwen 3** wrap tool calls in `<tool_call>` / `</tool_call>`
 ///   with a `{"name":…,"arguments":{…}}` JSON body.
 /// - **Llama 3.x** emit a `<|python_tag|>`-prefixed JSON object (closed by the
 ///   `<|eom_id|>` / `<|eot_id|>` special tokens) — or a bare top-level JSON
 ///   object — with a `{"name":…,"parameters":{…}}` body. Without dialect-aware
 ///   markers Llama calls were never parsed (issue #59).
+/// - **Mistral / Mixtral** emit `[TOOL_CALLS] [{"name":…,"arguments":{…}},…]`
+///   — a bare `[TOOL_CALLS] ` sentinel followed by a JSON array of calls with
+///   no closing delimiter (the block ends at end-of-generation). Multiple calls
+///   in one array map to multiple `.toolCall` events (issue #86).
 // @_spi(Testing): published only for backend test targets (companion-package split, #1749).
 @_spi(Testing) public enum MLXToolMarkers {
 
@@ -34,12 +38,20 @@ import MLXLMCommon
     private static let llamaEomTag   = "<|eom_id|>"
     private static let llamaEotTag   = "<|eot_id|>"
 
+    // Mistral `[TOOL_CALLS]` sentinel. The model emits this prefix followed by
+    // a JSON array of `{name, arguments}` objects (no closing delimiter — the
+    // block ends at end-of-generation). `closesAtEnd: true` tells the transform
+    // to buffer to EOS and parse in `finalize()`.
+    private static let mistralOpenTag = "[TOOL_CALLS] "
+
     /// The marker set MLX hands to a `ToolCallTransform` for `dialect`.
     ///
     /// `.qwen25` → the single `<tool_call>` dialect. `.llama` → the
-    /// `<|python_tag|>` dialect (two markers, one per close token). `.unknown`
-    /// → an empty set (the driver never builds a tool stage for `.unknown`,
-    /// but returning `[]` keeps this total and side-effect-free).
+    /// `<|python_tag|>` dialect (two markers, one per close token). `.mistral`
+    /// → the `[TOOL_CALLS] ` EOS-keyed multi-call dialect (one sentinel, no
+    /// closing delimiter, JSON array body). `.unknown` → an empty set (the
+    /// driver never builds a tool stage for `.unknown`, but returning `[]` keeps
+    /// this total and side-effect-free).
     public static func markers(dialect: MLXToolDialect) -> [ToolCallMarker] {
         switch dialect {
         case .qwen25:
@@ -68,6 +80,18 @@ import MLXLMCommon
                     parseToolCall(body)
                 },
             ]
+        case .mistral:
+            // Mistral emits `[TOOL_CALLS] [{"name":…,"arguments":{…}},…]`.
+            // There is no closing delimiter — the array body runs to
+            // end-of-generation, so `closesAtEnd: true` tells the transform to
+            // buffer everything and call `parseBodyMulti` in `finalize()`.
+            // One JSON array may carry multiple calls; `parseBodyMulti` returns
+            // all of them and the transform emits one `.toolCall` per element.
+            return [
+                ToolCallMarker(open: mistralOpenTag, closesAtEnd: true) { body in
+                    parseMistralToolCalls(body)
+                }
+            ]
         case .unknown:
             return []
         }
@@ -79,6 +103,36 @@ import MLXLMCommon
     /// parameter keep compiling. New code should pass an explicit `dialect:`.
     public static func markers() -> [ToolCallMarker] {
         markers(dialect: .qwen25)
+    }
+
+    /// Parses a Mistral `[TOOL_CALLS]` body — a JSON array of
+    /// `{"name":…,"arguments":{…}}` objects — into zero or more `ToolCall`s.
+    ///
+    /// The body is everything after the `[TOOL_CALLS] ` sentinel (which the
+    /// transform strips as the open tag), so it is a raw JSON array starting
+    /// with `[`. Both the `arguments` key (canonical) and the `parameters`
+    /// alias (tolerated) are accepted by delegating each element to
+    /// `parseToolCall(_:)`. Elements that fail to parse are dropped silently —
+    /// the overall call is still valid if at least one element succeeds.
+    private static func parseMistralToolCalls(_ body: String) -> [ManifoldInference.ToolCall] {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let data = trimmed.data(using: .utf8),
+              let array = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
+        else {
+            return []
+        }
+
+        return array.compactMap { element -> ManifoldInference.ToolCall? in
+            // Re-serialise each element and reuse the existing single-call
+            // parser so the `arguments` / `parameters` normalisation lives once.
+            guard let elementData = try? JSONSerialization.data(withJSONObject: element),
+                  let elementStr = String(data: elementData, encoding: .utf8)
+            else {
+                return nil
+            }
+            return parseToolCall(elementStr)
+        }
     }
 
     /// Attempts to parse a buffered tool-call body into a `ToolCall`.
