@@ -1,4 +1,5 @@
 import Foundation
+import ManifoldHardware
 
 /// Identifies the tool-call dialect a locally loaded MLX model uses.
 ///
@@ -41,6 +42,45 @@ public enum MLXToolDialect: Equatable, Sendable {
 
     /// No recognised tool dialect — tool calling is disabled for this model.
     case unknown
+
+    // MARK: - Core dialect mapping
+
+    /// Maps this internal dialect to the corresponding ``ToolCallDialect`` from
+    /// `ManifoldHardware` so ``MLXBackend`` can surface it on
+    /// ``BackendCapabilities/toolDialect``.
+    ///
+    /// Llama uses `<tool_call>` as its *primary* textual delimiter (the one the
+    /// model is steered onto via ``MLXChatMessageEncoder``), but falls back to
+    /// `<|python_tag|>` / `<|eom_id|>` when the detokeniser surfaces those
+    /// special tokens. We report the fallback delimiter pair here — the primary
+    /// `<tool_call>` path is identical to Qwen's and is already handled by the
+    /// `.qwen25` mapping — so callers can see that the Llama path is buried
+    /// (no guaranteed opening delimiter on the native path).
+    public var coreDialect: ToolCallDialect {
+        switch self {
+        case .qwen25:
+            return ToolCallDialect(
+                family: .qwen,
+                openDelimiter: "<tool_call>",
+                closeDelimiter: "</tool_call>",
+                argEncoding: .json,
+                extractability: .clean
+            )
+        case .llama:
+            return ToolCallDialect(
+                family: .llamaPythonTag,
+                openDelimiter: "<|python_tag|>",
+                closeDelimiter: "<|eom_id|>",
+                argEncoding: .json,
+                extractability: .buried
+            )
+        case .unknown:
+            return ToolCallDialect(
+                family: .unknown,
+                extractability: .toolLess
+            )
+        }
+    }
 
     // MARK: - Detection
 
