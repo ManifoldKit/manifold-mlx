@@ -15,6 +15,10 @@ import Foundation
 ///   official "respond with a JSON object" instruction; model emits a
 ///   `<|python_tag|>{"name":…,"parameters":…}` block (or a bare
 ///   `{"name":…,"parameters":…}` JSON object).
+/// - `.mistral` — Mistral / Mixtral format: tools injected as a JSON array
+///   with the `[TOOL_CALLS]` wire format instruction; model emits
+///   `[TOOL_CALLS] [{"name":…,"arguments":{…}}, …]` (parallel calls in one
+///   JSON array, sentinel prefix, no closing delimiter — ends at EOS).
 /// - `.unknown` — no recognised tool dialect; tool calling is a no-op.
 public enum MLXToolDialect: Equatable, Sendable {
     /// Qwen 2.5 / Qwen 3 tool-call format.
@@ -38,6 +42,21 @@ public enum MLXToolDialect: Equatable, Sendable {
     /// it narrates the call as prose or invents its own `<tool>…</tool>`
     /// wrapper (issue #59).
     case llama
+
+    /// Mistral / Mixtral tool-call format (issue #86).
+    ///
+    /// Tool definitions are serialised as a JSON array and appended to the
+    /// system message instructing the model to emit the `[TOOL_CALLS]` sentinel
+    /// prefix. The model responds with:
+    ///   `[TOOL_CALLS] [{"name": "fn", "arguments": {…}}, …]`
+    /// One or more calls appear in a single JSON array; parallel calls are
+    /// supported natively. The sentinel has no closing delimiter — the block
+    /// ends at end-of-generation (`closesAtEnd: true`). Both the `arguments`
+    /// key and the tolerated `parameters` alias are accepted during parsing.
+    /// Mistral's chat template rejects a standalone `system` role and enforces
+    /// strict user/assistant alternation; the system message is folded into the
+    /// first user turn by `MLXPromptCacheCoordinator` when the template raises.
+    case mistral
 
     /// No recognised tool dialect — tool calling is disabled for this model.
     case unknown
@@ -80,6 +99,14 @@ public enum MLXToolDialect: Equatable, Sendable {
         // as `.unknown`.
         if modelType.hasPrefix("llama") || modelType.hasPrefix("mllama") {
             return .llama
+        }
+
+        // Mistral and the Mixtral MoE family (`"mistral"`, `"ministral"`)
+        // share the `[TOOL_CALLS]` array format. `mixtral` and `mistral-nemo`
+        // also carry `"mistral"` in their `model_type` on most HuggingFace
+        // checkpoints, so the prefix match covers the whole family.
+        if modelType.hasPrefix("mistral") || modelType.hasPrefix("ministral") {
+            return .mistral
         }
 
         return .unknown
