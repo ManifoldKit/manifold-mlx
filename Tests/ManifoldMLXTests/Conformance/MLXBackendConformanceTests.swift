@@ -63,6 +63,12 @@ final class MLXBackendConformanceTests: XCTestCase,
             backendName: contractBackendName,
             flag: "supportsTokenCounting"
         )
+        // GBNF executor (#96): parser + matcher proven in `GBNFGrammarTests`;
+        // end-to-end constrained decoding in `MLXGrammarSamplingE2ETests`.
+        BackendContractChecks.claimWithoutBehaviouralAssertion(
+            backendName: contractBackendName,
+            flag: "supportsGrammarConstrainedSampling"
+        )
 
         BackendContractChecks.assertCapabilityMetaContract(
             backendName: contractBackendName,

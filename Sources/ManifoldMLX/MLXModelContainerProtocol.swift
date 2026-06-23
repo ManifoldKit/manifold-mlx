@@ -73,6 +73,33 @@ import MLXLMCommon
         cache: MLXPromptCache?,
         parameters: GenerateParameters
     ) async throws -> AsyncStream<Generation>
+
+    /// Grammar-constrained generation (#96, option B).
+    ///
+    /// When `grammar` is non-nil the concrete container builds an
+    /// ``MLXGrammarLogitProcessor`` (it needs the tokenizer, only reachable
+    /// inside `perform`), composes it over the parameters' penalty processor,
+    /// and drives generation through the direct `TokenIterator` init so the
+    /// grammar mask is applied at every step. The default implementation ignores
+    /// the grammar and forwards to the plain `generate(input:cache:parameters:)`,
+    /// so mock containers conform for free.
+    func generate(
+        input: MLXPreparedInput,
+        cache: MLXPromptCache?,
+        parameters: GenerateParameters,
+        grammar: GBNFGrammar?
+    ) async throws -> AsyncStream<Generation>
+}
+
+@_spi(Testing) public extension MLXModelContainerProtocol {
+    func generate(
+        input: MLXPreparedInput,
+        cache: MLXPromptCache?,
+        parameters: GenerateParameters,
+        grammar: GBNFGrammar?
+    ) async throws -> AsyncStream<Generation> {
+        try await generate(input: input, cache: cache, parameters: parameters)
+    }
 }
 
 @_spi(Testing) extension ModelContainer: MLXModelContainerProtocol {
@@ -108,6 +135,51 @@ import MLXLMCommon
                 context: context,
                 wiredMemoryTicket: nil
             )
+        }
+    }
+
+    public func generate(
+        input: MLXPreparedInput,
+        cache: MLXPromptCache?,
+        parameters: GenerateParameters,
+        grammar: GBNFGrammar?
+    ) async throws -> AsyncStream<Generation> {
+        // No grammar → identical to the plain path (keeps KV-cache
+        // quantization, speculative paths, etc.).
+        guard let grammar else {
+            return try await generate(input: input, cache: cache, parameters: parameters)
+        }
+        // Grammar path (#96, option B): build the grammar processor inside
+        // `perform` where the tokenizer is reachable, compose it over the
+        // parameters' penalty processor, and drive the direct `TokenIterator`.
+        //
+        // NOTE: the direct `TokenIterator(input:model:cache:processor:sampler:…)`
+        // init does NOT apply KV-cache quantization (`kvBits` is dropped). This is
+        // the accepted KV-quant tradeoff (issue #96) — grammar-active turns run
+        // with an unquantized KV cache.
+        return try await perform(nonSendable: (input.lmInput, cache?.value)) { context, values in
+            let (input, cache) = values
+            let processor = MLXGrammarLogitProcessor(
+                grammar: grammar,
+                tokenizer: context.tokenizer,
+                base: parameters.processor()
+            )
+            let iterator = try TokenIterator(
+                input: input,
+                model: context.model,
+                cache: cache,
+                processor: processor,
+                sampler: parameters.sampler(),
+                prefillStepSize: parameters.prefillStepSize,
+                maxTokens: parameters.maxTokens
+            )
+            let (stream, _) = MLXLMCommon.generateTask(
+                promptTokenCount: input.text.tokens.size,
+                modelConfiguration: context.configuration,
+                tokenizer: context.tokenizer,
+                iterator: iterator
+            )
+            return stream
         }
     }
 }
