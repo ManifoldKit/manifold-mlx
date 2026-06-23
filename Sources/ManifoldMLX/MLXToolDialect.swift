@@ -93,6 +93,8 @@ public enum MLXToolDialect: Equatable, Sendable {
                 argEncoding: .json,
                 extractability: .buried
             )
+        case .mistral:
+            return .mistral
         case .unknown:
             return ToolCallDialect(
                 family: .unknown,
