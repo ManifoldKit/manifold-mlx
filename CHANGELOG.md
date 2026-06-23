@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.10](https://github.com/roryford/manifold-mlx/compare/v0.2.9...v0.2.10) (2026-06-22)
+
+### Highlights
+
+**Tracks ManifoldKit 0.60** ([#90](https://github.com/roryford/manifold-mlx/issues/90), [#84](https://github.com/roryford/manifold-mlx/issues/84)) — the core pin moves to `.upToNextMinor(from: "0.60.0")`, jumping past 0.59 to build against the 0.60 release: the measured tool-call conformance spine (a `ToolCallConformance` cache port, tool-call *dialect* on `BackendCapabilities`, transcript attribution + scorer, public JSON-Schema → GBNF surface) and the Mistral system-prompt-fold renderer fix. No source changes required — bump and rebuild.
+
+**MLX tool-call dispatch reliability** ([#71](https://github.com/roryford/manifold-mlx/issues/71), [#80](https://github.com/roryford/manifold-mlx/issues/80), [#88](https://github.com/roryford/manifold-mlx/issues/88), [#79](https://github.com/roryford/manifold-mlx/issues/79)) — a prefer-tools preamble steers Llama models to actually dispatch tool calls; mlx-swift-lm's native tool-call events are now forwarded so inline (Llama-style) calls dispatch instead of being dropped; and the streaming phase is set correctly when a tool call arrives only via the normalizer tail.
+
+**Graceful handling of unsupported model shapes** ([#89](https://github.com/roryford/manifold-mlx/issues/89), [#83](https://github.com/roryford/manifold-mlx/issues/83)) — the `manifold-tools-mlx` text harness now detects vision-language model dirs (by their `preprocessor_config.json` marker) and errors with a clear message instead of a SIGSEGV mid-sweep; plus a Mistral system-prompt rendering fix and Gemma 4 / Qwen 3.5 load guards.
+
+**Other fixes** — throw `noLatentsProduced` on empty diffusion output, matching `FluxDiffusionBackend` ([#78](https://github.com/roryford/manifold-mlx/issues/78)); robust unknown-scenario exit code + sweep-script hygiene ([#77](https://github.com/roryford/manifold-mlx/issues/77)).
+
 ## [0.2.9](https://github.com/roryford/manifold-mlx/compare/v0.2.8...v0.2.9) (2026-06-21)
 
 
