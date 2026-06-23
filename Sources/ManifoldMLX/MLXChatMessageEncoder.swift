@@ -187,6 +187,9 @@ import ManifoldInference
     ///   response (issue #59 — without it Llama never produces a parseable
     ///   call). See ``llamaToolBlock(config:)`` for why the textual wrapper is
     ///   used instead of Llama's native `<|python_tag|>`.
+    /// - `.mistral` emits a Mistral function block listing the tools as JSON
+    ///   and instructing the `[TOOL_CALLS] [{"name":…,"arguments":{…}}]`
+    ///   response format (issue #86).
     /// - `.unknown` returns `nil`.
     ///
     /// The name retains the historical `buildQwenToolBlock` spelling for source
@@ -202,6 +205,8 @@ import ManifoldInference
             return qwenToolBlock(config: config)
         case .llama:
             return llamaToolBlock(config: config)
+        case .mistral:
+            return mistralToolBlock(config: config)
         case .unknown:
             return nil
         }
@@ -267,6 +272,37 @@ import ManifoldInference
         """
     }
 
+    /// Mistral tool-calling system block (issue #86).
+    ///
+    /// Lists the available functions as JSON and instructs the model to emit
+    /// `[TOOL_CALLS] [{"name":…,"arguments":{…}}]`. One JSON array per
+    /// generation turn; multiple parallel calls appear as sibling objects in
+    /// the same array.
+    ///
+    /// Note on system-message placement: Mistral's Jinja chat template enforces
+    /// strict user/assistant alternation and rejects a standalone `system` role.
+    /// Rather than handling this here, `MLXPromptCacheCoordinator` attempts the
+    /// real template first and falls back to `foldSystemIntoFirstUser` when it
+    /// raises — so the mistral tool block rides into the first user turn as plain
+    /// text and the system-hostility is handled transparently at the render layer.
+    private static func mistralToolBlock(config: GenerationConfig) -> String {
+        let toolsJSON = toolFunctionsJSON(config, wrapInFunctionType: false)
+        return """
+
+
+        You have access to the following functions. To call one or more \
+        functions, emit EXACTLY one block of the form:
+        [TOOL_CALLS] [{"name": <function-name>, "arguments": <args-json-object>}]
+        You may include multiple calls in the JSON array for parallel execution. \
+        Do not narrate the call, do not wrap it in code fences, and do not invent \
+        your own format. Use the exact function name. Only call a function when \
+        one can answer the request; otherwise reply normally.
+
+        Available functions:
+        \(toolsJSON)
+        """
+    }
+
     /// Encodes a ``ToolAwareHistoryEntry`` into a plain `[String: String]` message
     /// compatible with MLX chat-template preparation.
     ///
@@ -288,7 +324,7 @@ import ManifoldInference
     ) -> [String: String] {
         // For dialects without a recognised tool wire-format (`.unknown`) or
         // plain turns, fall back to the bare shape.
-        guard dialect == .qwen25 || dialect == .llama else {
+        guard dialect == .qwen25 || dialect == .llama || dialect == .mistral else {
             return ["role": entry.role, "content": entry.content]
         }
 
@@ -300,33 +336,54 @@ import ManifoldInference
             if !entry.content.isEmpty {
                 parts.append(entry.content)
             }
-            for call in calls {
-                let argsValue: Any
-                if let data = call.arguments.data(using: .utf8),
-                   let parsed = try? JSONSerialization.jsonObject(with: data) {
-                    argsValue = parsed
-                } else {
-                    argsValue = [String: Any]()
+
+            if dialect == .mistral {
+                // Mistral packs ALL calls in one JSON array prefixed by the
+                // `[TOOL_CALLS]` sentinel: `[TOOL_CALLS] [{…},{…}]`.
+                // Build the array from all calls in this entry at once.
+                let callObjects: [[String: Any]] = calls.compactMap { call in
+                    let argsValue: Any
+                    if let data = call.arguments.data(using: .utf8),
+                       let parsed = try? JSONSerialization.jsonObject(with: data) {
+                        argsValue = parsed
+                    } else {
+                        argsValue = [String: Any]()
+                    }
+                    return ["name": call.toolName, "arguments": argsValue]
                 }
-                switch dialect {
-                case .qwen25:
-                    let callObj: [String: Any] = ["name": call.toolName, "arguments": argsValue]
-                    if let data = try? JSONSerialization.data(withJSONObject: callObj),
-                       let jsonStr = String(data: data, encoding: .utf8) {
-                        parts.append("<tool_call>\n\(jsonStr)\n</tool_call>")
+                if let data = try? JSONSerialization.data(withJSONObject: callObjects),
+                   let jsonStr = String(data: data, encoding: .utf8) {
+                    parts.append("[TOOL_CALLS] \(jsonStr)")
+                }
+            } else {
+                for call in calls {
+                    let argsValue: Any
+                    if let data = call.arguments.data(using: .utf8),
+                       let parsed = try? JSONSerialization.jsonObject(with: data) {
+                        argsValue = parsed
+                    } else {
+                        argsValue = [String: Any]()
                     }
-                case .llama:
-                    // Llama uses the `parameters` key; we replay the call in the
-                    // same textual `<tool_call>` wrapper we instruct it to emit
-                    // (Llama's native `<|python_tag|>`/`<|eom_id|>` terminator is
-                    // a special token that doesn't round-trip through plain text).
-                    let callObj: [String: Any] = ["name": call.toolName, "parameters": argsValue]
-                    if let data = try? JSONSerialization.data(withJSONObject: callObj),
-                       let jsonStr = String(data: data, encoding: .utf8) {
-                        parts.append("<tool_call>\n\(jsonStr)\n</tool_call>")
+                    switch dialect {
+                    case .qwen25:
+                        let callObj: [String: Any] = ["name": call.toolName, "arguments": argsValue]
+                        if let data = try? JSONSerialization.data(withJSONObject: callObj),
+                           let jsonStr = String(data: data, encoding: .utf8) {
+                            parts.append("<tool_call>\n\(jsonStr)\n</tool_call>")
+                        }
+                    case .llama:
+                        // Llama uses the `parameters` key; we replay the call in the
+                        // same textual `<tool_call>` wrapper we instruct it to emit
+                        // (Llama's native `<|python_tag|>`/`<|eom_id|>` terminator is
+                        // a special token that doesn't round-trip through plain text).
+                        let callObj: [String: Any] = ["name": call.toolName, "parameters": argsValue]
+                        if let data = try? JSONSerialization.data(withJSONObject: callObj),
+                           let jsonStr = String(data: data, encoding: .utf8) {
+                            parts.append("<tool_call>\n\(jsonStr)\n</tool_call>")
+                        }
+                    case .mistral, .unknown:
+                        break
                     }
-                case .unknown:
-                    break
                 }
             }
             return ["role": "assistant", "content": parts.joined(separator: "\n")]
