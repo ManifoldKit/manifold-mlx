@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.11](https://github.com/roryford/manifold-mlx/compare/v0.2.10...v0.2.11) (2026-06-23)
+
+
+### Features
+
+* **mlx:** add .mistral tool dialect ([TOOL_CALLS] format) ([#95](https://github.com/roryford/manifold-mlx/issues/95)) ([47015ab](https://github.com/roryford/manifold-mlx/commit/47015abdd8fbf4e7c0c3c8d53097c7aa3c4a2005))
+* **mlx:** surface tool-call dialect on BackendCapabilities ([#91](https://github.com/roryford/manifold-mlx/issues/91)) ([7688668](https://github.com/roryford/manifold-mlx/commit/7688668e1d1458a60982eeac6680a7ed91f912ec))
+
+
+### Bug Fixes
+
+* **mlx:** drop empty-args tool calls that look like parse failures ([#93](https://github.com/roryford/manifold-mlx/issues/93)) ([d6d1a76](https://github.com/roryford/manifold-mlx/commit/d6d1a76df8d4c0578dd567f246d59c84484ee478))
+* **mlx:** strengthen llama tool-use steering to close list_dir dispatch gap ([#94](https://github.com/roryford/manifold-mlx/issues/94)) ([1a694df](https://github.com/roryford/manifold-mlx/commit/1a694df7e825f4f72619164ab8f6e1b2e0ca4d32))
+
 ## [0.2.10](https://github.com/roryford/manifold-mlx/compare/v0.2.9...v0.2.10) (2026-06-22)
 
 ### Highlights
