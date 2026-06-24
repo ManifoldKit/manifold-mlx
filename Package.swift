@@ -104,6 +104,10 @@ let package = Package(
                 .product(name: "ManifoldPersistenceSwiftData", package: "ManifoldKit"),
                 .product(name: "ManifoldTestSupport", package: "ManifoldKit"),
                 .product(name: "ManifoldBackendTestKit", package: "ManifoldKit"),
+            ],
+            resources: [
+                // Render-side golden corpus for MLXRenderGoldenTests (#2005).
+                .copy("Fixtures/RenderGoldens"),
             ]
         ),
         // Real-model E2E tests: require Apple Silicon + Metal + local MLX
