@@ -309,15 +309,16 @@ import ManifoldInference
     @MainActor
     private static func prepareMessagesWithSystemFallback(
         container: any MLXModelContainerProtocol,
-        messages: [[String: String]]
+        messages: [[String: String]],
+        tools: [[String: any Sendable]]?
     ) async throws -> MLXPreparedInput {
         do {
-            return try await container.prepare(messages: messages)
+            return try await container.prepare(messages: messages, tools: tools)
         } catch let originalError {
             let folded = MLXChatMessageEncoder.foldSystemIntoFirstUser(messages)
             guard folded != messages else { throw originalError }
             do {
-                return try await container.prepare(messages: folded)
+                return try await container.prepare(messages: folded, tools: tools)
             } catch {
                 throw originalError
             }
@@ -339,15 +340,21 @@ import ManifoldInference
         container: any MLXModelContainerProtocol,
         chatMessages: [Chat.Message]?,
         messages: [[String: String]],
+        toolSpecs: [[String: any Sendable]]?,
         generateConfig: GenerateParameters,
         kvCacheReuseEligible: Bool,
         snapshot: Snapshot?
     ) async throws -> PreparedGenerationInputs {
         let preparedInput =
             if let chatMessages {
+                // Vision/structured history path: tools are not threaded
+                // structurally here (only the text-only `messages` path carries
+                // the structural-tools render today — Phase 0 / #2005).
                 try await container.prepare(chat: SendableChatMessages(chatMessages))
             } else {
-                try await Self.prepareMessagesWithSystemFallback(container: container, messages: messages)
+                try await Self.prepareMessagesWithSystemFallback(
+                    container: container, messages: messages, tools: toolSpecs
+                )
             }
         var cache = try await container.makeCache(parameters: generateConfig)
         let promptTokenIds: [Int]? = if kvCacheReuseEligible {

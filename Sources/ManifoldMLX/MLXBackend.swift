@@ -74,7 +74,13 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 maxContextTokens: ctxTokens,
                 requiresPromptTemplate: false,
                 supportsSystemPrompt: true,
-                supportsToolCalling: true,
+                // Tool calling is honoured only when the loaded model speaks a
+                // recognised tool dialect. `.unknown` (e.g. Gemma — no tool
+                // template, no wire format) correctly reports `false` rather
+                // than over-claiming a capability the generate path no-ops
+                // (the tool stage is gated on `dialect != .unknown` in
+                // `MLXGenerationDriver.run`). Phase 0 / umbrella #2005.
+                supportsToolCalling: _dialect != .unknown,
                 supportsStructuredOutput: false,
                 supportsNativeJSONMode: false,
                 cancellationStyle: .cooperative,

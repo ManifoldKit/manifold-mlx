@@ -66,6 +66,20 @@ import MLXLMCommon
 // (MockMLXModelContainer) without @testable access — companion split, #1749.
 @_spi(Testing) public protocol MLXModelContainerProtocol: Sendable {
     func prepare(messages: [[String: String]]) async throws -> MLXPreparedInput
+
+    /// Prepares text messages, threading structural `tools` into the tokenizer's
+    /// `applyChatTemplate(messages:tools:)` so a tools-aware chat template (e.g.
+    /// Mistral) renders its native tool block (Phase 0 / umbrella #2005, F3).
+    ///
+    /// `tools` is the mlx-swift-lm `ToolSpec` shape (`[[String: any Sendable]]`).
+    /// A `nil`/empty `tools` is identical to `prepare(messages:)`. The default
+    /// implementation forwards to `prepare(messages:)` ignoring tools so mock
+    /// containers conform for free.
+    func prepare(
+        messages: [[String: String]],
+        tools: [[String: any Sendable]]?
+    ) async throws -> MLXPreparedInput
+
     func prepare(chat: SendableChatMessages) async throws -> MLXPreparedInput
     func makeCache(parameters: GenerateParameters) async throws -> MLXPromptCache
     func generate(
@@ -100,11 +114,38 @@ import MLXLMCommon
     ) async throws -> AsyncStream<Generation> {
         try await generate(input: input, cache: cache, parameters: parameters)
     }
+
+    /// Default: ignore structural `tools` and forward to `prepare(messages:)`.
+    /// Mock containers get the tools-aware overload for free; the real
+    /// `ModelContainer` conformance overrides it to thread tools through
+    /// `applyChatTemplate`.
+    func prepare(
+        messages: [[String: String]],
+        tools: [[String: any Sendable]]?
+    ) async throws -> MLXPreparedInput {
+        try await prepare(messages: messages)
+    }
 }
 
 @_spi(Testing) extension ModelContainer: MLXModelContainerProtocol {
     public func prepare(messages: [[String: String]]) async throws -> MLXPreparedInput {
         let input = try await prepare(input: .init(messages: messages))
+        return MLXPreparedInput(input)
+    }
+
+    public func prepare(
+        messages: [[String: String]],
+        tools: [[String: any Sendable]]?
+    ) async throws -> MLXPreparedInput {
+        // No structural tools → identical to the plain path so the Llama/Qwen
+        // prose render is byte-unchanged (Phase 0 / #2005).
+        guard let tools, !tools.isEmpty else {
+            return try await prepare(messages: messages)
+        }
+        // `UserInput.tools` flows into `applyChatTemplate(messages:tools:)` via
+        // `LLMUserInputProcessor.prepare(input:)`, so a tools-aware template
+        // renders its native tool block (Mistral's `[AVAILABLE_TOOLS]`).
+        let input = try await prepare(input: .init(messages: messages, tools: tools))
         return MLXPreparedInput(input)
     }
 
