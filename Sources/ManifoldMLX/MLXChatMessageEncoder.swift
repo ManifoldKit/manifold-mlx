@@ -206,29 +206,138 @@ import ManifoldInference
         case .llama:
             return llamaToolBlock(config: config)
         case .mistral:
-            return mistralToolBlock(config: config)
+            // Mistral now renders tools STRUCTURALLY through the chat template's
+            // native `[AVAILABLE_TOOLS]`/`[TOOL_CALLS]` path (see
+            // ``structuralToolSpecs(config:dialect:)``), so the duplicate prose
+            // wire-format block (issue #86) is gated off to avoid harmful
+            // double-injection — the template's own rendering is authoritative.
+            // The generic `preferTools` steering preamble (assembled in
+            // ``effectiveSystemPrompt``) is intentionally retained; it only
+            // *encourages* tool use and does not redefine the wire format.
+            // Phase 0 of the tool-calling architecture (umbrella #2005, F3).
+            return nil
         case .unknown:
             return nil
         }
     }
 
+    /// Whether the given dialect renders its tools through the model's own chat
+    /// template (`applyChatTemplate(messages:tools:)`) rather than a hand-built
+    /// prose block.
+    ///
+    /// Only Mistral takes the structural path today (Phase 0 / F3). Llama and
+    /// Qwen keep the prose block: Llama's native `<|python_tag|>`/`<|eom_id|>`
+    /// tokens are dropped by the MLX streaming detokenizer (issue #59), so the
+    /// prose block deliberately steers Llama onto the detokenizable
+    /// `<tool_call>` form — a pure structural render regresses the currently
+    /// passing Llama-3.2 cell. `.unknown` (e.g. Gemma) has no tool dialect.
+    static func usesStructuralTools(dialect: MLXToolDialect) -> Bool {
+        dialect == .mistral
+    }
+
+    /// Builds the structural `tools` array (mlx-swift-lm `ToolSpec` shape:
+    /// `[[String: any Sendable]]`) threaded into
+    /// `applyChatTemplate(messages:tools:additionalContext:)` so a tools-aware
+    /// chat template renders its native tool block (Mistral's
+    /// `[AVAILABLE_TOOLS]`). Returns `nil` for dialects that keep the prose path
+    /// or when no tools are configured — those call sites must not pass a tools
+    /// array (it would double-inject alongside the prose block).
+    ///
+    /// Descriptors are the OpenAI `{type:"function", function:{name, description,
+    /// parameters}}` shape transformers/mlx-lm expect. JSON object key order is
+    /// canonicalised (sorted) so the threaded structure is deterministic — the
+    /// underlying `[String: Any]` is unordered and would otherwise vary per run.
+    @_spi(Testing) public static func structuralToolSpecs(
+        config: GenerationConfig,
+        dialect: MLXToolDialect
+    ) -> [[String: any Sendable]]? {
+        guard usesStructuralTools(dialect: dialect), !config.tools.isEmpty else { return nil }
+        return config.tools.map { tool -> [String: any Sendable] in
+            var function_: [String: any Sendable] = [
+                "name": tool.name,
+                "description": tool.description,
+            ]
+            function_["parameters"] = sendableParametersObject(for: tool)
+            return ["type": "function", "function": function_]
+        }
+    }
+
+    /// Decodes a tool's parameter schema into a `Sendable` JSON value tree the
+    /// mlx-swift-lm `ToolSpec` type (`[String: any Sendable]`) requires.
+    ///
+    /// `JSONSerialization.jsonObject` yields untyped `Any` (Foundation value
+    /// objects), which cannot cross into `any Sendable` — `Sendable` is a marker
+    /// protocol and can't be conditionally cast. So we recursively rebuild the
+    /// tree into concrete `Sendable` Swift value types. Falls back to an empty
+    /// object schema.
+    private static func sendableParametersObject(for tool: ToolDefinition) -> any Sendable {
+        if let paramsData = try? JSONEncoder().encode(tool.parameters),
+           let paramsObj = try? JSONSerialization.jsonObject(with: paramsData),
+           let sendable = asSendableJSON(paramsObj) {
+            return sendable
+        }
+        return ["type": "object", "properties": [String: any Sendable]()] as [String: any Sendable]
+    }
+
+    /// Recursively converts a `JSONSerialization` value tree into concrete
+    /// `Sendable` Swift values (`[String: any Sendable]`, `[any Sendable]`,
+    /// `String`, `Bool`, `Int`, `Double`). Returns `nil` for unrepresentable
+    /// inputs (none occur for JSON-schema parameter shapes).
+    private static func asSendableJSON(_ value: Any) -> (any Sendable)? {
+        switch value {
+        case let dict as [String: Any]:
+            var out: [String: any Sendable] = [:]
+            for (k, v) in dict {
+                if let sv = asSendableJSON(v) { out[k] = sv }
+            }
+            return out
+        case let array as [Any]:
+            return array.compactMap(asSendableJSON) as [any Sendable]
+        case let n as NSNumber:
+            // Distinguish bool from numeric (NSNumber bridges both).
+            if CFGetTypeID(n) == CFBooleanGetTypeID() { return n.boolValue }
+            if n.stringValue.contains(".") { return n.doubleValue }
+            return n.intValue
+        case let s as String:
+            return s
+        case is NSNull:
+            return Optional<String>.none as any Sendable
+        default:
+            return nil
+        }
+    }
+
+    /// Decodes a tool's parameter schema into a JSON object (`[String: Any]`),
+    /// falling back to an empty object schema. Shared by the prose block and the
+    /// structural tool-spec builder so both serialise identical parameter shapes.
+    private static func parametersObject(for tool: ToolDefinition) -> Any {
+        if let paramsData = try? JSONEncoder().encode(tool.parameters),
+           let paramsObj = try? JSONSerialization.jsonObject(with: paramsData) {
+            return paramsObj
+        }
+        return ["type": "object", "properties": [String: Any]()]
+    }
+
     /// Serialises `tools` to a pretty-printed JSON array of `{name, description,
     /// parameters}` function descriptors. Shared by both dialect blocks.
+    ///
+    /// Emits `.sortedKeys` so the rendered descriptors are deterministic — the
+    /// source `[String: Any]` dictionaries are unordered and `JSONSerialization`
+    /// key order is otherwise hash-seeded and varies run-to-run (Phase 0 /
+    /// umbrella #2005; previously canonicalised test-side in
+    /// `MLXRenderGoldenTests`).
     private static func toolFunctionsJSON(_ config: GenerationConfig, wrapInFunctionType: Bool) -> String {
         let toolObjects: [[String: Any]] = config.tools.map { tool -> [String: Any] in
             var function_: [String: Any] = [
                 "name": tool.name,
                 "description": tool.description,
             ]
-            if let paramsData = try? JSONEncoder().encode(tool.parameters),
-               let paramsObj = try? JSONSerialization.jsonObject(with: paramsData) {
-                function_["parameters"] = paramsObj
-            } else {
-                function_["parameters"] = ["type": "object", "properties": [String: Any]()]
-            }
+            function_["parameters"] = parametersObject(for: tool)
             return wrapInFunctionType ? ["type": "function", "function": function_] : function_
         }
-        if let data = try? JSONSerialization.data(withJSONObject: toolObjects, options: [.prettyPrinted]),
+        if let data = try? JSONSerialization.data(
+            withJSONObject: toolObjects, options: [.prettyPrinted, .sortedKeys]
+        ),
            let str = String(data: data, encoding: .utf8) {
             return str
         }
@@ -273,36 +382,13 @@ import ManifoldInference
         """
     }
 
-    /// Mistral tool-calling system block (issue #86).
-    ///
-    /// Lists the available functions as JSON and instructs the model to emit
-    /// `[TOOL_CALLS] [{"name":…,"arguments":{…}}]`. One JSON array per
-    /// generation turn; multiple parallel calls appear as sibling objects in
-    /// the same array.
-    ///
-    /// Note on system-message placement: Mistral's Jinja chat template enforces
-    /// strict user/assistant alternation and rejects a standalone `system` role.
-    /// Rather than handling this here, `MLXPromptCacheCoordinator` attempts the
-    /// real template first and falls back to `foldSystemIntoFirstUser` when it
-    /// raises — so the mistral tool block rides into the first user turn as plain
-    /// text and the system-hostility is handled transparently at the render layer.
-    private static func mistralToolBlock(config: GenerationConfig) -> String {
-        let toolsJSON = toolFunctionsJSON(config, wrapInFunctionType: false)
-        return """
-
-
-        You have access to the following functions. To call one or more \
-        functions, emit EXACTLY one block of the form:
-        [TOOL_CALLS] [{"name": <function-name>, "arguments": <args-json-object>}]
-        You may include multiple calls in the JSON array for parallel execution. \
-        Do not narrate the call, do not wrap it in code fences, and do not invent \
-        your own format. Use the exact function name. Only call a function when \
-        one can answer the request; otherwise reply normally.
-
-        Available functions:
-        \(toolsJSON)
-        """
-    }
+    // Mistral's tool wire-format block (issue #86) was removed in Phase 0
+    // (umbrella #2005, F3): Mistral now renders tools structurally through the
+    // chat template (`applyChatTemplate(messages:tools:)`), so the prose block
+    // is no longer assembled — see ``buildQwenToolBlock`` and
+    // ``structuralToolSpecs(config:dialect:)``. The `[TOOL_CALLS]` replay of a
+    // PRIOR assistant call still happens in ``encodeToolAwareEntryAsText`` so a
+    // replayed transcript stays self-consistent with the native wire format.
 
     /// Encodes a ``ToolAwareHistoryEntry`` into a plain `[String: String]` message
     /// compatible with MLX chat-template preparation.

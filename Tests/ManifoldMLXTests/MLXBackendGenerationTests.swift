@@ -15,6 +15,15 @@ extension MockMLXModelContainer: MLXModelContainerProtocol {
         return MLXPreparedInput(promptTokenIds: promptTokenIds)
     }
 
+    func prepare(
+        messages: [[String: String]],
+        tools: [[String: any Sendable]]?
+    ) async throws -> MLXPreparedInput {
+        recordPrepareTools(tools)
+        let promptTokenIds = try await prepareForGeneration(messages: messages)
+        return MLXPreparedInput(promptTokenIds: promptTokenIds)
+    }
+
     func prepare(chat: SendableChatMessages) async throws -> MLXPreparedInput {
         let promptTokenIds = try await prepareForGeneration(chat: chat.value)
         return MLXPreparedInput(promptTokenIds: promptTokenIds)
@@ -680,6 +689,56 @@ final class MLXBackendGenerationTests: XCTestCase {
 
         // Sabotage check: removing the tool stage in MLXGenerationDriver makes the
         // raw `<tool_call>` bytes leak back into .token events, failing both asserts.
+    }
+
+    // MARK: - Structural tools threading (Phase 0 / umbrella #2005, F3)
+
+    /// Mistral (a tools-aware-template dialect) must thread the structural
+    /// `tools` array into `prepare(messages:tools:)` so the model's own chat
+    /// template renders its native `[AVAILABLE_TOOLS]` block.
+    func test_generate_mistral_threadsStructuralTools() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["ok"]
+        let backend = MLXBackend()
+        backend._inject(mock, dialect: .mistral)
+
+        var config = GenerationConfig()
+        config.tools = [
+            ToolDefinition(name: "get_weather", description: "weather", parameters: .object([:]))
+        ]
+
+        let stream = try backend.generate(prompt: "weather?", systemPrompt: nil, config: config)
+        _ = try await collectAllEvents(from: stream)
+
+        let threaded = try XCTUnwrap(mock.lastTools, "prepare(messages:tools:) must be the path taken")
+        let specs = try XCTUnwrap(threaded, "Mistral must thread a non-nil structural tools array")
+        XCTAssertEqual(specs.count, 1)
+        let function = try XCTUnwrap(specs.first?["function"] as? [String: any Sendable])
+        XCTAssertEqual(function["name"] as? String, "get_weather")
+
+        // Sabotage check: dropping `toolSpecs` from the driver's
+        // prepareInputAndCache call makes `lastTools` resolve to nil here.
+    }
+
+    /// Llama keeps the prose path (issue #59) — no structural tools threaded, so
+    /// the existing ✅ render is unchanged at runtime.
+    func test_generate_llama_threadsNoStructuralTools() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["ok"]
+        let backend = MLXBackend()
+        backend._inject(mock, dialect: .llama)
+
+        var config = GenerationConfig()
+        config.tools = [
+            ToolDefinition(name: "get_weather", description: "weather", parameters: .object([:]))
+        ]
+
+        let stream = try backend.generate(prompt: "weather?", systemPrompt: nil, config: config)
+        _ = try await collectAllEvents(from: stream)
+
+        // The tools-aware overload IS hit, but with a nil tools array (prose path).
+        let threaded = try XCTUnwrap(mock.lastTools, "prepare(messages:tools:) is always the path taken")
+        XCTAssertNil(threaded, "Llama must NOT thread structural tools (prose path preserved)")
     }
 
     // MARK: - Detokenization fragmentation + nil-chunk (#27)

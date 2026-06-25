@@ -215,22 +215,47 @@ final class MLXMistralToolDialectTests: XCTestCase {
             "[TOOL_CALLS] format must not be parsed by the Qwen dialect")
     }
 
-    // MARK: - 5. Tool block injection
+    // MARK: - 5. Structural tools (Phase 0 / umbrella #2005, F3)
+    //
+    // Mistral now renders tools STRUCTURALLY through the chat template's native
+    // `[AVAILABLE_TOOLS]`/`[TOOL_CALLS]` path instead of a hand-built prose
+    // block. So `buildQwenToolBlock(.mistral)` is gated off and the structural
+    // descriptors are surfaced via `structuralToolSpecs(config:dialect:)`.
 
-    func test_mistralToolBlock_isInjected() throws {
-        let block = try XCTUnwrap(
+    func test_mistralProseToolBlock_isGatedOff() {
+        // The duplicate prose wire-format block must no longer be injected — the
+        // template's structural render is authoritative (avoids double-injection).
+        XCTAssertNil(
             MLXChatMessageEncoder.buildQwenToolBlock(config: config(withTools: [weatherTool()]), dialect: .mistral),
-            "a non-empty tool block must be injected for the Mistral dialect"
-        )
-        XCTAssertTrue(block.contains("[TOOL_CALLS]"), "must instruct the [TOOL_CALLS] sentinel")
-        XCTAssertTrue(block.contains("arguments"), "must instruct the `arguments` key")
-        XCTAssertTrue(
-            block.contains("get_weather") || block.contains("\"get_weather\""),
-            "must list the available function"
+            "Mistral prose tool block must be gated off in favour of structural tools"
         )
     }
 
-    func test_mistralToolBlock_nilWhenNoTools() {
+    func test_mistralStructuralToolSpecs_areThreaded() throws {
+        let specs = try XCTUnwrap(
+            MLXChatMessageEncoder.structuralToolSpecs(config: config(withTools: [weatherTool()]), dialect: .mistral),
+            "Mistral must surface structural tool specs for applyChatTemplate(messages:tools:)"
+        )
+        XCTAssertEqual(specs.count, 1, "one tool → one descriptor")
+        let function = try XCTUnwrap(specs.first?["function"] as? [String: any Sendable])
+        XCTAssertEqual(function["name"] as? String, "get_weather")
+        XCTAssertEqual(specs.first?["type"] as? String, "function")
+        XCTAssertNotNil(function["parameters"], "descriptor must carry the JSON-schema parameters")
+    }
+
+    func test_structuralToolSpecs_nilForProseDialects() {
+        // Llama/Qwen keep the prose path (detokenizer drops Llama's native
+        // tokens — issue #59), so no structural tools are threaded for them.
+        XCTAssertNil(MLXChatMessageEncoder.structuralToolSpecs(config: config(withTools: [weatherTool()]), dialect: .llama))
+        XCTAssertNil(MLXChatMessageEncoder.structuralToolSpecs(config: config(withTools: [weatherTool()]), dialect: .qwen25))
+        XCTAssertNil(MLXChatMessageEncoder.structuralToolSpecs(config: config(withTools: [weatherTool()]), dialect: .unknown))
+    }
+
+    func test_structuralToolSpecs_nilWhenNoTools() {
+        XCTAssertNil(MLXChatMessageEncoder.structuralToolSpecs(config: config(withTools: []), dialect: .mistral))
+    }
+
+    func test_mistralProseToolBlock_nilWhenNoTools() {
         XCTAssertNil(MLXChatMessageEncoder.buildQwenToolBlock(config: config(withTools: []), dialect: .mistral))
     }
 
@@ -246,8 +271,11 @@ final class MLXMistralToolDialectTests: XCTestCase {
             "prefer-tools preamble must appear; got: \(output)")
         XCTAssertTrue(output.contains("get_weather"),
             "tool name must appear in preamble; got: \(output)")
-        XCTAssertTrue(output.contains("[TOOL_CALLS]"),
-            "Mistral wire-format sentinel must be in the tool block; got: \(output)")
+        // The Mistral wire-format prose block is gone — the structural template
+        // render owns the `[TOOL_CALLS]` instruction now, so the assembled
+        // system prompt must NOT contain a duplicate prose sentinel block.
+        XCTAssertFalse(output.contains("Available functions:"),
+            "the duplicate Mistral prose wire-format block must be gated off; got: \(output)")
     }
 
     // MARK: - 6. History replay

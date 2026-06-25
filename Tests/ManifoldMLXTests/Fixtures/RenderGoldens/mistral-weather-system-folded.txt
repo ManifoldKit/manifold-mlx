@@ -12,32 +12,6 @@ Use the argument names listed for the chosen tool. Do not write the call as pros
 
 You are a helpful assistant.
 
-
-
-You have access to the following functions. To call one or more functions, emit EXACTLY one block of the form:
-[TOOL_CALLS] [{"name": <function-name>, "arguments": <args-json-object>}]
-You may include multiple calls in the JSON array for parallel execution. Do not narrate the call, do not wrap it in code fences, and do not invent your own format. Use the exact function name. Only call a function when one can answer the request; otherwise reply normally.
-
-Available functions:
-[
-  {
-    "description" : "Get the current weather for a location.",
-    "name" : "get_weather",
-    "parameters" : {
-      "properties" : {
-        "location" : {
-          "description" : "The city, e.g. Paris",
-          "type" : "string"
-        }
-      },
-      "required" : [
-        "location"
-      ],
-      "type" : "object"
-    }
-  }
-]
-
 What's the weather in Paris?
 === assistant ===
 [TOOL_CALLS] [{"arguments":{"location":"Paris"},"name":"get_weather"}]

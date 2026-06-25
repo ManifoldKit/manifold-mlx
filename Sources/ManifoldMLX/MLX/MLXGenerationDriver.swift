@@ -185,6 +185,16 @@ import ManifoldInference
             dialect: dialect
         )
 
+        // Structural tools: for tools-aware-template dialects (Mistral) thread
+        // the tool descriptors into `applyChatTemplate(messages:tools:)` so the
+        // model's own template renders its native tool block (`[AVAILABLE_TOOLS]`)
+        // instead of relying on a hand-built prose block (Phase 0 / #2005, F3).
+        // `nil` for Llama/Qwen/unknown — those keep the prose path unchanged.
+        let toolSpecs = MLXChatMessageEncoder.structuralToolSpecs(
+            config: config,
+            dialect: dialect
+        )
+
         let resolvedMarkers = resolveThinkingMarkers(
             config: config,
             autoDetected: autoDetectedMarkers
@@ -205,6 +215,7 @@ import ManifoldInference
             container: container,
             chatMessages: chatMessages,
             messages: messages,
+            toolSpecs: toolSpecs,
             generateConfig: generateConfig,
             kvCacheReuseEligible: kvCacheReuseEligible,
             snapshot: resolvedSnapshot

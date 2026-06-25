@@ -98,6 +98,19 @@ final class MockMLXModelContainer: @unchecked Sendable {
     /// Last messages passed to `prepare`.
     private(set) var lastMessages: [[String: String]]?
 
+    /// Last structural `tools` array passed to `prepare(messages:tools:)`.
+    /// `nil` when the tools-aware overload was never hit or `tools` was `nil`
+    /// (the Llama/Qwen/unknown prose path). Lets tests assert that the
+    /// structural-tools render is threaded only for tools-aware dialects
+    /// (Phase 0 / #2005).
+    private(set) var lastTools: [[String: any Sendable]]??
+
+    /// Records the structural-tools argument; called from the test-target
+    /// `prepare(messages:tools:)` conformance.
+    func recordPrepareTools(_ tools: [[String: any Sendable]]?) {
+        lastTools = .some(tools)
+    }
+
     /// Last structured chat messages passed to `prepare(chat:)`.
     private(set) var lastChatMessages: [Chat.Message]?
 

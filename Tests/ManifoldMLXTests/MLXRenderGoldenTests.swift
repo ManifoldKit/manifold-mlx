@@ -142,7 +142,19 @@ final class MLXRenderGoldenTests: XCTestCase {
             "text-only tool render must not produce structured Chat.Message history"
         )
 
-        return Self.serialize(messages: messages)
+        // EXACT mirror of MLXGenerationDriver.generate step 3 (Phase 0 / #2005):
+        // the structural `tools` array threaded into
+        // `applyChatTemplate(messages:tools:)`. For tools-aware-template
+        // dialects (Mistral) this is the native-tool-render input — non-nil here
+        // means the model's own template (NOT a prose block) produces the
+        // `[AVAILABLE_TOOLS]` / `[TOOL_CALLS]` shape downstream. `nil` for the
+        // prose dialects (Llama/Qwen), so their golden is byte-unchanged.
+        let toolSpecs = MLXChatMessageEncoder.structuralToolSpecs(
+            config: cfg,
+            dialect: dialect
+        )
+
+        return Self.serialize(messages: messages, toolSpecs: toolSpecs)
     }
 
     /// Serialises the `[[String: String]]` message array to a stable,
@@ -159,7 +171,10 @@ final class MLXRenderGoldenTests: XCTestCase {
     /// (The key-ordering instability is an encoder property this golden does
     /// NOT assert on; the upcoming structural-tools change should consider
     /// emitting sorted keys, but that is out of scope for this goldens-only PR.)
-    private static func serialize(messages: [[String: String]]) -> String {
+    private static func serialize(
+        messages: [[String: String]],
+        toolSpecs: [[String: any Sendable]]? = nil
+    ) -> String {
         var out = ""
         for msg in messages {
             let role = msg["role"] ?? "<missing-role>"
@@ -168,7 +183,33 @@ final class MLXRenderGoldenTests: XCTestCase {
             out += content
             out += "\n"
         }
+        // The structural-tools section captures the `tools=` array now threaded
+        // into `applyChatTemplate(messages:tools:)` (Phase 0 / #2005). Its
+        // presence is the deterministic, model-free proof that a tools-aware
+        // template (Mistral) renders its native tool block — the actual
+        // `[AVAILABLE_TOOLS]` Jinja expansion needs the on-disk template + Metal
+        // and lives in the live soak. Serialised with sorted keys so the golden
+        // is stable; `nil`/empty omits the section entirely (prose dialects).
+        if let toolSpecs, !toolSpecs.isEmpty {
+            out += "=== tools (structural, threaded into applyChatTemplate) ===\n"
+            out += serializeToolSpecs(toolSpecs)
+            out += "\n"
+        }
         return out
+    }
+
+    /// Serialises the structural tool-spec array to stable, sorted-key JSON.
+    private static func serializeToolSpecs(_ toolSpecs: [[String: any Sendable]]) -> String {
+        guard
+            let data = try? JSONSerialization.data(
+                withJSONObject: toolSpecs,
+                options: [.prettyPrinted, .sortedKeys]
+            ),
+            let str = String(data: data, encoding: .utf8)
+        else {
+            return "<unserializable tool specs>"
+        }
+        return str
     }
 
     /// Rewrites every balanced top-level JSON object/array span in `text` to its
@@ -379,23 +420,50 @@ final class MLXRenderGoldenTests: XCTestCase {
     // dispatch changes shape, independent of the byte-exact goldens. These keep
     // a stale golden from masking a wholesale dispatch break.
 
-    func test_premise_eachToolBearingDialect_injectsABlock() {
+    func test_premise_proseDialects_injectAProseBlock() {
+        // Llama and Qwen keep the hand-built prose tool block (Llama's native
+        // tokens are dropped by the MLX detokenizer — issue #59). Their render
+        // goldens depend on it.
         let cfg = config(withTools: [weatherTool()])
-        for dialect in [MLXToolDialect.llama, .qwen25, .mistral] {
+        for dialect in [MLXToolDialect.llama, .qwen25] {
             XCTAssertNotNil(
                 MLXChatMessageEncoder.buildQwenToolBlock(config: cfg, dialect: dialect),
-                "\(dialect) must inject a tool block; render goldens depend on it"
+                "\(dialect) must inject a prose tool block; render goldens depend on it"
+            )
+            XCTAssertNil(
+                MLXChatMessageEncoder.structuralToolSpecs(config: cfg, dialect: dialect),
+                "\(dialect) must NOT thread structural tools (prose path only)"
             )
         }
     }
 
+    func test_premise_mistral_usesStructuralToolsNotProse() {
+        // Phase 0 / #2005, F3: Mistral renders tools structurally through the
+        // chat template, so the prose block is gated off and the structural
+        // tool specs are threaded into applyChatTemplate(messages:tools:).
+        let cfg = config(withTools: [weatherTool()])
+        XCTAssertNil(
+            MLXChatMessageEncoder.buildQwenToolBlock(config: cfg, dialect: .mistral),
+            "Mistral prose block must be gated off in favour of structural tools"
+        )
+        XCTAssertNotNil(
+            MLXChatMessageEncoder.structuralToolSpecs(config: cfg, dialect: .mistral),
+            "Mistral must thread structural tools into the chat template"
+        )
+    }
+
     func test_premise_unknownDialect_injectsNoBlock() {
         // Gemma and other families map to `.unknown` (no tool dialect path), so
-        // there is no prose tool block to golden — documented gap, not a bug.
+        // there is neither a prose tool block nor structural tools to golden —
+        // documented gap, not a bug.
         let cfg = config(withTools: [weatherTool()])
         XCTAssertNil(
             MLXChatMessageEncoder.buildQwenToolBlock(config: cfg, dialect: .unknown),
             ".unknown (e.g. Gemma) has no tool dialect, so no render golden applies"
+        )
+        XCTAssertNil(
+            MLXChatMessageEncoder.structuralToolSpecs(config: cfg, dialect: .unknown),
+            ".unknown (e.g. Gemma) threads no structural tools"
         )
     }
 }

@@ -34,7 +34,11 @@ final class MLXLocalBackendContractTests: XCTestCase {
             maxContextTokens: 8192,
             requiresPromptTemplate: false,
             supportsSystemPrompt: true,
-            supportsToolCalling: true,
+            // Zero-state (no model loaded) → `_dialect == .unknown`, so tool
+            // calling is correctly reported `false`: the live capability is now
+            // conditional on a recognised tool dialect (Phase 0 / #2005). A
+            // loaded Qwen/Llama/Mistral model flips this to `true`.
+            supportsToolCalling: false,
             supportsStructuredOutput: false,
             supportsNativeJSONMode: false,
             cancellationStyle: .cooperative,
