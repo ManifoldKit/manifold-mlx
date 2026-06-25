@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.13](https://github.com/roryford/manifold-mlx/compare/v0.2.12...v0.2.13) (2026-06-25)
+
+### Highlights
+
+**MLX-Mistral tool calling, end to end** ([#102](https://github.com/roryford/manifold-mlx/issues/102), [#104](https://github.com/roryford/manifold-mlx/issues/104)) — two changes close the Mistral tool-call path on MLX (umbrella #2005 F3). Structural tools are now threaded into the MLX chat-template render so MLX-Mistral-v0.3 actually emits `[TOOL_CALLS]` blocks (additive). But the MLX streaming detokenizer strips the JSON quote/space structural tokens, so the emitted call was malformed and extracted zero calls — `MLXMistralToolCallNormalizer` now sits before the output parser and repairs that exact drop pattern (re-quoting bare keys and values, mapping the call-name key to `"name"`, balancing dropped braces), mirroring the existing Llama Python-tag normalizer. It is conservative by design: valid JSON passes through byte-for-byte and genuine junk is left unrepaired so the parser fails cleanly rather than fabricating a call.
+
+**Tracks ManifoldKit 0.61** ([#105](https://github.com/roryford/manifold-mlx/issues/105)) — the core pin moves to `.upToNextMinor(from: "0.61.0")`, picking up the SwiftData-backed tool-call conformance cache (persisted `model × quant × backend` verdicts) and the core-side Mistral tool-result and Gemma close-delimiter fixes.
+
 ## [0.2.12](https://github.com/roryford/manifold-mlx/compare/v0.2.11...v0.2.12) (2026-06-23)
 
 
