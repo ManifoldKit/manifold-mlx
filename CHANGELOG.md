@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.13](https://github.com/roryford/manifold-mlx/compare/v0.2.12...v0.2.13) (2026-06-25)
+
+
+### Features
+
+* **tool-calling:** thread structural tools into MLX chat-template render (additive) ([#102](https://github.com/roryford/manifold-mlx/issues/102)) ([862be1b](https://github.com/roryford/manifold-mlx/commit/862be1b72600ece2a6f8fdbdea13db9a3fe3f994)), closes [#2005](https://github.com/roryford/manifold-mlx/issues/2005)
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.61.0 ([#105](https://github.com/roryford/manifold-mlx/issues/105)) ([37ce6f7](https://github.com/roryford/manifold-mlx/commit/37ce6f7cdc3addb29ba992a700ab1c1519f2fbf7))
+* **tool-calling:** normalize MLX-detokenized Mistral [TOOL_CALLS] JSON ([#104](https://github.com/roryford/manifold-mlx/issues/104)) ([5c0bd85](https://github.com/roryford/manifold-mlx/commit/5c0bd8501aa64eb9a321fad0721e1e50510e1c10))
+
 ## [0.2.12](https://github.com/roryford/manifold-mlx/compare/v0.2.11...v0.2.12) (2026-06-23)
 
 
