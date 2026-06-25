@@ -359,6 +359,14 @@ import ManifoldInference
         // `<tool_call>` wrapper, so Qwen and the steered-Llama path are unchanged.
         var llamaNormalizer = MLXLlamaPythonTagNormalizer(dialect: dialect)
 
+        // Repair Mistral's `[TOOL_CALLS]` channel: MLX's detokenizer drops the
+        // JSON quote/space structural tokens, so the emitted call is malformed
+        // and `MLXToolMarkers.mistral` extracts 0 calls (umbrella #2005, F3 —
+        // same mechanism as #59). The normaliser buffers the whole stream and
+        // re-quotes / rebuilds canonical JSON at `finalize()`. Identity for every
+        // non-`.mistral` dialect; valid JSON passes through unchanged.
+        var mistralNormalizer = MLXMistralToolCallNormalizer(dialect: dialect)
+
         // A thinking model that runs away on a 16 GB Mac can OOM mid-generation;
         // the budget gate breaks out of the stream once the limit is reached.
         var thinkingTokenCount = 0
@@ -423,7 +431,7 @@ import ManifoldInference
             // The result can be empty when the whole chunk is a held-back partial
             // tag suffix; the ingest loop below is a no-op in that case, but the
             // per-chunk yield cadence still counts this as real generation work.
-            let text = llamaNormalizer.process(rawText)
+            let text = mistralNormalizer.process(llamaNormalizer.process(rawText))
 
             for finalEvent in session.ingest(text) {
                 if isFirstToken {
@@ -465,7 +473,13 @@ import ManifoldInference
         // left open (its `<|eom_id|>` / `<|eot_id|>` close dropped by MLX), this
         // emits the held-back tail plus a synthetic close so the tool marker
         // fires during the session finalize below. Identity for other dialects.
-        let normalizerTail = llamaNormalizer.finalize()
+        // Mistral runs first in the chain order at finalize: the Llama normaliser
+        // passed every Mistral chunk through untouched (it is identity for
+        // `.mistral`), so the buffered stream lives in the Mistral normaliser.
+        // Its finalize emits the repaired (or pass-through) `[TOOL_CALLS]` text;
+        // that text is then run through the Llama normaliser's finalize (identity
+        // for `.mistral`) so the two-stage tail order is preserved.
+        let normalizerTail = llamaNormalizer.finalize() + mistralNormalizer.finalize()
         if !normalizerTail.isEmpty {
             for event in session.ingest(normalizerTail) {
                 if isFirstToken {
