@@ -1,0 +1,47 @@
+=== system ===
+You have the following tools available:
+
+- get_weather: Get the current weather for a location. (arguments: location) (requires: location)
+
+When a tool can answer a question, you MUST call the tool. Never guess values (timestamps, math, files, external data) that a tool can provide. To call a tool, respond with a single JSON object of exactly this form and nothing else:
+
+{"name": "<one of the tool names above>", "arguments": {"<argument name>": <value>}}
+
+Use the argument names listed for the chosen tool. Do not write the call as prose or as a Python-style function call such as `tool(value)`.
+
+
+You are a helpful assistant.
+
+
+
+You have access to the following functions. To call a function, emit EXACTLY one block of the form:
+<tool_call>{"name": <function-name>, "parameters": <arguments-json-object>}</tool_call>
+Emit the literal `<tool_call>` and `</tool_call>` tags around a single JSON object. Do not narrate the call, do not wrap it in code fences, and do not invent your own tags. Use the exact function name. When a function can answer the request, you MUST call it — do not describe what you would do or answer from memory instead.
+
+Available functions:
+[
+  {
+    "description" : "Get the current weather for a location.",
+    "name" : "get_weather",
+    "parameters" : {
+      "properties" : {
+        "location" : {
+          "description" : "The city, e.g. Paris",
+          "type" : "string"
+        }
+      },
+      "required" : [
+        "location"
+      ],
+      "type" : "object"
+    }
+  }
+]
+=== user ===
+What's the weather in Paris?
+=== assistant ===
+<tool_call>
+{"name":"get_weather","parameters":{"location":"Paris"}}
+</tool_call>
+=== tool ===
+{"condition":"cloudy","temperature":"18C"}
