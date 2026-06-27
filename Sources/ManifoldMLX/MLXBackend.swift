@@ -271,6 +271,14 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         // `plan.effectiveContextSize` to cap generation length.
         unloadModel()
 
+        // Stage the bundled `mlx.metallib` next to the running binary before the
+        // first MLX GPU operation. Under a command-line `swift build` this is
+        // the only way mlx-swift's colocated metallib lookup finds a library;
+        // without it `loadContainer` aborts at GPU init with "Failed to load the
+        // default metallib" (issue #82). No-op under Xcode builds / when no
+        // bundled metallib exists.
+        MLXMetallibStaging.ensureStaged()
+
         // Preflight: refuse non-LM architectures up front so a CLIP/SigLIP/Whisper
         // snapshot can't crash MLX mid-generation or silently produce garbage tokens.
         // We read config.json directly rather than letting mlx-swift-lm attempt the

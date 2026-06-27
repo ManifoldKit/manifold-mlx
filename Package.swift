@@ -35,6 +35,13 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
     ],
     targets: [
+        // Prebuild plugin that compiles mlx-swift's generated Metal kernels
+        // into `mlx.metallib` during `swift build` (issue #82). See
+        // Plugins/MLXMetallibPlugin/plugin.swift.
+        .plugin(
+            name: "MLXMetallibPlugin",
+            capability: .buildTool()
+        ),
         // Vendored FluxSwift (mzbac/flux.swift, MIT — see Sources/FluxSwift
         // provenance headers). Vendored instead of a package dependency
         // because flux.swift pins swift-transformers 0.1.x; ManifoldKit
@@ -92,7 +99,14 @@ let package = Package(
                 "StableDiffusion",
                 "FluxSwift",
             ],
-            path: "Sources/ManifoldMLX"
+            path: "Sources/ManifoldMLX",
+            // Compiles the resolved mlx-swift Metal kernels into an
+            // `mlx.metallib` resource during a plain `swift build`, so the MLX
+            // GPU path works from the command line without an Xcode metallib
+            // phase (issue #82). `MLXMetallibStaging` copies the resource next
+            // to the running binary at first use. Degrades to a no-op (build
+            // still succeeds) when the Metal toolchain is unavailable.
+            plugins: ["MLXMetallibPlugin"]
         ),
         .testTarget(
             name: "ManifoldMLXTests",
