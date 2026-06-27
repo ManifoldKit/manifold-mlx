@@ -23,6 +23,7 @@ struct CLI {
     var modelPath: String?
     var output: URL = defaultOutputURL()
     var fixturesRoot: URL? = nil
+    var emitRecords: URL? = nil
     var list: Bool = false
     /// Number of decoy tools to advertise alongside each scenario's required
     /// tools, to measure correct-tool selection under distractor pressure.
@@ -63,6 +64,10 @@ struct CLI {
                 i += 1
                 guard i < argv.count else { fail("--fixtures-root requires a value") }
                 cli.fixturesRoot = URL(fileURLWithPath: argv[i], isDirectory: true)
+            case "--emit-records":
+                i += 1
+                guard i < argv.count else { fail("--emit-records requires a value") }
+                cli.emitRecords = URL(fileURLWithPath: argv[i])
             case "--extra-tools":
                 i += 1
                 guard i < argv.count else { fail("--extra-tools requires a value") }
@@ -99,6 +104,8 @@ struct CLI {
           --scenario <id>       Scenario id (matches JSON 'id') or 'all'. Default: all.
           --output <path>       Transcript JSONL destination.
                                 Default: tmp/manifold-tools-mlx/<iso>.jsonl.
+          --emit-records <path> Write ConformanceRecord[] JSON to this path after
+                                the run. Enables cross-leg matrix collation.
           --fixtures-root <dir> Root for read_file / list_dir / repo_search tools.
                                 Default: the fixtures bundled with this CLI.
           --extra-tools <N>     Advertise N decoy tools alongside each scenario's
@@ -129,25 +136,6 @@ func resolveFixturesRoot(_ override: URL?) -> URL? {
     // defensive fallback in case SwiftPM's layout ever changes.
     return Bundle.module.url(forResource: "manifold-tools", withExtension: nil)
         ?? Bundle.module.url(forResource: "manifold-tools", withExtension: nil, subdirectory: "Fixtures")
-}
-
-/// Loads the bundled scenarios.
-///
-/// `ScenarioLoader.loadBuiltIn()` resolves the scenario directory relative to
-/// the *current working directory* (`<cwd>/Sources/ManifoldTools/Scenarios/built-in`),
-/// which only exists inside the ManifoldKit package checkout — not in this
-/// companion repo. We vendor a copy of the same JSON scenarios as a `.copy`
-/// bundle resource and load them via the public `ScenarioLoader.load(from:)`
-/// so the CLI is self-contained regardless of CWD.
-func loadScenarios() throws -> [Scenario] {
-    // `.copy("Scenarios/built-in")` flattens to `<bundle>/built-in`, so the
-    // unqualified lookup resolves; the `subdirectory:` form is a fallback.
-    if let bundled = Bundle.module.url(forResource: "built-in", withExtension: nil)
-        ?? Bundle.module.url(forResource: "built-in", withExtension: nil, subdirectory: "Scenarios") {
-        return try ScenarioLoader.load(from: bundled)
-    }
-    // Fall back to the CWD-relative loader (works when run from a ManifoldKit checkout).
-    return try ScenarioLoader.loadBuiltIn()
 }
 
 /// Builds a `ToolRegistry` containing ONLY the tools named in
@@ -232,7 +220,10 @@ func runCLI() async -> Int32 {
 
     let scenarios: [Scenario]
     do {
-        scenarios = try loadScenarios()
+        // MK 0.62 (#2042) fixed `ScenarioLoader.loadBuiltIn()` to resolve via
+        // `Bundle.module` rather than CWD, so we can call it directly. The
+        // previously-vendored `Scenarios/built-in/` copy was removed at that point.
+        scenarios = try ScenarioLoader.loadBuiltIn()
     } catch {
         FileHandle.standardError.write(Data("failed to load scenarios: \(error)\n".utf8))
         return 1
@@ -319,15 +310,6 @@ func runCLI() async -> Int32 {
     var total = 0
     var passedCount = 0
     var cleanCount = 0
-    // Tool-selection scored as classification (ManifoldInference 0.58): one
-    // `ConfusionCounts` per tool-bearing scenario — tp = required tool invoked,
-    // fp = a non-required tool (a decoy, or any other) invoked, fn = required
-    // tool missed. Macro-averaged across scenarios into precision/recall/F1.
-    // No-tool scenarios (empty requiredTools) are excluded from the macro metric
-    // because `ConfusionCounts`'s empty-set semantics score 0.0, which would
-    // wrongly penalise correct abstention; their decoy mis-fires still land in
-    // `decoyCallTotal`.
-    var perScenarioCounts: [ConfusionCounts] = []
     var decoyCallTotal = 0
     for scenario in filtered {
         print("\n── \(scenario.id) via mlx ──")
@@ -374,7 +356,6 @@ func runCLI() async -> Int32 {
             let expected = Set(scenario.requiredTools)
             if !expected.isEmpty {
                 let counts = ConfusionCounts.compute(actual: invoked, expected: expected)
-                perScenarioCounts.append(counts)
                 print("  tools: tp=\(counts.tp) fp=\(counts.fp) fn=\(counts.fn) (p=\(fmt3(counts.precision)) r=\(fmt3(counts.recall)) f1=\(fmt3(counts.f1)))")
             }
             if outcome.passed { passedCount += 1 }
@@ -389,13 +370,52 @@ func runCLI() async -> Int32 {
         }
     }
 
+    // Re-score from the written JSONL via ConformanceScorer (MK 0.62: fixes
+    // #2043/#2049 precision/recall attribution for multi-call turns).
+    // `renderer` is caller-declared — ManifoldMLX uses swift-transformers for
+    // chat-template application; `coreCommit` is unknown at CLI runtime.
+    let scoringCtx = ConformanceScorer.RecordContext(
+        renderer: "swift-transformers",
+        coreCommit: "unknown",
+        transcriptRef: logger.destination.path
+    )
+    let conformanceRecords = ConformanceScorer.records(
+        fileAt: logger.destination,
+        context: scoringCtx
+    )
+    let toolBearingRecords = conformanceRecords.filter { $0.toolSelection != nil }
+    let avgPrec: Double
+    let avgRecall: Double
+    let avgF1: Double
+    if toolBearingRecords.isEmpty {
+        (avgPrec, avgRecall, avgF1) = (0.0, 0.0, 0.0)
+    } else {
+        let n = Double(toolBearingRecords.count)
+        avgPrec   = toolBearingRecords.map { $0.toolSelection!.precision }.reduce(0, +) / n
+        avgRecall = toolBearingRecords.map { $0.toolSelection!.recall }.reduce(0, +) / n
+        avgF1     = toolBearingRecords.map { $0.toolSelection!.f1 }.reduce(0, +) / n
+    }
+
     // Machine-readable one-liner the sweep script greps. Headline metric is the
-    // macro-averaged F1 of correct-tool selection across tool-bearing scenarios
-    // (precision falls as the model grabs decoys; recall falls as it misses the
-    // required tool). `clean` and `passed` are kept as coarser companions, and
-    // `decoy_calls` is the raw count of decoy invocations across all scenarios.
-    let macro = MacroAveragedMetrics(perClass: perScenarioCounts)
-    print("SUMMARY extra_tools=\(cli.extraTools) passed=\(passedCount)/\(total) clean=\(cleanCount)/\(total) precision=\(fmt3(macro.precision)) recall=\(fmt3(macro.recall)) f1=\(fmt3(macro.f1)) decoy_calls=\(decoyCallTotal) scored=\(perScenarioCounts.count)")
+    // macro-averaged F1 of correct-tool selection across tool-bearing scenarios.
+    print("SUMMARY extra_tools=\(cli.extraTools) passed=\(passedCount)/\(total) clean=\(cleanCount)/\(total) precision=\(fmt3(avgPrec)) recall=\(fmt3(avgRecall)) f1=\(fmt3(avgF1)) decoy_calls=\(decoyCallTotal) scored=\(toolBearingRecords.count)")
+
+    // Write a deterministic MATRIX.md alongside the transcript.
+    let matrixURL = logger.destination
+        .deletingLastPathComponent()
+        .appendingPathComponent("MATRIX.md")
+    let matrixMarkdown = MatrixRenderer.render(conformanceRecords)
+    if (try? matrixMarkdown.write(to: matrixURL, atomically: true, encoding: .utf8)) != nil {
+        print("Matrix written to \(matrixURL.path)")
+    }
+
+    // Write ConformanceRecord[] JSON for cross-leg collation if requested.
+    if let emitURL = cli.emitRecords,
+       let data = try? ConformanceScorer.encodeJSON(conformanceRecords) {
+        if (try? data.write(to: emitURL)) != nil {
+            print("Records written to \(emitURL.path)")
+        }
+    }
 
     if allPassed {
         print("\nAll scenarios passed.")

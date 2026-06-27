@@ -165,7 +165,6 @@ let package = Package(
             exclude: ["README.md"],
             resources: [
                 .copy("Fixtures/manifold-tools"),
-                .copy("Scenarios/built-in"),
             ]
         ),
     ]
