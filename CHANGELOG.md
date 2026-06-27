@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.14](https://github.com/roryford/manifold-mlx/compare/v0.2.13...v0.2.14) (2026-06-27)
+
+### Highlights
+
+**Grammar-constrained Mistral tool calling — F3 closed** ([#109](https://github.com/roryford/manifold-mlx/issues/109)) — this release closes the gap flagged in the 0.2.13 correction note. The 0.2.13 normalizer repaired the unit-fixture drop pattern but not live mangling (unquoted keys, unbalanced braces), leaving tool-selection F1 at 0.0 across all reference scenarios. The fix is decode-time grammar masking: logits are now constrained to the `[TOOL_CALLS]` envelope grammar during generation, so structural tokens are guaranteed by the constraint rather than repaired after the fact. The normalizer remains in place for residual detokenizer artifacts, but the dominant failure mode — free-form generation diverging from the envelope — is eliminated. The grammar path is gated on the Mistral dialect; Llama's python-tag path is unchanged.
+
+**Grammar-constrained sampling performance** ([#110](https://github.com/roryford/manifold-mlx/issues/110)) — the per-token O(vocab × accept) scan that made the GBNF path unusably slow (pinned CPU, GPU idle, minutes per turn at 32k–150k vocab) is replaced by three layered fixes. A byte trie over the vocabulary (`GBNFTokenTrie`) is built once at load; each step walks the grammar over the trie so shared token prefixes are tested once rather than once per token. A state→mask cache memoizes the allowed-token set by matcher state, skipping the trie walk entirely on repeated states (which recur constantly within a JSON string value). The matcher core switches to flattened integer stack positions (`GBNFFastMatcher` / `GBNFCompiled`), eliminating per-step allocations. A randomized fuzzer parity suite asserts byte-identical accept/reject semantics against the reference `GBNFMatcher`.
+
+**Tracks ManifoldKit 0.62** ([#111](https://github.com/roryford/manifold-mlx/issues/111), [#113](https://github.com/roryford/manifold-mlx/issues/113)) — the core pin moves to `.upToNextMinor(from: "0.62.0")`. The `manifold-tools-mlx` CLI drops its nine vendored scenario JSON files and the `loadScenarios()` workaround now that MK 0.62 fixes `ScenarioLoader.loadBuiltIn()` to resolve via `Bundle.module`. `ConformanceScorer` and `MatrixRenderer` are wired in, replacing the hand-rolled confusion-counts summary — every run now writes a deterministic `MATRIX.md` alongside the JSONL, and a new `--emit-records` flag writes `ConformanceRecord[]` JSON for cross-leg collation with Ollama and cloud legs. An `MLXRenderConsistencyGateTests` suite folds the committed Qwen/Mistral/Hermes/Gemma template corpus over `RenderConsistencyChecker` and asserts no silent dialect drops at CI time, without requiring Apple Silicon or a live model.
+
 ## [0.2.13](https://github.com/roryford/manifold-mlx/compare/v0.2.12...v0.2.13) (2026-06-25)
 
 ### Highlights
