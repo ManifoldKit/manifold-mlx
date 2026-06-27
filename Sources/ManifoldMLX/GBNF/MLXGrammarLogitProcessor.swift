@@ -3,30 +3,48 @@ import MLX
 import MLXLMCommon
 
 /// Grammar-constrained sampling for MLX (#96, option B): a `LogitProcessor` that
-/// masks, at every step, every token whose bytes the ``GBNFMatcher`` would
-/// reject — so generation can only follow paths the grammar permits.
+/// masks, at every step, every token whose bytes the grammar would reject — so
+/// generation can only follow paths the grammar permits.
 ///
 /// Composes over the parameters' penalty processor (`base`): penalties are
 /// applied first, then the grammar mask, so repetition/presence shaping still
 /// acts among the grammar-legal tokens.
 ///
-/// The token→bytes table (``MLXByteLevelVocabulary``) is built lazily on the
-/// first `process(logits:)` call, when the logits width reveals the vocab size.
+/// ## Performance (#100)
 ///
-/// Performance note: the per-step check is O(vocab × token-bytes) with a
-/// first-byte prune. That is correct but not yet optimized for large vocabs —
-/// the trie/prefix-pruning pass is tracked in #97.
+/// The original implementation scanned the entire vocabulary every step and ran
+/// an allocation-heavy acceptance check per token — ~2 min/turn on a 150k-vocab
+/// model, and minutes even at 32k. Three changes remove the full-vocab scan:
+///
+/// 1. **Token trie + grammar walk** (``GBNFTokenTrie``): shared token prefixes
+///    are tested once per step, turning O(vocab × accept) into ~O(reachable
+///    nodes).
+/// 2. **State→mask cache**: the allowed-token set depends only on the matcher's
+///    stack state, and states recur across steps (e.g. every byte inside a JSON
+///    string value sits in the same loop state), so the computed id list is
+///    memoized by state.
+/// 3. **Cheaper matcher core** (``GBNFFastMatcher``): integer stack positions
+///    into a flattened grammar, so transitions no longer hash `CharSet`s.
+///
+/// Accept/reject semantics are byte-identical to the reference ``GBNFMatcher``
+/// (`GBNFFastMatcherParityTests`).
 final class MLXGrammarLogitProcessor: LogitProcessor {
-    private var matcher: GBNFMatcher
+    private var matcher: GBNFFastMatcher
     private let tokenizer: any MLXLMCommon.Tokenizer
     private let eosIds: Set<Int>
     private var base: LogitProcessor?
 
     /// Lazily built once the vocab size is known.
     private var vocab: MLXByteLevelVocabulary?
+    private var trie: GBNFTokenTrie?
+
+    /// `matcher state → (allowed token ids, EOS allowed)`. The masking result is
+    /// a pure function of the matcher state, and states recur across steps, so
+    /// the (expensive, first-time-only) trie walk is reused.
+    private var maskCache: [Set<[Int]>: (ids: [Int], allowEOS: Bool)] = [:]
 
     init(grammar: GBNFGrammar, tokenizer: any MLXLMCommon.Tokenizer, base: LogitProcessor?) {
-        self.matcher = GBNFMatcher(grammar: grammar)
+        self.matcher = GBNFFastMatcher(grammar: grammar)
         self.tokenizer = tokenizer
         self.base = base
         var eos: Set<Int> = []
@@ -43,34 +61,35 @@ final class MLXGrammarLogitProcessor: LogitProcessor {
     func process(logits: MLXArray) -> MLXArray {
         let penalised = base?.process(logits: logits) ?? logits
         let vocabSize = penalised.shape.last ?? penalised.size
-        let table = vocabBytes(vocabSize: vocabSize)
+        _ = vocabBytes(vocabSize: vocabSize)
+        let trie = self.trie!
 
-        // EOS is allowed exactly when the grammar can terminate here.
-        let allowEOS = matcher.isComplete
-        let acceptableFirst = matcher.acceptableFirstBytes()
+        let state = matcher.state
+        let result: (ids: [Int], allowEOS: Bool)
+        if let cached = maskCache[state] {
+            result = cached
+        } else {
+            let ids = trie.allowedTokenIDs(from: matcher)
+            result = (ids, matcher.isComplete)
+            maskCache[state] = result
+        }
 
         var mask = [Float](repeating: -1e9, count: vocabSize)
         var anyAllowed = false
-        for id in 0..<vocabSize {
-            if eosIds.contains(id) {
-                if allowEOS { mask[id] = 0; anyAllowed = true }
-                continue
-            }
-            guard let tokenBytes = table.bytes[id], let first = tokenBytes.first else { continue }
-            // Cheap reject: a token whose first byte no live stack accepts cannot
-            // be legal — skip the full (copying) acceptance check.
-            guard acceptableFirst.contains(first) else { continue }
-            if matcher.accepts(tokenBytes) {
-                mask[id] = 0
-                anyAllowed = true
-            }
+        for id in result.ids where id < vocabSize {
+            mask[id] = 0
+            anyAllowed = true
+        }
+        // EOS is allowed exactly when the grammar can terminate here.
+        if result.allowEOS {
+            for id in eosIds where id < vocabSize { mask[id] = 0; anyAllowed = true }
         }
 
         // Safety valve: if nothing is allowed (a grammar/vocab mismatch that
         // would otherwise deadlock the sampler), permit EOS so generation can
         // end cleanly rather than emitting an out-of-grammar token or hanging.
         if !anyAllowed {
-            for id in eosIds { mask[id] = 0 }
+            for id in eosIds where id < vocabSize { mask[id] = 0 }
         }
 
         return penalised + MLXArray(mask).reshaped(penalised.shape)
@@ -80,7 +99,7 @@ final class MLXGrammarLogitProcessor: LogitProcessor {
         base?.didSample(token: token)
         let id = token.item(Int.self)
         if eosIds.contains(id) { return }
-        if let table = vocab, let tokenBytes = table.bytes[id] {
+        if let table = vocab, id < table.bytes.count, let tokenBytes = table.bytes[id] {
             matcher.advance(tokenBytes)
         }
     }
@@ -91,6 +110,7 @@ final class MLXGrammarLogitProcessor: LogitProcessor {
         if let vocab, vocab.bytes.count == vocabSize { return vocab }
         let built = MLXByteLevelVocabulary(tokenizer: tokenizer, vocabSize: vocabSize)
         vocab = built
+        trie = GBNFTokenTrie(vocab: built)
         return built
     }
 }
