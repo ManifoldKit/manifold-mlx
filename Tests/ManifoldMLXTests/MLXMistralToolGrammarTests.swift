@@ -155,8 +155,8 @@ final class MLXMistralToolGrammarTests: XCTestCase {
             "expected GBNF source"
         )
         XCTAssertTrue(src.contains(#""[TOOL_CALLS] ""#), "envelope must emit the spaced sentinel")
-        XCTAssertTrue(src.contains("\nroot ::= "), "must define a root rule")
-        XCTAssertTrue(src.contains("call ::= "), "core's `root` union must be renamed to `call`")
+        XCTAssertTrue(src.hasPrefix("root ::= "), "root must be the entry rule")
+        XCTAssertTrue(src.contains("\ncall ::= "), "core's `root` union must be renamed to `call`")
         XCTAssertFalse(src.contains("\nroot ::= toolcall"), "core's bare-union root must be renamed away")
     }
 
