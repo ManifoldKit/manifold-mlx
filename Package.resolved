@@ -1,5 +1,5 @@
 {
-  "originHash" : "2196fcb730e34d508c6eb3e30fa8c4ae3bb6173be64dd569b2c3449016c9de70",
+  "originHash" : "ab0a0f2d706eed27787d003e63569eb8a62cebb03059710465ba52a5e7ebbcdc",
   "pins" : [
     {
       "identity" : "anylanguagemodel",
@@ -33,8 +33,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/roryford/ManifoldKit",
       "state" : {
-        "revision" : "28c23a6a6b479080988ba3d9331e8ccd136a1bc7",
-        "version" : "0.61.0"
+        "revision" : "74db590d55fcef36740c55f640b465e2038bce2e",
+        "version" : "0.62.0"
       }
     },
     {
