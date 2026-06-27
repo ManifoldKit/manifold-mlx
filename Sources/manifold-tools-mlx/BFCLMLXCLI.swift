@@ -23,6 +23,7 @@ enum BFCLMLXCLI {
         var modelPath: String?
         var category = "multiple"
         var dumpPath: String?
+        var timeoutSeconds: Double = 120
 
         var i = 0
         while i < args.count {
@@ -33,8 +34,10 @@ enum BFCLMLXCLI {
                 if i + 1 < args.count { category = args[i + 1]; i += 1 }
             case "--dump":
                 if i + 1 < args.count { dumpPath = args[i + 1]; i += 1 }
+            case "--timeout":
+                if i + 1 < args.count, let t = Double(args[i + 1]), t > 0 { timeoutSeconds = t; i += 1 }
             case "-h", "--help":
-                print("usage: manifold-tools-mlx bfcl --model <model-dir> [--category simple|multiple] [--dump PATH.jsonl]")
+                print("usage: manifold-tools-mlx bfcl --model <model-dir> [--category simple|multiple] [--dump PATH.jsonl] [--timeout SECONDS]")
                 return 0
             default:
                 FileHandle.standardError.write(Data("unknown flag '\(args[i])'\n".utf8))
@@ -87,7 +90,8 @@ enum BFCLMLXCLI {
         let outcome = await BFCLRunner().run(
             cases: cases,
             service: service,
-            modelLabel: "mlx/\(modelURL.lastPathComponent)"
+            modelLabel: "mlx/\(modelURL.lastPathComponent)",
+            perCaseTimeoutSeconds: timeoutSeconds
         )
 
         var exitCode: Int32 = 0
