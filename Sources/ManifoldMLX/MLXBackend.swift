@@ -459,7 +459,8 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 kvCacheReuseEligible: _kvCacheReuseEligible,
                 pendingSnapshotTask: _promptCacheState.pendingSnapshotTask,
                 grammar: Self.wrapToolCallGrammarIfNeeded(
-                    parsedGrammar, dialect: _dialect, tools: config.tools
+                    parsedGrammar, dialect: _dialect, tools: config.tools,
+                    toolChoice: config.toolChoice
                 )
             )
         }
@@ -568,7 +569,8 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     private static func wrapToolCallGrammarIfNeeded(
         _ grammar: GBNFGrammar?,
         dialect: MLXToolDialect,
-        tools: [ToolDefinition]
+        tools: [ToolDefinition],
+        toolChoice: ToolChoice
     ) -> GBNFGrammar? {
         guard let grammar, !tools.isEmpty else { return grammar }
         switch dialect {
@@ -589,10 +591,16 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         case .mistral:
             // Mistral's tool-call channel is `[TOOL_CALLS] [ {…} ]` (a sentinel +
             // JSON array, EOS-keyed — see `MLXToolMarkers`), not the `<tool_call>`
-            // object wrapper, so the wrap above does not apply. Pass the grammar
-            // through unwrapped (no regression vs. today's Mistral path); wrapping
-            // the bare envelope in the `[TOOL_CALLS]` array shape is a follow-up.
-            return grammar
+            // object wrapper. Core's derived grammar (the bare object union, or a
+            // prose-permitting union under `.auto`) does NOT constrain that
+            // channel — the model free-runs `[TOOL_CALLS]` and the detokenizer
+            // mangles it to zero parseable calls (#106/#104). Rebuild the derived
+            // grammar as the proper `[TOOL_CALLS]` array envelope so decoding can
+            // only produce a well-formed, marker-matching block. `grammar != nil`
+            // here means core derived a tool-call grammar for this turn
+            // (`toolChoice != .none`); fall back to the unwrapped grammar if the
+            // envelope cannot be built.
+            return MLXMistralToolGrammar.build(tools: tools, toolChoice: toolChoice) ?? grammar
         case .unknown:
             return grammar
         }
