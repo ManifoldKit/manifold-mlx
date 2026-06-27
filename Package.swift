@@ -100,6 +100,14 @@ let package = Package(
                 "FluxSwift",
             ],
             path: "Sources/ManifoldMLX",
+            // A committed marker resource guarantees SwiftPM always generates
+            // `Bundle.module` for this target, which `MLXMetallibStaging` reads.
+            // Without it, a build where the prebuild plugin emits no metallib
+            // (no Metal toolchain) would omit the accessor and fail to compile.
+            // The plugin-compiled `mlx.metallib` lands in the same bundle.
+            resources: [
+                .copy("Resources/MetallibStaging.md"),
+            ],
             // Compiles the resolved mlx-swift Metal kernels into an
             // `mlx.metallib` resource during a plain `swift build`, so the MLX
             // GPU path works from the command line without an Xcode metallib

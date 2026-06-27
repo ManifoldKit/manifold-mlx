@@ -138,7 +138,15 @@ if [ -f "$OUT" ]; then
 fi
 
 # --- Compile + link ----------------------------------------------------------
-TMP="$(mktemp -d)"
+# Write intermediate .air files under the output dir when one was given (the
+# SwiftPM plugin sandbox only permits writes there); fall back to mktemp for the
+# manual form.
+if [ -n "${OUTDIR:-}" ]; then
+  TMP="${OUTDIR%/}/.air"
+  rm -rf "$TMP"; mkdir -p "$TMP"
+else
+  TMP="$(mktemp -d)"
+fi
 trap 'rm -rf "$TMP"' EXIT
 
 AIRS=()
