@@ -228,6 +228,11 @@ func fmt3(_ value: Double) -> String { String(format: "%.3f", value) }
 @MainActor
 func runCLI() async -> Int32 {
     let argv = Array(CommandLine.arguments.dropFirst())
+    // BFCL argument-level eval subcommand — drives the shared ManifoldTools
+    // BFCLRunner against this package's MLXBackend (mirrors core manifold-tools).
+    if argv.first == "bfcl" {
+        return await BFCLMLXCLI.run(Array(argv.dropFirst()))
+    }
     let cli = CLI.parse(argv)
 
     let scenarios: [Scenario]

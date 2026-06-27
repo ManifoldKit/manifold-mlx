@@ -22,7 +22,10 @@ let package = Package(
         // ManifoldTestSupport / ManifoldBackendTestKit products this package
         // consumes.
         // traits: [] builds core's products trait-less (the post-C2 world).
-        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.62.0"), traits: []),
+        // TEMPORARY local path-pin (uncommitted on main) to pick up the unreleased
+        // BFCLRunner on the core spike/bfcl-ast-scorer branch. Revert to the url
+        // pin before any commit-to-url. SwiftPM local packages need explicit name:.
+        .package(name: "ManifoldKit", path: "../ManifoldKit"),
         // Pins copied from core's Package.swift.
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.3"),
         // 3.31.3 ships the decoupled MLXHuggingFace target and adds the
