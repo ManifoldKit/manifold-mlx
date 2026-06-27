@@ -171,10 +171,16 @@ final class GBNFCompiled {
             case .rule(let id):
                 // Suspend the current frame at the symbol after this reference,
                 // then push each alternative of `id` on top.
+                // Canonicalize base before appending so that nullable right-recursive
+                // grammars (e.g. `a ::= b a | "x"; b ::= "" | "y"`) don't accumulate
+                // unbounded chains of trailing .end return-address frames — collapsing
+                // them makes semantically equivalent states hash-equal so `visited`
+                // terminates the expansion.
                 var base = s
                 base[base.count - 1] = top + 1
+                let canonBase = canonical(base, c)
                 for st in c.altStarts[id] {
-                    work.append(base + [st])
+                    work.append(canonBase + [st])
                 }
             case .end:
                 // Unreachable: `canonical` already popped trailing ends.
