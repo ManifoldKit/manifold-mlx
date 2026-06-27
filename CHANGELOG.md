@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.14](https://github.com/roryford/manifold-mlx/compare/v0.2.13...v0.2.14) (2026-06-27)
+
+
+### Features
+
+* **tool-calling:** grammar-constrain MLX-Mistral [TOOL_CALLS] generation ([#109](https://github.com/roryford/manifold-mlx/issues/109)) ([c4b571e](https://github.com/roryford/manifold-mlx/commit/c4b571ea1d9c4ecba7cb8d856a13a26495cad3ce))
+* **tools-mlx:** bump ManifoldKit to 0.62, wire ConformanceScorer/MatrixRenderer, add render consistency gate ([#113](https://github.com/roryford/manifold-mlx/issues/113)) ([92c5fb7](https://github.com/roryford/manifold-mlx/commit/92c5fb766e9c21075b7c5745ff52e988eac36c87))
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.62.0 ([#111](https://github.com/roryford/manifold-mlx/issues/111)) ([01aa9f0](https://github.com/roryford/manifold-mlx/commit/01aa9f0d1c45cddfaf8fd20df0dea262bb4fad47))
+
+
+### Performance Improvements
+
+* **mlx:** grammar-constrained sampling — trie walk + flattened matcher + state cache ([#110](https://github.com/roryford/manifold-mlx/issues/110)) ([e175f11](https://github.com/roryford/manifold-mlx/commit/e175f1107f7e02c2bae462a0b857e54a17749bc3))
+
 ## [0.2.13](https://github.com/roryford/manifold-mlx/compare/v0.2.12...v0.2.13) (2026-06-25)
 
 ### Highlights
