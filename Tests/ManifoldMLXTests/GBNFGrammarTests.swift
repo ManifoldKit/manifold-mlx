@@ -212,6 +212,104 @@ final class GBNFGrammarTests: XCTestCase {
         assertRejects("b", g)
     }
 
+    // MARK: - Any-byte dot (#97)
+
+    func test_dot_matchesAnyByte() throws {
+        let g = try grammar("root ::= .")
+        assertMatches("a", g)
+        assertMatches("Z", g)
+        assertMatches("0", g)
+        assertRejects("", g, "dot requires exactly one byte")
+        assertRejects("ab", g, "dot is a single byte")
+    }
+
+    func test_dot_inSequence() throws {
+        let g = try grammar(#"root ::= "a" . "b""#)
+        assertMatches("axb", g)
+        assertMatches("a b", g)
+        assertRejects("ab", g, "middle byte required")
+        assertRejects("axyz b", g, "only one middle byte")
+    }
+
+    func test_dot_star_matchesAnything() throws {
+        let g = try grammar("root ::= .*")
+        assertMatches("", g)
+        assertMatches("hello world", g)
+        assertMatches("{}[]\"", g)
+    }
+
+    // MARK: - Unicode escapes \u{NNNN} and \UHHHHHHHH (#97)
+
+    func test_unicodeBraced_ascii_inString() throws {
+        // \u{41} = 'A' (0x41)
+        let g = try grammar(#"root ::= "\u{41}""#)
+        assertMatches("A", g)
+        assertRejects("B", g)
+    }
+
+    func test_unicodeBraced_multibyte_inString() throws {
+        // \u{1F600} = 😀, encoded as 4 UTF-8 bytes
+        let g = try grammar(#"root ::= "\u{1F600}""#)
+        assertMatches("😀", g)
+        assertRejects("A", g)
+    }
+
+    func test_unicodeLongForm_inString() throws {
+        // \U00000041 = 'A'
+        let g = try grammar(#"root ::= "\U00000041""#)
+        assertMatches("A", g)
+        assertRejects("a", g)
+    }
+
+    func test_unicodeLongForm_emoji_inString() throws {
+        // \U0001F600 = 😀
+        let g = try grammar(#"root ::= "\U0001F600""#)
+        assertMatches("😀", g)
+    }
+
+    func test_unicodeBraced_inCharClass_ascii_succeeds() throws {
+        // \u{61} = 'a' (single byte — OK in char class)
+        let g = try grammar(#"root ::= [\u{61}-\u{7A}]"#)
+        assertMatches("a", g)
+        assertMatches("z", g)
+        assertRejects("A", g)
+    }
+
+    func test_unicodeBraced_inCharClass_multibyte_throws() throws {
+        // \u{1F600} is a 4-byte UTF-8 sequence — not allowed in a char class range.
+        XCTAssertThrowsError(try grammar(#"root ::= [\u{1F600}]"#)) { error in
+            guard case GBNFError.unsupported(let msg) = error else {
+                return XCTFail("expected .unsupported, got \(error)")
+            }
+            XCTAssertTrue(msg.contains("multi-byte"), "message should mention multi-byte: \(msg)")
+        }
+    }
+
+    func test_unicodeMalformed_missingBrace_throws() throws {
+        XCTAssertThrowsError(try grammar(#"root ::= "\u41""#)) { error in
+            XCTAssertNotNil(error as? GBNFError)
+        }
+    }
+
+    func test_unicodeLongForm_wrongDigitCount_throws() throws {
+        // \U with fewer than 8 hex digits should fail.
+        XCTAssertThrowsError(try grammar(#"root ::= "\U0041""#)) { error in
+            XCTAssertNotNil(error as? GBNFError)
+        }
+    }
+
+    // MARK: - Precise unsupported diagnostics (#97)
+
+    func test_multibyteCharInClass_preciseMessage() throws {
+        // A literal multi-byte Unicode character directly in a char class.
+        XCTAssertThrowsError(try grammar("root ::= [😀]")) { error in
+            guard case GBNFError.unsupported(let msg) = error else {
+                return XCTFail("expected .unsupported, got \(error)")
+            }
+            XCTAssertTrue(msg.contains("multi-byte"), "message should name the problem: \(msg)")
+        }
+    }
+
     func test_rightRecursiveNullableCycle_terminates() throws {
         // B is nullable; A references B then itself. Normalization must not loop.
         let g = try grammar(#"""

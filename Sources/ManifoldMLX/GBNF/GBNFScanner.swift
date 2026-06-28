@@ -1,6 +1,6 @@
 import Foundation
 
-/// Lexical tokens for the supported GBNF subset (#96).
+/// Lexical tokens for the supported GBNF subset (#96, #97).
 enum GBNFToken: Equatable {
     case ident(String)
     case define          // ::=
@@ -26,8 +26,10 @@ struct GBNFTokenCursor {
 
 /// Hand-written GBNF lexer. Skips `#` line comments and whitespace; decodes
 /// string literals and character classes (with `\xHH` / `\n` / `\t` / `\r` /
-/// `\\` / `\"` / `\]` / `\-` escapes) into the byte-level forms the matcher
-/// consumes.
+/// `\\` / `\"` / `\]` / `\-` / `\u{NNNN}` / `\UHHHHHHHH` escapes) into the
+/// byte-level forms the matcher consumes. Matches llama.cpp GBNF semantics
+/// for the constructs it supports; unsupported constructs throw
+/// `GBNFError.unsupported` with a precise diagnostic (#97).
 struct GBNFScanner {
     private let chars: [Character]
     init(_ text: String) { chars = Array(text) }
@@ -56,6 +58,10 @@ struct GBNFScanner {
             case "*": tokens.append(.star); i += 1
             case "+": tokens.append(.plus); i += 1
             case "?": tokens.append(.question); i += 1
+            case ".":
+                // Any single byte (0x00–0xFF), matching llama.cpp `.` semantics.
+                tokens.append(.charclass(GBNFGrammar.CharSet(ranges: [0x00...0xFF], negated: false)))
+                i += 1
             case "\"":
                 let (bytes, next) = try scanString(from: i)
                 tokens.append(.string(bytes)); i = next
@@ -115,13 +121,15 @@ struct GBNFScanner {
             if chars[idx] == "\\" {
                 let (b, next) = try scanEscape(from: idx)
                 guard b.count == 1 else {
-                    throw GBNFError.unsupported("multi-byte escape in character class")
+                    throw GBNFError.unsupported(
+                        "Unicode escape \\u{…}/\\U… in character class requires multi-byte UTF-8 — use \\xHH byte ranges instead"
+                    )
                 }
                 return (b[0], next)
             }
             let utf8 = Array(String(chars[idx]).utf8)
             guard utf8.count == 1 else {
-                throw GBNFError.unsupported("multi-byte character in character class")
+                throw GBNFError.unsupported("multi-byte character in character class — use \\xHH byte ranges instead")
             }
             return (utf8[0], idx + 1)
         }
@@ -143,9 +151,15 @@ struct GBNFScanner {
         throw GBNFError.syntax("unterminated character class")
     }
 
-    /// Decodes a backslash escape starting at `\`. Returns the byte(s) and the
-    /// index after the escape. `\xHH` yields one byte; the named escapes one;
-    /// any other escaped char is taken literally (its UTF-8 bytes).
+    /// Decodes a backslash escape starting at `\`. Returns the UTF-8 byte(s)
+    /// and the index after the escape.
+    ///
+    /// Supported:
+    /// - `\n \r \t \\ \" \] \[ \- /` → one byte each
+    /// - `\xHH` → one byte
+    /// - `\u{NNNN}` → Unicode codepoint encoded as UTF-8 (1–4 bytes)
+    /// - `\UHHHHHHHH` → Unicode codepoint (8 hex digits) encoded as UTF-8
+    /// - Unknown single-char escape → the escaped character literally (llama.cpp compat)
     private func scanEscape(from start: Int) throws -> ([UInt8], Int) {
         let n = chars.count
         guard start + 1 < n else { throw GBNFError.syntax("dangling escape") }
@@ -167,8 +181,45 @@ struct GBNFScanner {
                 throw GBNFError.syntax("malformed \\xHH escape")
             }
             return ([UInt8(hi * 16 + lo)], start + 4)
+        case "u":
+            // \u{NNNN} — braced Unicode codepoint (1–6 hex digits).
+            guard start + 2 < n, chars[start + 2] == "{" else {
+                throw GBNFError.syntax("expected \\u{NNNN} — brace required after \\u")
+            }
+            var j = start + 3
+            var hexStr = ""
+            while j < n, chars[j] != "}" {
+                guard chars[j].hexDigitValue != nil else {
+                    throw GBNFError.syntax("non-hex digit in \\u{…} escape")
+                }
+                hexStr.append(chars[j]); j += 1
+            }
+            guard j < n else { throw GBNFError.syntax("unterminated \\u{…} escape") }
+            guard !hexStr.isEmpty, hexStr.count <= 6,
+                  let codepoint = UInt32(hexStr, radix: 16),
+                  let scalar = Unicode.Scalar(codepoint) else {
+                throw GBNFError.syntax("invalid codepoint in \\u{…} escape")
+            }
+            return (Array(String(scalar).utf8), j + 1)
+        case "U":
+            // \UHHHHHHHH — exactly 8 hex digits, no braces.
+            guard start + 9 < n else {
+                throw GBNFError.syntax("\\U escape requires exactly 8 hex digits")
+            }
+            var hexStr = ""
+            for k in (start + 2)..<(start + 10) {
+                guard chars[k].hexDigitValue != nil else {
+                    throw GBNFError.syntax("non-hex digit in \\U escape at position \(k - start - 2)")
+                }
+                hexStr.append(chars[k])
+            }
+            guard let codepoint = UInt32(hexStr, radix: 16),
+                  let scalar = Unicode.Scalar(codepoint) else {
+                throw GBNFError.syntax("invalid codepoint in \\U escape: \(hexStr)")
+            }
+            return (Array(String(scalar).utf8), start + 10)
         default:
-            // Unknown escape → the escaped character literally.
+            // Unknown escape → the escaped character literally (llama.cpp compat).
             return (Array(String(e).utf8), start + 2)
         }
     }
