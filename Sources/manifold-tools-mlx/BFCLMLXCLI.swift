@@ -97,7 +97,13 @@ enum BFCLMLXCLI {
         // (marks the model loaded immediately — the production load-from-ModelInfo
         // path is GGUF-specific). Empty registry: BFCLRunner captures the model's
         // first tool call and scores it; we never dispatch.
+        guard !cases.isEmpty else {
+            err("no BFCL cases found for category '\(category)' — check bundled fixtures")
+            return 1
+        }
+
         let backend = MLXBackend()
+        defer { backend.unloadModel() }
         print("Loading MLX model from \(modelURL.path) …")
         do {
             try await backend.loadModel(from: modelURL, plan: .systemManaged(requestedContextSize: 4096))
@@ -106,7 +112,6 @@ enum BFCLMLXCLI {
             err("LOAD FAILED: \(modelURL.lastPathComponent): \(detail)")
             return 3
         }
-        defer { backend.unloadModel() }
 
         let service = InferenceService(
             backend: backend,
