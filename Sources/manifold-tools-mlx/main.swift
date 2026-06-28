@@ -88,6 +88,9 @@ struct CLI {
         let text = """
         manifold-tools-mlx — tool-calling validation against a real MLX model
 
+        SUBCOMMANDS
+          bfcl      BFCL argument-level eval (run `bfcl --help` for flags)
+
         USAGE
           manifold-tools-mlx --model <path> [--scenario <id|all>]
                     [--output path.jsonl] [--fixtures-root <dir>] [--list]
