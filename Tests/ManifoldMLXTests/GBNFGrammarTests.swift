@@ -224,4 +224,73 @@ final class GBNFGrammarTests: XCTestCase {
         assertMatches("yyx", g)
         assertRejects("y", g, "must terminate in x")
     }
+
+    // MARK: - allowedTokenIDs ≡ per-token accepts (perf-optimization guard)
+
+    /// A small synthetic byte-level vocabulary: every single byte 0...255 plus a
+    /// set of multi-byte "tokens" that exercise prefix sharing and dead paths.
+    private func syntheticVocab() -> [[UInt8]?] {
+        var table: [[UInt8]?] = (0...255).map { [UInt8($0)] }
+        let words = ["{", "}", "\"", ":", ",", "name", "arguments", "calc",
+                     "true", "false", "null", "123", "-", "\"name\"", "ab", "abc",
+                     "\":\"", "{\"", "}}", " ", "  ", "\n", "x", "yx", "yyx"]
+        for w in words { table.append(Array(w.utf8)) }
+        table.append(nil) // a special/EOS-like token with no byte representation
+        return table
+    }
+
+    /// `GBNFMatcher.allowedTokenIDs(byteTable:)` (the memoized processor's scan)
+    /// must return EXACTLY the ids the previous per-token `accepts(_:)` filter
+    /// would — for every reachable matcher state. This is the correctness
+    /// invariant behind the grammar-mask memoization speedup.
+    private func assertAllowedMatchesAccepts(
+        _ m: GBNFMatcher, _ table: [[UInt8]?], _ ctx: String, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let reference = Set((0..<table.count).filter { id in
+            guard let bytes = table[id], !bytes.isEmpty else { return false }
+            return m.accepts(bytes)
+        })
+        XCTAssertEqual(m.allowedTokenIDs(byteTable: table), reference,
+                       "allowedTokenIDs diverged from accepts-filter at: \(ctx)", file: file, line: line)
+    }
+
+    func test_allowedTokenIDs_equivalentToAccepts_acrossStates() throws {
+        let table = syntheticVocab()
+        // A JSON-object-ish grammar with a string charset (the permissive,
+        // near-full-vocab case that dominated the slow path) and structure.
+        let g = try grammar(#"""
+        root ::= "{" ws "\"name\"" ws ":" ws string "}"
+        string ::= "\"" char* "\""
+        char ::= [^"\\]
+        ws ::= " "*
+        """#)
+
+        // State 0: at the very start.
+        var m = GBNFMatcher(grammar: g)
+        assertAllowedMatchesAccepts(m, table, "start")
+
+        // Drive the matcher through a valid prefix, checking the invariant at
+        // every intermediate state (each advance changes the live stack set).
+        let prefix = Array(#"{ "name" : "ca"#.utf8)
+        for (i, b) in prefix.enumerated() {
+            XCTAssertTrue(m.accepts([b]), "prefix byte \(i) (\(b)) should be grammar-legal")
+            m.advance([b])
+            assertAllowedMatchesAccepts(m, table, "after prefix[0...\(i)]")
+        }
+    }
+
+    func test_allowedTokenIDs_equivalentToAccepts_recursiveNullable() throws {
+        let table = syntheticVocab()
+        let g = try grammar(#"""
+        root ::= a
+        a ::= b a | "x"
+        b ::= "" | "y"
+        """#)
+        var m = GBNFMatcher(grammar: g)
+        assertAllowedMatchesAccepts(m, table, "start")
+        for b in Array("yy".utf8) {
+            m.advance([b])
+            assertAllowedMatchesAccepts(m, table, "after y")
+        }
+    }
 }

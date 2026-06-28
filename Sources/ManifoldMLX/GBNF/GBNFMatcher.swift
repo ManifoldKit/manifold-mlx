@@ -16,7 +16,11 @@ import Foundation
 /// then `advance(_:)` commits the bytes of the sampled token.
 @_spi(Testing) public struct GBNFMatcher {
     private let grammar: GBNFGrammar
-    private var stacks: Set<[GBNFGrammar.Symbol]>
+    /// The live set of stacks. Readable so callers can use it as a cache key:
+    /// the grammar mask is a pure function of this state, so a logit processor
+    /// can memoize the computed mask across decode steps that revisit a state
+    /// (e.g. every step inside a JSON string charset shares one state).
+    private(set) var stacks: Set<[GBNFGrammar.Symbol]>
 
     public init(grammar: GBNFGrammar) {
         self.grammar = grammar
@@ -65,6 +69,50 @@ import Foundation
             if current.isEmpty { return false }
         }
         return true
+    }
+
+    /// Computes the set of token ids whose bytes the grammar accepts as a valid
+    /// prefix continuation from the current state, over a byte-level vocabulary
+    /// (`byteTable[id]` = the token's raw bytes, or `nil` for special/EOS tokens
+    /// that have no byte representation — those are excluded; the caller permits
+    /// EOS separately via ``isComplete``).
+    ///
+    /// This replaces the processor's previous per-token `accepts(_:)` loop. Two
+    /// things make it cheaper than `vocabSize` independent `accepts` calls:
+    /// - The leading-byte transition is hoisted: `step(stacks, b)` is evaluated
+    ///   at most once per distinct first byte (≤256) instead of once per token
+    ///   (~vocabSize), and every token sharing that first byte reuses it.
+    /// - Single-byte tokens short-circuit after the hoisted step with no further
+    ///   stack work.
+    @_spi(Testing) public func allowedTokenIDs(byteTable: [[UInt8]?]) -> Set<Int> {
+        // Post-first-byte stack set per leading byte value, computed lazily.
+        var firstByteState = [Set<[GBNFGrammar.Symbol]>?](repeating: nil, count: 256)
+        var firstByteComputed = [Bool](repeating: false, count: 256)
+
+        var allowed = Set<Int>()
+        for id in 0..<byteTable.count {
+            guard let bytes = byteTable[id], let first = bytes.first else { continue }
+            let fi = Int(first)
+            if !firstByteComputed[fi] {
+                let stepped = step(stacks, byte: first)
+                firstByteState[fi] = stepped.isEmpty ? nil : stepped
+                firstByteComputed[fi] = true
+            }
+            guard var current = firstByteState[fi] else { continue }
+            if bytes.count == 1 {
+                allowed.insert(id)
+                continue
+            }
+            var alive = true
+            var i = 1
+            while i < bytes.count {
+                current = step(current, byte: bytes[i])
+                if current.isEmpty { alive = false; break }
+                i += 1
+            }
+            if alive { allowed.insert(id) }
+        }
+        return allowed
     }
 
     /// Commit the sampled token's bytes, moving the live state forward.
