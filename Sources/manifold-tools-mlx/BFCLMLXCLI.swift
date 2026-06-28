@@ -20,6 +20,10 @@ import ManifoldMLX
 enum BFCLMLXCLI {
 
     static func run(_ args: [String]) async -> Int32 {
+        func err(_ s: String) {
+            FileHandle.standardError.write(Data((s + "\n").utf8))
+        }
+
         var modelPath: String?
         var category = "multiple"
         var dumpPath: String?
@@ -29,38 +33,62 @@ enum BFCLMLXCLI {
         while i < args.count {
             switch args[i] {
             case "--model":
-                if i + 1 < args.count { modelPath = args[i + 1]; i += 1 }
+                guard i + 1 < args.count else { err("--model requires a value"); return 2 }
+                modelPath = args[i + 1]; i += 1
             case "--category":
-                if i + 1 < args.count { category = args[i + 1]; i += 1 }
+                guard i + 1 < args.count else { err("--category requires a value"); return 2 }
+                category = args[i + 1]; i += 1
             case "--dump":
-                if i + 1 < args.count { dumpPath = args[i + 1]; i += 1 }
+                guard i + 1 < args.count else { err("--dump requires a value"); return 2 }
+                dumpPath = args[i + 1]; i += 1
             case "--timeout":
-                if i + 1 < args.count, let t = Double(args[i + 1]), t > 0 { timeoutSeconds = t; i += 1 }
+                guard i + 1 < args.count else { err("--timeout requires a value"); return 2 }
+                guard let t = Double(args[i + 1]), t > 0 else {
+                    err("--timeout must be a positive number"); return 2
+                }
+                timeoutSeconds = t; i += 1
             case "-h", "--help":
                 print("usage: manifold-tools-mlx bfcl --model <model-dir> [--category simple|multiple] [--dump PATH.jsonl] [--timeout SECONDS]")
                 return 0
             default:
-                FileHandle.standardError.write(Data("unknown flag '\(args[i])'\n".utf8))
+                err("unknown flag '\(args[i])'")
                 return 2
             }
             i += 1
         }
 
         guard let modelPath else {
-            FileHandle.standardError.write(Data("manifold-tools-mlx bfcl: --model <model-dir> is required\n".utf8))
+            err("manifold-tools-mlx bfcl: --model <model-dir> is required")
             return 2
         }
         let modelURL = URL(fileURLWithPath: modelPath, isDirectory: true)
         guard FileManager.default.fileExists(atPath: modelURL.path) else {
-            FileHandle.standardError.write(Data("model directory not found: \(modelURL.path)\n".utf8))
+            err("model directory not found: \(modelURL.path)")
             return 1
+        }
+
+        // Pre-flight: refuse VL model directories before attempting to load them.
+        // Loading a vision-language model via the text-only MLX backend path causes
+        // a hard SIGSEGV (exit 139) with an empty log, making failures undebuggable.
+        let vlMarkerFiles: [String] = [
+            "preprocessor_config.json",
+            "processor_config.json",
+            "video_preprocessor_config.json",
+        ]
+        let fm = FileManager.default
+        for marker in vlMarkerFiles {
+            let markerPath = modelURL.appendingPathComponent(marker).path
+            if fm.fileExists(atPath: markerPath) {
+                err("'\(modelPath)' looks like a vision-language model (found \(marker)); this is a text-only tool harness and would crash on load — skipped")
+                return 1
+            }
         }
 
         let cases: [BFCLLoadedCase]
         do {
             cases = try BFCLCaseLoader.loadBundled(category: category)
         } catch {
-            FileHandle.standardError.write(Data("failed to load BFCL '\(category)' cases: \(error)\n".utf8))
+            err("failed to load BFCL '\(category)' cases: \(error)")
             return 1
         }
         print("BFCL category: \(category)")
@@ -75,7 +103,7 @@ enum BFCLMLXCLI {
             try await backend.loadModel(from: modelURL, plan: .systemManaged(requestedContextSize: 4096))
         } catch {
             let detail = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-            FileHandle.standardError.write(Data("LOAD FAILED: \(modelURL.lastPathComponent): \(detail)\n".utf8))
+            err("LOAD FAILED: \(modelURL.lastPathComponent): \(detail)")
             return 3
         }
         defer { backend.unloadModel() }
@@ -94,14 +122,18 @@ enum BFCLMLXCLI {
             perCaseTimeoutSeconds: timeoutSeconds
         )
 
-        var exitCode: Int32 = 0
+        // Exit 1 if any cases errored at the backend (timeout, crash, etc.) —
+        // a regression signal distinct from low-but-expected AST scores.
+        var exitCode: Int32 = outcome.summary.errored > 0 ? 1 : 0
+
         if let dumpPath {
             do {
-                let body = try outcome.records.map { try $0.jsonLine() }.joined(separator: "\n")
-                try (body + "\n").write(toFile: dumpPath, atomically: true, encoding: .utf8)
+                var body = try outcome.records.map { try $0.jsonLine() }.joined(separator: "\n")
+                body += "\n"
+                try body.write(toFile: dumpPath, atomically: true, encoding: .utf8)
                 print("\nWrote \(outcome.records.count) case record(s) → \(dumpPath)")
             } catch {
-                FileHandle.standardError.write(Data("failed to write dump to \(dumpPath): \(error)\n".utf8))
+                err("failed to write dump to \(dumpPath): \(error)")
                 exitCode = 1
             }
         }
