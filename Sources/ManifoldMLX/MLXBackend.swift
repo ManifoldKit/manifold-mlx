@@ -456,7 +456,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 throw InferenceError.alreadyGenerating
             }
             _isGenerating = true
-            return GenerationCallSnapshot(
+            let snapshot = GenerationCallSnapshot(
                 container: container,
                 loadOptions: _loadOptions,
                 conversationHistory: _conversationHistory,
@@ -470,6 +470,14 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                     parsedGrammar, dialect: _dialect, tools: config.tools
                 )
             )
+            // Consume-once: the tool-dispatch orchestrator re-installs the full
+            // tool-aware history before every turn, so clearing it after capture
+            // keeps it from leaking into a later, tools-free request on this reused
+            // backend instance (which would render stale tool turns). This replaces
+            // the eager clear that used to live in `setConversationHistory`.
+            // Mirrors `OllamaBackend`'s consume-once `toolAwareHistory`.
+            _toolAwareHistory = nil
+            return snapshot
         }
         Self.logger.debug("MLX generate started")
 
@@ -764,9 +772,15 @@ extension MLXBackend: ConversationHistoryReceiver {
     public func setConversationHistory(_ history: [(role: String, content: String)]) {
         withStateLock {
             _conversationHistory = history
-            // Clear any previously stored tool-aware history so the simpler path takes
-            // effect when the orchestrator calls the non-tool-aware setter.
-            _toolAwareHistory = nil
+            // Do NOT clear `_toolAwareHistory` here. The tool-dispatch orchestrator
+            // (`GenerationToolDispatchLoop`) installs the tool-aware history first
+            // (`setToolAwareHistory`) and then immediately calls this string-only
+            // setter via `GenerationHistoryInstaller.installHistory` on every turn.
+            // Clearing the tool history here wiped the just-installed assistant
+            // tool-call + tool-result turns, so the model never saw the result and
+            // re-issued the same tool call forever (never terminating). Staleness
+            // across *separate* requests is instead handled by the consume-once
+            // reset in `generate(...)` — mirroring `OllamaBackend`'s pattern.
         }
     }
 }
