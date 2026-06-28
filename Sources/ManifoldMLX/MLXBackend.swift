@@ -453,6 +453,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 throw InferenceError.inferenceFailure("No model loaded")
             }
             guard !_isGenerating else {
+                _toolAwareHistory = nil
                 throw InferenceError.alreadyGenerating
             }
             _isGenerating = true
