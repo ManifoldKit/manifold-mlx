@@ -4,7 +4,7 @@ name: Bump core pin (on ManifoldKit release)
 #
 # Trigger: ManifoldKit's release-please workflow fires repository_dispatch
 # of type `core-release` (payload.tag = the new core tag) on every release
-# (see roryford/ManifoldKit .github/workflows/release-please.yml,
+# (see ManifoldKit/ManifoldKit .github/workflows/release-please.yml,
 # notify-companions job). workflow_dispatch is provided for manual runs and
 # for catching a companion up to a release that shipped before this workflow
 # existed.
@@ -80,7 +80,7 @@ jobs:
           VERSION: ${{ steps.tag.outputs.version }}
         run: |
           set -euo pipefail
-          perl -0pi -e 's{(roryford/ManifoldKit"[^\n]*\.upToNextMinor\(from:\s*")[0-9]+\.[0-9]+\.[0-9]+(")}{${1}'"$VERSION"'${2}}g' Package.swift
+          perl -0pi -e 's{(ManifoldKit/ManifoldKit"[^\n]*\.upToNextMinor\(from:\s*")[0-9]+\.[0-9]+\.[0-9]+(")}{${1}'"$VERSION"'${2}}g' Package.swift
           if git diff --quiet -- Package.swift; then
             echo "Pin already at $VERSION — nothing to do."
             echo "changed=false" >> "$GITHUB_OUTPUT"

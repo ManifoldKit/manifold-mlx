@@ -22,7 +22,7 @@ let package = Package(
         // ManifoldTestSupport / ManifoldBackendTestKit products this package
         // consumes.
         // traits: [] builds core's products trait-less (the post-C2 world).
-        .package(url: "https://github.com/roryford/ManifoldKit", .upToNextMinor(from: "0.62.0"), traits: []),
+        .package(url: "https://github.com/ManifoldKit/ManifoldKit", .upToNextMinor(from: "0.62.0"), traits: []),
         // Pins copied from core's Package.swift.
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.3"),
         // 3.31.3 ships the decoupled MLXHuggingFace target and adds the
@@ -73,7 +73,7 @@ let package = Package(
         ),
         // MLX inference backend, resource arbiter, capability probe,
         // MLX-specific tool dialect, and the FLUX / Stable Diffusion image
-        // backends. Imported from roryford/ManifoldKit (see the Imported-From
+        // backends. Imported from ManifoldKit/ManifoldKit (see the Imported-From
         // commit trailer); the `#if MLX` / `#if HuggingFace` trait gates were
         // stripped at import — both are always-on here.
         .target(

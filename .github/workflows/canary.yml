@@ -1,6 +1,6 @@
 name: Canary (core main)
 
-# Builds + tests THIS repo against roryford/ManifoldKit's main HEAD (NOT the
+# Builds + tests THIS repo against ManifoldKit/ManifoldKit's main HEAD (NOT the
 # latest published tag) to catch a core seam move before it ships. A failure
 # means the core seam moved — not that this repo regressed.
 #
@@ -27,7 +27,7 @@ jobs:
       - name: Check out ManifoldKit main
         uses: actions/checkout@v4
         with:
-          repository: roryford/ManifoldKit
+          repository: ManifoldKit/ManifoldKit
           ref: main
           path: core
       - name: Select newest Xcode 26 toolchain

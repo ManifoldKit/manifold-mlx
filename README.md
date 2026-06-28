@@ -1,6 +1,6 @@
 # manifold-mlx
 
-MLX inference and diffusion backends for [ManifoldKit](https://github.com/roryford/ManifoldKit) — the `ManifoldMLX` module plus its vendored `FluxSwift` and `StableDiffusion` targets, split out of the core package as part of the v0.48 packaging release (ManifoldKit#1749) so that `swift build` of core never drags mlx-swift, and heavy backends are one `.package` line away.
+MLX inference and diffusion backends for [ManifoldKit](https://github.com/ManifoldKit/ManifoldKit) — the `ManifoldMLX` module plus its vendored `FluxSwift` and `StableDiffusion` targets, split out of the core package as part of the v0.48 packaging release (ManifoldKit#1749) so that `swift build` of core never drags mlx-swift, and heavy backends are one `.package` line away.
 
 It provides Apple-Silicon-native text generation (mlx-swift-lm model families incl. MoE Gemma 4 via MLXVLM routing), prompt/KV cache coordination, a resource arbiter, capability probing, and FLUX.1 / Stable Diffusion image generation.
 
@@ -11,8 +11,8 @@ It provides Apple-Silicon-native text generation (mlx-swift-lm model families in
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/roryford/ManifoldKit", branch: "main"),
-    .package(url: "https://github.com/roryford/manifold-mlx", branch: "main"),
+    .package(url: "https://github.com/ManifoldKit/ManifoldKit", branch: "main"),
+    .package(url: "https://github.com/ManifoldKit/manifold-mlx", branch: "main"),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [
@@ -34,7 +34,7 @@ let kit = try await ManifoldKit.quickStart(backends: [MLXBackends.self])
 > [!IMPORTANT]
 > **Command-line `swift build` now produces MLX's `mlx.metallib` automatically — provided the Metal toolchain is installed.** mlx-swift loads a precompiled metallib at GPU init and aborts with `MLX error: Failed to load the default metallib` if none is found; historically only the Xcode / `xcodebuild` build path compiled it, so a plain `swift run` / bare SwiftPM executable died at the generate step. This package now ships a SwiftPM prebuild plugin (`MLXMetallibPlugin`) that compiles the resolved mlx-swift kernels into an `mlx.metallib` during `swift build`, and `MLXMetallibStaging` copies it next to the running binary so mlx-swift's colocated lookup finds it.
 >
-> The plugin needs the **Metal Toolchain** component (`xcodebuild -downloadComponent MetalToolchain`, or Xcode → Settings → Components). Without it the build still succeeds but emits no metallib, and the generate step aborts exactly as before — backend registration, model discovery/classification, and the load *plan* keep working regardless. A normal SwiftUI **app** target is an Xcode build and works out of the box. For a fully toolchain-free headless backend, the GGUF/llama.cpp companion ([manifold-llama](https://github.com/roryford/manifold-llama)) runs from `swift run` with no Metal step. See ManifoldKit's [`docs/QUICKSTART-CLI.md` §4](https://github.com/roryford/ManifoldKit/blob/main/docs/QUICKSTART-CLI.md).
+> The plugin needs the **Metal Toolchain** component (`xcodebuild -downloadComponent MetalToolchain`, or Xcode → Settings → Components). Without it the build still succeeds but emits no metallib, and the generate step aborts exactly as before — backend registration, model discovery/classification, and the load *plan* keep working regardless. A normal SwiftUI **app** target is an Xcode build and works out of the box. For a fully toolchain-free headless backend, the GGUF/llama.cpp companion ([manifold-llama](https://github.com/ManifoldKit/manifold-llama)) runs from `swift run` with no Metal step. See ManifoldKit's [`docs/QUICKSTART-CLI.md` §4](https://github.com/ManifoldKit/ManifoldKit/blob/main/docs/QUICKSTART-CLI.md).
 
 ## Compatibility
 
@@ -63,7 +63,7 @@ scripts/test-mlx-integration.sh <name>     # prefer a model dir matching <name>
 
 ## Provenance & history
 
-Imported as a fresh copy from `roryford/ManifoldKit` (see the `Imported-From:` trailer on the import commit). **History before 2026-06 lives in [ManifoldKit](https://github.com/roryford/ManifoldKit)** — `git log` there for the archaeology.
+Imported as a fresh copy from `ManifoldKit/ManifoldKit` (see the `Imported-From:` trailer on the import commit). **History before 2026-06 lives in [ManifoldKit](https://github.com/ManifoldKit/ManifoldKit)** — `git log` there for the archaeology.
 
 `Sources/FluxSwift` is vendored from [mzbac/flux.swift](https://github.com/mzbac/flux.swift) (MIT) and `Sources/StableDiffusion` from [ml-explore/mlx-swift-examples](https://github.com/ml-explore/mlx-swift-examples) (MIT, LICENSE kept in-tree) — vendored because upstream flux.swift pins swift-transformers 0.1.x while ManifoldKit requires 1.2.x.
 
