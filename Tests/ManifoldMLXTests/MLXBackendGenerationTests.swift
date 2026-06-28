@@ -206,6 +206,93 @@ final class MLXBackendGenerationTests: XCTestCase {
         )
     }
 
+    /// Regression: the tool-call non-termination bug. The tool-dispatch
+    /// orchestrator installs the tool-aware history (assistant call + tool
+    /// result) via `setToolAwareHistory` and then, on the SAME turn, calls
+    /// `setConversationHistory` (through `GenerationHistoryInstaller`). The
+    /// string-only setter must NOT wipe the tool-aware history — doing so meant
+    /// the model never saw the tool result and re-issued the same call forever.
+    func test_generate_setConversationHistory_doesNotWipeToolAwareHistory() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["320743"]
+
+        let backend = MLXBackend()
+        backend._inject(mock, dialect: .qwen25)
+
+        // 1. Orchestrator installs the post-tool-result tool-aware history.
+        backend.setToolAwareHistory([
+            ToolAwareHistoryEntry(role: "user", content: "What is 7823 * 41?"),
+            ToolAwareHistoryEntry(
+                role: "assistant",
+                content: "",
+                toolCalls: [
+                    ToolCall(id: "call_1", toolName: "calc", arguments: "{\"a\":7823,\"op\":\"*\",\"b\":41}")
+                ]
+            ),
+            ToolAwareHistoryEntry(role: "tool", content: "{\"answer\":320743}", toolCallId: "call_1"),
+        ])
+        // 2. Orchestrator then installs the flattened conversation history,
+        //    exactly as `GenerationHistoryInstaller.installHistory` does.
+        backend.setConversationHistory([("user", "What is 7823 * 41?")])
+
+        _ = try await collectTokens(from: try backend.generate(
+            prompt: "What is 7823 * 41?",
+            systemPrompt: nil,
+            config: GenerationConfig()
+        ))
+
+        let sent = try XCTUnwrap(mock.lastMessages)
+        XCTAssertTrue(
+            sent.contains { ($0["content"] ?? "").contains("320743") },
+            "The tool result must reach the model after setConversationHistory; wiping _toolAwareHistory there caused the infinite re-call loop"
+        )
+        XCTAssertTrue(
+            sent.contains { $0["role"] == "tool" },
+            "The tool-role turn must survive into the rendered prompt"
+        )
+
+        // Sabotage check: re-adding `_toolAwareHistory = nil` to
+        // setConversationHistory collapses the rendered prompt to [user] and
+        // fails both assertions (the original bug).
+    }
+
+    /// Consume-once: after a tool-aware turn is rendered, the history must NOT
+    /// leak into a later tools-free request on the same reused backend — that
+    /// would render stale tool turns. This is the safeguard that replaces the
+    /// eager clear removed from `setConversationHistory`.
+    func test_generate_consumesToolAwareHistory_noStaleLeakAcrossRequests() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["ok"]
+
+        let backend = MLXBackend()
+        backend._inject(mock, dialect: .qwen25)
+
+        backend.setToolAwareHistory([
+            ToolAwareHistoryEntry(role: "tool", content: "{\"answer\":320743}", toolCallId: "call_1"),
+        ])
+        _ = try await collectTokens(from: try backend.generate(
+            prompt: "q", systemPrompt: nil, config: GenerationConfig()
+        ))
+        XCTAssertTrue(
+            mock.lastMessages?.contains { ($0["content"] ?? "").contains("320743") } == true,
+            "First turn must render the installed tool-aware history"
+        )
+
+        // A later, tools-free request installs only conversation history.
+        backend.setConversationHistory([("user", "different question")])
+        _ = try await collectTokens(from: try backend.generate(
+            prompt: "different question", systemPrompt: nil, config: GenerationConfig()
+        ))
+        XCTAssertFalse(
+            mock.lastMessages?.contains { ($0["content"] ?? "").contains("320743") } == true,
+            "Consumed tool-aware history must not leak into a subsequent tools-free request"
+        )
+        XCTAssertTrue(
+            mock.lastMessages?.contains { $0["content"] == "different question" } == true,
+            "The fresh conversation turn must be rendered"
+        )
+    }
+
     func test_generate_withVisionHistory_andSystemPrompt_prependsSystemChatMessage() async throws {
         let mock = MockMLXModelContainer()
         mock.tokensToYield = ["seen"]
