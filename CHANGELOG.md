@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.2.15](https://github.com/ManifoldKit/manifold-mlx/compare/v0.2.14...v0.2.15) (2026-06-28)
+
+### Highlights
+
+**A full GBNF grammar engine for on-device MLX generation.** The MLX backend gains a complete GBNF engine — any-byte `.` matching, Unicode escapes, and precise diagnostics — bringing grammar-constrained decoding toward parity with the llama.cpp path ([#97](https://github.com/ManifoldKit/manifold-mlx/issues/97), [#118](https://github.com/ManifoldKit/manifold-mlx/issues/118)). It is paired with an on-device grammar mask and a prose-turn circuit breaker that keep constrained decoding fast and stop a model from running away on free-form turns ([#114](https://github.com/ManifoldKit/manifold-mlx/issues/114), [#117](https://github.com/ManifoldKit/manifold-mlx/issues/117)).
+
+**Tracks ManifoldKit 0.63** ([#121](https://github.com/ManifoldKit/manifold-mlx/issues/121)) — the core pin moves to `.upToNextMinor(from: "0.63.0")`, the release that ships the on-device `Score`/`EvalScorer` eval surface, the `ManifoldTelemetryOTLP` OTLP/HTTP span exporter, and AGENTS.md ambient-instruction skills support. Re-resolved, built, and tested green against the new core.
+
+### Features
+
+* **mlx:** full GBNF engine — any-byte dot matching, Unicode escapes, and precise diagnostics ([#97](https://github.com/ManifoldKit/manifold-mlx/issues/97), [#118](https://github.com/ManifoldKit/manifold-mlx/issues/118))
+
+### Bug Fixes
+
+* **mlx:** terminate tool-calling turns by preserving tool-result history, so a tool call no longer leaves the turn hanging ([#115](https://github.com/ManifoldKit/manifold-mlx/issues/115))
+* **deps:** bump ManifoldKit pin to v0.63.0 ([#121](https://github.com/ManifoldKit/manifold-mlx/issues/121))
+
+### Performance Improvements
+
+* **mlx:** on-device grammar mask + prose-turn circuit breaker for constrained decoding ([#114](https://github.com/ManifoldKit/manifold-mlx/issues/114), [#117](https://github.com/ManifoldKit/manifold-mlx/issues/117))
+
 ## [0.2.14](https://github.com/roryford/manifold-mlx/compare/v0.2.13...v0.2.14) (2026-06-27)
 
 ### Highlights
