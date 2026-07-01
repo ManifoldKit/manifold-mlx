@@ -64,6 +64,20 @@ jobs:
         # test classes and races it.
         run: swift test
 
+  # Advisory drift check: diffs Sources/manifold-tools-mlx's hand-copied
+  # ManifoldTools fixtures against the core tag matching the resolved
+  # ManifoldKit pin (see scripts/check-vendored-sync.sh). Needs only a
+  # checkout — Package.resolved is committed, so no `swift package resolve` /
+  # build is required. continue-on-error keeps it warn-only while it proves
+  # out; promote to `--strict` (drop continue-on-error) once stable.
+  vendored-sync-check:
+    runs-on: macos-15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check vendored fixture sync
+        run: scripts/check-vendored-sync.sh --warn
+
   # Real-model MLX integration tests are NOT run in CI: they need Apple
   # Silicon Metal plus multi-GB local model snapshots that hosted runners
   # don't have, and `xcodebuild` env-var patching (scripts/
