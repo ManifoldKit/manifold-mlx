@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.16](https://github.com/ManifoldKit/manifold-mlx/compare/v0.2.15...v0.2.16) (2026-07-01)
+
+
+### Features
+
+* **tools:** add BFCL argument-level eval subcommand for MLXBackend ([#122](https://github.com/ManifoldKit/manifold-mlx/issues/122)) ([6c185b1](https://github.com/ManifoldKit/manifold-mlx/commit/6c185b13e2a3af297a4edb75bb3cff4639b0222d))
+
+
+### Bug Fixes
+
+* stage mlx.metallib in diffusion backends for swift-run image gen ([#123](https://github.com/ManifoldKit/manifold-mlx/issues/123)) ([e9d4491](https://github.com/ManifoldKit/manifold-mlx/commit/e9d44910aa968e11e117246268940179603035fb))
+
 ## [0.2.15](https://github.com/ManifoldKit/manifold-mlx/compare/v0.2.14...v0.2.15) (2026-06-28)
 
 ### Highlights
