@@ -6,3 +6,10 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+
+# LLVM code-coverage raw profile byproduct (e.g. from `swift test --enable-code-coverage`).
+*.profraw
+
+# Runtime scratch dir for manifold-tools-mlx transcripts/dumps
+# (main.swift's defaultOutputURL() and the bfcl driver's --dump both default here).
+/tmp/
