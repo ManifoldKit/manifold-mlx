@@ -1,14 +1,10 @@
 name: Canary (core main)
 
-# Builds + tests THIS repo against ManifoldKit/ManifoldKit's main HEAD (NOT the
-# latest published tag) to catch a core seam move before it ships. A failure
-# means the core seam moved — not that this repo regressed.
-#
-# Previously a no-op for unreleased breaks: `rm Package.resolved && swift
-# package resolve` against a `.upToNextMinor` pin only ever resolves to the
-# highest PUBLISHED tag, never main — so it silently tested already-released
-# core and gave false confidence. Now it checks out core main and `swift
-# package edit`s the dependency to point at it.
+# Thin shim over the org reusable workflow — see
+# https://github.com/ManifoldKit/.github/blob/main/WORKFLOWS.md
+# for what companion-canary.yml actually does (builds + tests this repo
+# against ManifoldKit/ManifoldKit's core-ref HEAD via swift package edit).
+
 on:
   schedule:
     - cron: "17 4 * * *"   # nightly, 04:17 UTC (quiet hour)
@@ -16,36 +12,6 @@ on:
   repository_dispatch:
     types: [core-release]
 
-permissions:
-  contents: read
-
 jobs:
   canary:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check out ManifoldKit main
-        uses: actions/checkout@v4
-        with:
-          repository: ManifoldKit/ManifoldKit
-          ref: main
-          path: core
-      - name: Select newest Xcode 26 toolchain
-        # The image default (Xcode 16.4 / Swift 6.1) mis-resolves the
-        # dependency graph: its SwiftPM does not prune AnyLanguageModel's
-        # trait-disabled mlx-swift-lm 2.x edge inside core, producing a bogus
-        # "could not be resolved" conflict with mlx-swift-lm 3.x. Swift 6.3
-        # (Xcode 26.3) prunes it correctly — same toolchain as the local gate.
-        run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)/Contents/Developer"
-          swift --version
-      - name: Point ManifoldKit dependency at core main checkout
-        # `swift package edit` swaps the dependency to the local main checkout,
-        # bypassing the .upToNextMinor pin (published-tags-only) and
-        # Package.resolved without dirtying Package.swift.
-        run: swift package edit manifoldkit --path ./core
-      - name: Build
-        run: swift build
-      - name: Test
-        # NO --parallel (process-global claims registry; see ci.yml).
-        run: swift test
+    uses: ManifoldKit/.github/.github/workflows/companion-canary.yml@main
