@@ -105,6 +105,13 @@ public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Senda
     }
 
     public func loadModel(from url: URL) async throws {
+        // Stage the bundled `mlx.metallib` next to the running binary before any
+        // MLX GPU work — see `MLXMetallibStaging` and `MLXBackend.loadModel`. A
+        // diffusion-only consumer never loads a text model, so without this the
+        // first generate aborts with "Failed to load the default metallib" under a
+        // plain `swift build` / `swift run` (issue #82). No-op under Xcode builds.
+        MLXMetallibStaging.ensureStaged()
+
         let preset = try Self.detectPreset(at: url)
         let inputs = try Self.loadPlanInputs(at: url, preset: preset)
         let plan = ImageModelLoadPlan.compute(inputs: inputs)
