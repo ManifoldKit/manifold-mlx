@@ -95,6 +95,16 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
     }
 
     public func loadModel(from url: URL) async throws {
+        // Stage the bundled `mlx.metallib` next to the running binary before any
+        // MLX GPU work. Under a command-line `swift build` / `swift run` this is
+        // the only way mlx-swift's colocated metallib lookup finds a library;
+        // without it the first denoise aborts with "Failed to load the default
+        // metallib" (issue #82). The text `MLXBackend` already stages on load, but
+        // a diffusion-only consumer never loads a text model — so the diffusion
+        // backends must stage themselves or staging never runs. No-op under Xcode
+        // builds / when no bundled metallib exists.
+        MLXMetallibStaging.ensureStaged()
+
         // Try flux.swift's own quantized format first (requires metadata.json).
         let textToImage: any TextToImageGenerator
         // Whether the diffusers branch detected pre-quantized 4-bit weights and
