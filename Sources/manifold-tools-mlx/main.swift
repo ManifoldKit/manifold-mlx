@@ -93,6 +93,9 @@ struct CLI {
         let text = """
         manifold-tools-mlx — tool-calling validation against a real MLX model
 
+        SUBCOMMANDS
+          bfcl      BFCL argument-level eval (run `bfcl --help` for flags)
+
         USAGE
           manifold-tools-mlx --model <path> [--scenario <id|all>]
                     [--output path.jsonl] [--fixtures-root <dir>] [--list]
@@ -216,6 +219,11 @@ func fmt3(_ value: Double) -> String { String(format: "%.3f", value) }
 @MainActor
 func runCLI() async -> Int32 {
     let argv = Array(CommandLine.arguments.dropFirst())
+    // BFCL argument-level eval subcommand — drives the shared ManifoldTools
+    // BFCLRunner against this package's MLXBackend (mirrors core manifold-tools).
+    if argv.first == "bfcl" {
+        return await BFCLMLXCLI.run(Array(argv.dropFirst()))
+    }
     let cli = CLI.parse(argv)
 
     let scenarios: [Scenario]
