@@ -3,22 +3,20 @@
 A tool-calling validation CLI that runs ManifoldKit's bundled tool-calling
 scenarios against a **real MLX model** (e.g. Gemma) on Apple Silicon.
 
-It reuses ManifoldKit's published `ManifoldTools` library product — its reference
-toolset, `ScenarioRunner`, and JSONL `TranscriptLogger`. This target only adds
-the MLX backend wiring and a small argument parser; no ManifoldKit core changes
-are needed.
+It reuses ManifoldKit's published `ManifoldTools` library product — its bundled
+scenario corpus (`ScenarioLoader.loadBuiltIn()`), fixture tree
+(`ToolFixtures.bundledRoot()`), reference toolset, `ScenarioRunner`,
+`VLModelDetector`, JSONL `TranscriptLogger`, and the shared
+`ScenarioCLIHarness` (common flag parsing / scenario filtering / run loop /
+exit-code policy). This target only adds the MLX backend wiring, the
+`--extra-tools` decoy pool, BFCL wiring, and per-run conformance-record output;
+no ManifoldKit core changes are needed.
 
-The scenario JSONs and the `read_file` / `list_dir` fixture tree are **vendored
-copies** bundled as `.copy` resources and loaded via `Bundle.module` +
-`ScenarioLoader.load(from:)`, because `ScenarioLoader.loadBuiltIn()` resolves its
-directory relative to the current working directory (a ManifoldKit checkout) and
-is unusable from this companion repo.
-
-> **Vendored-copy drift warning.** `Sources/manifold-tools-mlx/Scenarios/built-in/`
-> and `Sources/manifold-tools-mlx/Fixtures/manifold-tools/` are hand-copied from
-> ManifoldKit's `Sources/ManifoldTools/Scenarios/built-in/` and
-> `Tests/Fixtures/manifold-tools/` respectively. They can drift when it changes its
-> scenarios or fixtures. Re-sync them by hand on each ManifoldKit pin bump.
+Everything ManifoldTools ships (scenario JSONs, the `read_file` / `list_dir`
+fixture tree) resolves via `Bundle.module` inside the `ManifoldTools` package
+itself — since ManifoldKit 0.62 (`ScenarioLoader.loadBuiltIn()`, #2042) and the
+addition of `ToolFixtures.bundledRoot()` (#1749 follow-up), there is nothing
+left to vendor here, and no vendored-copy drift to track.
 
 ## Usage
 

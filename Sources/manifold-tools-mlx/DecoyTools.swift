@@ -97,8 +97,8 @@ enum DecoyTools {
     static var maxCount: Int { pool.count }
 
     /// Names of the first `count` decoys, in selection order. Used to augment a
-    /// scenario's `requiredTools` so `ScenarioRunner`'s advertise-filter lets
-    /// them through, and to detect wrong-tool selections after a run.
+    /// scenario's advertised set (via `ScenarioRunner(passAllRegisteredTools:
+    /// true)`) and to detect wrong-tool selections after a run.
     static func names(count: Int) -> [String] {
         pool.prefix(max(0, count)).map(\.name)
     }

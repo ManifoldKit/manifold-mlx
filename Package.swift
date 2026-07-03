@@ -151,9 +151,14 @@ let package = Package(
             path: "Tests/ManifoldMLXIntegrationTests"
         ),
         // Tool-calling validation CLI: reuses ManifoldKit's published
-        // ManifoldTools library (its bundled scenarios + reference toolset)
-        // and drives them against a real MLX model. Needs Apple Silicon +
-        // Metal + a local model dir to actually run; compiles everywhere.
+        // ManifoldTools library (its bundled scenarios + reference toolset +
+        // fixture tree via `ToolFixtures.bundledRoot()`, plus the shared
+        // `ScenarioCLIHarness`) and drives them against a real MLX model.
+        // Needs Apple Silicon + Metal + a local model dir to actually run;
+        // compiles everywhere. No local resources — the fixture tree that
+        // used to be vendored here (`Fixtures/manifold-tools/`) is
+        // md5-identical to core's copy and is now consumed directly from the
+        // `ManifoldTools` resource bundle (see #2042/#1749).
         .executableTarget(
             name: "manifold-tools-mlx",
             dependencies: [
@@ -162,10 +167,7 @@ let package = Package(
                 "ManifoldMLX",
             ],
             path: "Sources/manifold-tools-mlx",
-            exclude: ["README.md"],
-            resources: [
-                .copy("Fixtures/manifold-tools"),
-            ]
+            exclude: ["README.md"]
         ),
     ]
 )

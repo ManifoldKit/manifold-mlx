@@ -64,25 +64,6 @@ jobs:
         # test classes and races it.
         run: swift test
 
-  # Advisory drift check: diffs Sources/manifold-tools-mlx's hand-copied
-  # ManifoldTools fixtures against the core tag matching the resolved
-  # ManifoldKit pin (see scripts/check-vendored-sync.sh). Needs only a
-  # checkout — Package.resolved is committed, so no `swift package resolve` /
-  # build is required. The script itself always exits 0 in --warn mode, so
-  # continue-on-error only guards against a genuine script bug, not real
-  # drift. Step-level (not job-level) continue-on-error: a failed job-level
-  # continue-on-error still renders a red X on this job's own check in the PR
-  # UI (only the overall check-suite/required-status-check stays green) —
-  # confusing for something meant to be silent-advisory. Step-level hides it
-  # entirely. Promote to `--strict` (drop continue-on-error) once stable.
-  vendored-sync-check:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Check vendored fixture sync
-        continue-on-error: true
-        run: scripts/check-vendored-sync.sh --warn
-
   # Real-model MLX integration tests are NOT run in CI: they need Apple
   # Silicon Metal plus multi-GB local model snapshots that hosted runners
   # don't have, and `xcodebuild` env-var patching (scripts/

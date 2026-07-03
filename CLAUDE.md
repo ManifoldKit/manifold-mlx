@@ -45,17 +45,15 @@ full rebuild+retest against the new core, and admin-merges a `fix:` PR — which
 trips this repo's own `release-please` for a patch release. Commits here follow
 Conventional Commits; Release Please reads them for version bumps.
 
-## Vendored-scenario / fixture drift
+## No more vendored scenarios / fixtures
 
-`Sources/manifold-tools-mlx/Fixtures/manifold-tools/` is a hand-copied vendored
-tree from ManifoldKit core's `Tests/Fixtures/manifold-tools/`, bundled as a
-`.copy` resource for the `manifold-tools-mlx` CLI (`ScenarioLoader.loadBuiltIn()`
-resolves scenarios directly via `Bundle.module` from the `ManifoldTools` product
-since MK 0.62 / #2042, so **scenarios themselves are no longer vendored here** —
-only the `read_file`/`list_dir` fixture tree still is). Vendored copies drift
-silently when core changes its fixtures without a matching update here.
-
-Run `scripts/check-vendored-sync.sh` (optionally `--strict` to fail on drift) to
-diff local vendored files against the core tag matching the resolved ManifoldKit
-pin. It's wired into `ci.yml` as a warn-only (`continue-on-error: true`) step —
-promote to blocking only after confirming it's stable.
+`manifold-tools-mlx` no longer vendors any ManifoldTools content. Scenarios
+resolve via `ScenarioLoader.loadBuiltIn()` (`Bundle.module` on the published
+`ManifoldTools` product, since MK 0.62 / #2042) and the `read_file`/`list_dir`
+fixture tree resolves via `ScenarioCLIHarness.resolveFixturesRoot(_:)` →
+`ToolFixtures.bundledRoot()` — both ship inside `ManifoldTools`'s own resource
+bundle, so there is nothing left here to drift or re-sync. The former
+hand-copied `Sources/manifold-tools-mlx/Fixtures/manifold-tools/` tree and
+`scripts/check-vendored-sync.sh` drift-check (plus its `ci.yml`
+`vendored-sync-check` job) were removed accordingly — see the cross-repo
+simplification plan item D1.
