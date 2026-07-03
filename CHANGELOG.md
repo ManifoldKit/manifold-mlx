@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.17](https://github.com/ManifoldKit/manifold-mlx/compare/v0.2.16...v0.2.17) (2026-07-03)
+
+### Highlights
+
+**Tracks ManifoldKit 0.65** ([#129](https://github.com/ManifoldKit/manifold-mlx/issues/129)) — the core pin moves to `.upToNextMinor(from: "0.65.0")`, the release that honors advertised structured-output and cache-usage capabilities on cloud backends and removes dead public surface flagged by the inert-code audit. Re-resolved, built, and tested green against the new core.
+
+### Bug Fixes
+
+* Bump ManifoldKit pin to v0.65.0 ([#129](https://github.com/ManifoldKit/manifold-mlx/issues/129))
+
 ## [0.2.16](https://github.com/ManifoldKit/manifold-mlx/compare/v0.2.15...v0.2.16) (2026-07-02)
 
 
