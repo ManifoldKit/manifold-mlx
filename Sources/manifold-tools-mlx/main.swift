@@ -2,10 +2,14 @@
 // against a real MLX model (e.g. Gemma) on Apple Silicon.
 //
 // This reuses ManifoldKit's published `ManifoldTools` library product: the
-// bundled scenarios (`ScenarioLoader.loadBuiltIn`), the reference toolset, the
-// `ScenarioRunner`, and the JSONL `TranscriptLogger`. The only thing this
-// target adds is the MLX backend wiring + a small arg parser. No ManifoldKit
-// core changes are required.
+// bundled scenarios (`ScenarioLoader.loadBuiltIn`), the bundled fixture tree
+// (`ToolFixtures.bundledRoot()` via `ScenarioCLIHarness.resolveFixturesRoot`),
+// the reference toolset, `ScenarioRunner`, `VLModelDetector`, the JSONL
+// `TranscriptLogger`, and the shared `ScenarioCLIHarness` (common flag
+// parsing, scenario filtering, the run loop, and exit-code policy). The only
+// things this target adds are the MLX backend wiring, the `--extra-tools`
+// decoy pool, the `bfcl` subcommand, and per-run conformance-record/matrix
+// output. No ManifoldKit core changes are required.
 //
 // Structure mirrors ManifoldKit's `Sources/manifold-tools/main.swift`, trimmed:
 // the `test-uplift` subcommand and the Ollama / mock backend factories are
@@ -15,19 +19,24 @@ import ManifoldInference
 import ManifoldTools
 import ManifoldMLX
 
-/// Hand-rolled argument parser — pulling in `swift-argument-parser` for a small
-/// harness is not worth the Package.swift churn.
+/// Hand-rolled argument parser for this CLI's own flags (`--model`,
+/// `--emit-records`) — pulling in `swift-argument-parser` for a small harness
+/// is not worth the Package.swift churn. Flags shared with the companion CLIs
+/// (`--scenario`, `--output`, `--fixtures-root`, `--extra-tools`, `--list`,
+/// `--help`) are parsed by `ScenarioCLIHarness.parseCommonFlags`.
 struct CLI {
 
-    var scenarioFilter: String = "all"
+    var common: ScenarioCLIHarness.Options
     var modelPath: String?
-    var output: URL = defaultOutputURL()
-    var fixturesRoot: URL? = nil
     var emitRecords: URL? = nil
-    var list: Bool = false
+
+    var scenarioFilter: String { common.scenarioFilter }
+    var output: URL { common.output }
+    var fixturesRoot: URL? { common.fixturesRoot }
+    var list: Bool { common.list }
     /// Number of decoy tools to advertise alongside each scenario's required
     /// tools, to measure correct-tool selection under distractor pressure.
-    var extraTools: Int = 0
+    var extraTools: Int { common.extraTools }
 
     static func defaultOutputURL() -> URL {
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -42,45 +51,42 @@ struct CLI {
         exit(2)
     }
 
+    /// Parses the flags common to every scenario-CLI harness consumer via
+    /// `ScenarioCLIHarness`, then walks the remainder for this CLI's own
+    /// flags (`--model`, `--emit-records`).
     static func parse(_ argv: [String]) -> CLI {
-        var cli = CLI()
+        let commonOptions: ScenarioCLIHarness.Options
+        let remainder: [String]
+        switch ScenarioCLIHarness.parseCommonFlags(argv, defaultOutput: defaultOutputURL()) {
+        case .options(let options, let rest):
+            commonOptions = options
+            remainder = rest
+        case .helpRequested:
+            printUsage()
+            exit(0)
+        case .failure(let message):
+            fail(message)
+        }
+        // `ScenarioCLIHarness.parseCommonFlags` only enforces `--extra-tools`
+        // is a non-negative integer — this CLI's decoy pool is finite, so
+        // re-validate the shared-parsed value against its bound here.
+        guard commonOptions.extraTools <= DecoyTools.maxCount else {
+            fail("--extra-tools \(commonOptions.extraTools) exceeds the decoy pool size (\(DecoyTools.maxCount))")
+        }
+
+        var cli = CLI(common: commonOptions)
         var i = 0
-        while i < argv.count {
-            let arg = argv[i]
+        while i < remainder.count {
+            let arg = remainder[i]
             switch arg {
-            case "--scenario":
-                i += 1
-                guard i < argv.count else { fail("--scenario requires a value") }
-                cli.scenarioFilter = argv[i]
             case "--model":
                 i += 1
-                guard i < argv.count else { fail("--model requires a value") }
-                cli.modelPath = argv[i]
-            case "--output":
-                i += 1
-                guard i < argv.count else { fail("--output requires a value") }
-                cli.output = URL(fileURLWithPath: argv[i])
-            case "--fixtures-root":
-                i += 1
-                guard i < argv.count else { fail("--fixtures-root requires a value") }
-                cli.fixturesRoot = URL(fileURLWithPath: argv[i], isDirectory: true)
+                guard i < remainder.count else { fail("--model requires a value") }
+                cli.modelPath = remainder[i]
             case "--emit-records":
                 i += 1
-                guard i < argv.count else { fail("--emit-records requires a value") }
-                cli.emitRecords = URL(fileURLWithPath: argv[i])
-            case "--extra-tools":
-                i += 1
-                guard i < argv.count else { fail("--extra-tools requires a value") }
-                guard let n = Int(argv[i]), n >= 0 else { fail("--extra-tools requires a non-negative integer") }
-                guard n <= DecoyTools.maxCount else {
-                    fail("--extra-tools \(n) exceeds the decoy pool size (\(DecoyTools.maxCount))")
-                }
-                cli.extraTools = n
-            case "--list":
-                cli.list = true
-            case "--help", "-h":
-                printUsage()
-                exit(0)
+                guard i < remainder.count else { fail("--emit-records requires a value") }
+                cli.emitRecords = URL(fileURLWithPath: remainder[i])
             default:
                 fail("unknown argument: \(arg)")
             }
@@ -110,7 +116,7 @@ struct CLI {
           --emit-records <path> Write ConformanceRecord[] JSON to this path after
                                 the run. Enables cross-leg matrix collation.
           --fixtures-root <dir> Root for read_file / list_dir / repo_search tools.
-                                Default: the fixtures bundled with this CLI.
+                                Default: the fixtures bundled with ManifoldTools.
           --extra-tools <N>     Advertise N decoy tools alongside each scenario's
                                 required tools to probe correct-tool selection
                                 under distractor pressure. Default: 0 (no decoys).
@@ -129,20 +135,8 @@ struct CLI {
     }
 }
 
-/// Resolves the fixtures root: explicit `--fixtures-root` override, else the
-/// `manifold-tools` directory bundled as a `.copy` resource with this CLI.
-func resolveFixturesRoot(_ override: URL?) -> URL? {
-    if let override { return override }
-    // `.copy("Fixtures/manifold-tools")` flattens to `<bundle>/manifold-tools`
-    // (SwiftPM copies the leaf directory, dropping the `Fixtures/` prefix), so
-    // the unqualified lookup is the real one. The `subdirectory:` form is a
-    // defensive fallback in case SwiftPM's layout ever changes.
-    return Bundle.module.url(forResource: "manifold-tools", withExtension: nil)
-        ?? Bundle.module.url(forResource: "manifold-tools", withExtension: nil, subdirectory: "Fixtures")
-}
-
 /// Builds a `ToolRegistry` containing ONLY the tools named in
-/// `scenario.requiredTools`.
+/// `scenario.requiredTools`, padded with `extraTools` decoys.
 ///
 /// Advertising all six reference tools to every scenario overloads small models
 /// (the toolset itself warns that results degrade beyond ~5 tools) and makes
@@ -151,9 +145,10 @@ func resolveFixturesRoot(_ override: URL?) -> URL? {
 /// the registry to each scenario's declared dependency removes that confound.
 ///
 /// A scenario with an empty `requiredTools` (e.g. `structured-json-extraction`)
-/// correctly yields a registry with zero tools — that's the intended no-tool
-/// behavior. An unrecognized tool name is logged to stderr and skipped rather
-/// than trapping, so a future scenario referencing a tool this CLI doesn't know
+/// correctly yields a registry with zero required tools (still padded with
+/// decoys when `extraTools > 0`) — that's the intended no-tool behavior. An
+/// unrecognized tool name is logged to stderr and skipped rather than
+/// trapping, so a future scenario referencing a tool this CLI doesn't know
 /// degrades gracefully instead of crashing the whole run.
 @MainActor
 func makeRegistry(for scenario: Scenario, fixturesRoot: URL, extraTools: Int = 0) -> ToolRegistry {
@@ -177,39 +172,14 @@ func makeRegistry(for scenario: Scenario, fixturesRoot: URL, extraTools: Int = 0
                 "manifold-tools-mlx: scenario '\(scenario.id)' requires unknown tool '\(name)' — skipping\n".utf8))
         }
     }
-    // Pad the registry with N decoys so the model has plausible-but-wrong tools
-    // to (mis)select among. Advertising them additionally requires augmenting
-    // the scenario's requiredTools — see `scenarioAdvertising(_:extraToolNames:)`.
+    // Pad the registry with N decoys so the model has plausible-but-wrong
+    // tools to (mis)select among. Advertising them is handled by
+    // `ScenarioRunner(passAllRegisteredTools:)` — see the call site — rather
+    // than by patching `scenario.requiredTools`.
     for decoy in DecoyTools.executors(count: extraTools) {
         registry.register(decoy)
     }
     return registry
-}
-
-/// Returns a copy of `scenario` whose `requiredTools` also lists `extraToolNames`.
-///
-/// `ScenarioRunner` filters the advertised tool definitions to
-/// `requiredTools.contains($0.name)` (ManifoldKit, read-only), so decoys added
-/// to the registry are invisible to the model unless their names appear in
-/// `requiredTools` too. `Scenario`'s memberwise init is internal to ManifoldKit,
-/// so we patch the one field through its `Codable` representation. Augmenting
-/// `requiredTools` does not affect assertions — those key off `assertion.value`,
-/// not this list. A no-op when there are no decoys.
-func scenarioAdvertising(_ scenario: Scenario, extraToolNames: [String]) -> Scenario {
-    guard !extraToolNames.isEmpty else { return scenario }
-    do {
-        let data = try JSONEncoder().encode(scenario)
-        var object = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-        var required = (object["requiredTools"] as? [String]) ?? []
-        required.append(contentsOf: extraToolNames)
-        object["requiredTools"] = required
-        let patched = try JSONSerialization.data(withJSONObject: object)
-        return try JSONDecoder().decode(Scenario.self, from: patched)
-    } catch {
-        FileHandle.standardError.write(Data(
-            "manifold-tools-mlx: could not augment requiredTools for '\(scenario.id)' (\(error)); decoys will be filtered out\n".utf8))
-        return scenario
-    }
 }
 
 /// Fixed 3-decimal formatting for the precision/recall/F1 values so the
@@ -228,9 +198,9 @@ func runCLI() async -> Int32 {
 
     let scenarios: [Scenario]
     do {
-        // MK 0.62 (#2042) fixed `ScenarioLoader.loadBuiltIn()` to resolve via
-        // `Bundle.module` rather than CWD, so we can call it directly. The
-        // previously-vendored `Scenarios/built-in/` copy was removed at that point.
+        // ManifoldKit 0.62 (#2042) fixed `ScenarioLoader.loadBuiltIn()` to
+        // resolve via `Bundle.module` rather than CWD, so it's callable
+        // directly from this companion package with no vendored copy.
         scenarios = try ScenarioLoader.loadBuiltIn()
     } catch {
         FileHandle.standardError.write(Data("failed to load scenarios: \(error)\n".utf8))
@@ -251,41 +221,32 @@ func runCLI() async -> Int32 {
     }
 
     // Pre-flight: refuse VL model directories before attempting to load them.
-    // Loading a vision-language model via the text-only MLX backend path causes
-    // a hard SIGSEGV (exit 139) with an empty log, making failures undebuggable.
-    // The reliable marker of a VL model dir is any of these config files —
-    // extend the array to cover future VL architectures as needed.
-    let vlMarkerFiles: [String] = [
-        "preprocessor_config.json",
-        "processor_config.json",
-        "video_preprocessor_config.json",
-    ]
-    let fm = FileManager.default
-    var isDirectory: ObjCBool = false
-    if fm.fileExists(atPath: modelPath, isDirectory: &isDirectory), isDirectory.boolValue {
-        for marker in vlMarkerFiles {
-            let markerPath = (modelPath as NSString).appendingPathComponent(marker)
-            if fm.fileExists(atPath: markerPath) {
-                CLI.fail("'\(modelPath)' looks like a vision-language model (found \(marker)); "
-                    + "this is a text-only tool harness and would crash on load — skipped")
-            }
-        }
+    // Loading a vision-language model via the text-only MLX backend path
+    // causes a hard SIGSEGV (exit 139) with an empty log, making failures
+    // undebuggable. `VLModelDetector` is ManifoldKit's single canonical
+    // implementation of this check (both manifold-mlx and manifold-llama had
+    // independently hand-rolled it).
+    let modelDirectory = URL(fileURLWithPath: modelPath, isDirectory: true)
+    if let marker = VLModelDetector.matchedMarkerFile(at: modelDirectory) {
+        CLI.fail("'\(modelPath)' looks like a vision-language model (found \(marker)); "
+            + "this is a text-only tool harness and would crash on load — skipped")
     }
 
+    // NOTE: unlike core `manifold-tools` (which treats a scenario-id mismatch
+    // as a runtime failure, exit 1), this CLI has always treated it as a bad
+    // argument (exit 2, standard "manifold-tools-mlx: " prefix) — regression-
+    // guarded by `CLIParseTests.test_unknownScenario_exits2_withStandardPrefix`.
+    // `CLI.fail` (not the generic catch-and-return-1 core uses) preserves that
+    // established, tested contract; flagged as an ambiguity in the PR
+    // description against fully unifying onto the shared harness's exit code.
     let filtered: [Scenario]
-    if cli.scenarioFilter == "all" {
-        filtered = scenarios
-    } else {
-        filtered = scenarios.filter { $0.id == cli.scenarioFilter }
-        if filtered.isEmpty {
-            CLI.fail("no scenario matches id '\(cli.scenarioFilter)' — run --list for valid IDs")
-        }
+    do {
+        filtered = try ScenarioCLIHarness.filterScenarios(scenarios, matching: cli.scenarioFilter)
+    } catch {
+        CLI.fail("\(error)")
     }
 
-    guard let fixturesRoot = resolveFixturesRoot(cli.fixturesRoot) else {
-        FileHandle.standardError.write(Data("could not resolve fixtures root — pass --fixtures-root explicitly\n".utf8))
-        return 1
-    }
+    let fixturesRoot = ScenarioCLIHarness.resolveFixturesRoot(cli.fixturesRoot)
 
     let logger: TranscriptLogger
     do {
@@ -299,7 +260,7 @@ func runCLI() async -> Int32 {
 
     // Load the MLX model once and reuse it across every scenario.
     let backend = MLXBackend()
-    let modelURL = URL(fileURLWithPath: modelPath, isDirectory: true)
+    let modelURL = modelDirectory
     print("Loading MLX model from \(modelURL.path) …")
     do {
         try await backend.loadModel(from: modelURL, plan: .systemManaged(requestedContextSize: 4096))
@@ -314,72 +275,79 @@ func runCLI() async -> Int32 {
         print("Advertising \(cli.extraTools) decoy tool(s) per scenario: \(decoyNames.sorted().joined(separator: ", "))")
     }
 
-    var allPassed = true
+    // Counters captured by the `runOne` closure below — `ScenarioCLIHarness.runAll`
+    // owns the (scenario × model) iteration and PASS/FAIL/error printing; this
+    // CLI's decoy accounting and per-scenario tool-selection metrics still need
+    // to happen per-run, so they're computed inside `runOne` against the
+    // returned `Outcome` and folded into these mutable totals.
     var total = 0
     var passedCount = 0
     var cleanCount = 0
     var decoyCallTotal = 0
-    for scenario in filtered {
-        print("\n── \(scenario.id) via mlx ──")
+
+    let allPassed = await ScenarioCLIHarness.runAll(
+        scenarios: filtered,
+        displayName: "mlx",
+        modelsFor: { _ in [modelURL.lastPathComponent] }
+    ) { scenario, _ in
         total += 1
-        // Build a fresh registry scoped to this scenario's required tools, padded
-        // with N decoys, then advertise the decoys by augmenting requiredTools.
+        // Build a fresh registry scoped to this scenario's required tools,
+        // padded with N decoys.
         let registry = makeRegistry(for: scenario, fixturesRoot: fixturesRoot, extraTools: cli.extraTools)
-        let advertised = scenarioAdvertising(scenario, extraToolNames: DecoyTools.names(count: cli.extraTools))
-        do {
-            // MK 0.57 (#1985) reshaped the harness: `ScenarioRunner` now drives a
-            // production `InferenceService` instead of dispatching tools itself.
-            // We construct a fresh service per scenario, injecting the already-
-            // loaded MLX backend directly via `InferenceService(backend:…)` (the
-            // harness/offline init, which marks the model loaded immediately) and
-            // attaching this scenario's scoped `ToolRegistry`. The runner reads
-            // `service.toolRegistry` to derive the advertised tool definitions and
-            // dispatches each emitted `.toolCall` through it — no per-scenario
-            // re-load of the model (the backend instance is reused).
-            let service = InferenceService(
-                backend: backend,
-                name: "mlx",
-                modelName: modelURL.lastPathComponent,
-                toolRegistry: registry
-            )
-            let runner = ScenarioRunner(service: service, logger: logger)
-            // Run the decoy-augmented scenario so the runner advertises the
-            // decoys; assertions are identical (only requiredTools changed).
-            let outcome = try await runner.run(advertised)
-            for assertion in outcome.assertions {
-                let marker = assertion.passed ? "  PASS" : "  FAIL"
-                print("\(marker) \(assertion.message)")
-            }
-            // Correct-tool selection: a clean dispatch passes every assertion AND
-            // never invokes a decoy. Calling a decoy is always a wrong selection
-            // (the pool is orthogonal to every scenario's real task).
-            let invoked = Set(outcome.toolCallsExecuted)
-            let decoysCalled = invoked.intersection(decoyNames)
-            decoyCallTotal += decoysCalled.count
-            if !decoysCalled.isEmpty {
-                print("  WRONG-TOOL (decoy): \(decoysCalled.sorted().joined(separator: ", "))")
-            }
-            // Classification counts vs the ORIGINAL required tools (not the
-            // decoy-augmented set) — decoys must count as false positives.
-            let expected = Set(scenario.requiredTools)
-            if !expected.isEmpty {
-                let counts = ConfusionCounts.compute(actual: invoked, expected: expected)
-                print("  tools: tp=\(counts.tp) fp=\(counts.fp) fn=\(counts.fn) (p=\(fmt3(counts.precision)) r=\(fmt3(counts.recall)) f1=\(fmt3(counts.f1)))")
-            }
-            if outcome.passed { passedCount += 1 }
-            if outcome.passed && decoysCalled.isEmpty { cleanCount += 1 }
-            if !outcome.passed {
-                allPassed = false
-                print("  final answer: \(outcome.finalAnswer.prefix(200))")
-            }
-        } catch {
-            allPassed = false
-            print("  ERROR \(error)")
+        // MK 0.57 (#1985) reshaped the harness: `ScenarioRunner` now drives a
+        // production `InferenceService` instead of dispatching tools itself.
+        // We construct a fresh service per scenario, injecting the already-
+        // loaded MLX backend directly via `InferenceService(backend:…)` (the
+        // harness/offline init, which marks the model loaded immediately) and
+        // attaching this scenario's scoped `ToolRegistry`. The runner reads
+        // `service.toolRegistry` to derive the advertised tool definitions and
+        // dispatches each emitted `.toolCall` through it — no per-scenario
+        // re-load of the model (the backend instance is reused).
+        let service = InferenceService(
+            backend: backend,
+            name: "mlx",
+            modelName: modelURL.lastPathComponent,
+            toolRegistry: registry
+        )
+        // `passAllRegisteredTools` advertises every registered tool (required
+        // + decoys) to the model when decoys are present — the harness-native
+        // replacement for the old requiredTools-patching hack.
+        let runner = ScenarioRunner(
+            service: service,
+            logger: logger,
+            passAllRegisteredTools: cli.extraTools > 0
+        )
+        let outcome = try await runner.run(scenario)
+
+        // Correct-tool selection: a clean dispatch passes every assertion AND
+        // never invokes a decoy. Calling a decoy is always a wrong selection
+        // (the pool is orthogonal to every scenario's real task).
+        let invoked = Set(outcome.toolCallsExecuted)
+        let decoysCalled = invoked.intersection(decoyNames)
+        decoyCallTotal += decoysCalled.count
+        if !decoysCalled.isEmpty {
+            print("  WRONG-TOOL (decoy): \(decoysCalled.sorted().joined(separator: ", "))")
         }
+        // Classification counts vs the required tools — decoys must count as
+        // false positives.
+        let expected = Set(scenario.requiredTools)
+        if !expected.isEmpty {
+            let counts = ConfusionCounts.compute(actual: invoked, expected: expected)
+            print("  tools: tp=\(counts.tp) fp=\(counts.fp) fn=\(counts.fn) (p=\(fmt3(counts.precision)) r=\(fmt3(counts.recall)) f1=\(fmt3(counts.f1)))")
+        }
+        if outcome.passed { passedCount += 1 }
+        if outcome.passed && decoysCalled.isEmpty { cleanCount += 1 }
+        return outcome
     }
 
     // Re-score from the written JSONL via ConformanceScorer (MK 0.62: fixes
-    // #2043/#2049 precision/recall attribution for multi-call turns).
+    // #2043/#2049 precision/recall attribution for multi-call turns). This is
+    // deliberately NOT `ScenarioCLIHarness.printToolSelectionSummary` — that
+    // helper macro-averages live per-scenario `ConfusionCounts`, which is the
+    // pre-#2043/#2049 computation this CLI moved away from because it
+    // mis-attributed precision/recall on multi-call turns. Re-scoring from the
+    // transcript is the more accurate source; see the PR description for this
+    // as a flagged ambiguity against unifying onto the shared helper.
     // `renderer` is caller-declared — ManifoldMLX uses swift-transformers for
     // chat-template application; `coreCommit` is unknown at CLI runtime.
     let scoringCtx = ConformanceScorer.RecordContext(
@@ -425,13 +393,7 @@ func runCLI() async -> Int32 {
         }
     }
 
-    if allPassed {
-        print("\nAll scenarios passed.")
-        return 0
-    } else {
-        print("\nOne or more scenarios failed — see \(logger.destination.path)")
-        return 1
-    }
+    return ScenarioCLIHarness.finish(allPassed: allPassed, transcriptPath: cli.output)
 }
 
 let exitCode = await runCLI()
