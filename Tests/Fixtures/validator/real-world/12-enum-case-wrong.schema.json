@@ -1,7 +1,0 @@
-{
-  "type": "object",
-  "required": ["units"],
-  "properties": {
-    "units": {"type": "string", "enum": ["metric", "imperial"]}
-  }
-}

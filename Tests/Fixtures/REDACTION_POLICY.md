@@ -4,9 +4,13 @@ Fixtures under `Tests/Fixtures/` are committed to a public repository. Every
 captured request/response must be scrubbed of provider credentials, customer
 identifiers, and per-host metadata before it lands in git.
 
-`FixtureRedactionAuditTest` walks `Tests/Fixtures/backends/` and the existing
-`Tests/Fixtures/ollama/` tree on every test run and fails the build if any of
-the patterns below appear. The same patterns drive the `jq` filter inside
+Core ManifoldKit's `FixtureRedactionAuditTest` enforces this policy over its
+own `Tests/Fixtures/` tree; this repo carries no local copy of that audit
+(the only fixture directory that remains under `Tests/Fixtures/backends/` is
+`mlx`, and its `expected.jsonl` fixtures contain no provider wire traffic to
+redact — see `Tests/Fixtures/backends/mlx/README.md`). The patterns below
+still describe what to scrub before adding any new fixture that does capture
+live request/response traffic, and drive the `jq` filter inside
 `scripts/record-fixture.sh`.
 
 ## Patterns that MUST be redacted

@@ -1,4 +1,0 @@
-{"event":"token","text":"One"}
-{"event":"token","text":", two"}
-{"event":"token","text":", three."}
-{"event":"usage","prompt":12,"completion":48}
