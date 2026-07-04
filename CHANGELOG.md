@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.18](https://github.com/ManifoldKit/manifold-mlx/compare/v0.2.17...v0.2.18) (2026-07-04)
+
+### Highlights
+
+**mlx-swift-lm bumped to 3.31.4** ([#134](https://github.com/ManifoldKit/manifold-mlx/issues/134)) — fixes the gated-DeltaNet broadcast crash that blocked Qwen3.5 from loading (ManifoldKit#2061, upstream ml-explore/mlx-swift-lm#157): `Qwen3.5-9B-4bit` now loads and generates, scoring 22/25 (88%) on the BFCL AST suite. Gemma 4 and Gemma 3n still fail to load, but the failure mode changed from a process-killing mid-generation crash to a clean, catchable missing-weight-key error — both remain open as weight-layout gaps. Co-bumps swift-syntax to 602.0.0 and AnyLanguageModel to 0.9.0.
+
+### Bug Fixes
+
+* **ci:** repair nightly slow lanes — model-loading contract participants, diffusion isGenerating race, de-schedule redundant lane ([#132](https://github.com/ManifoldKit/manifold-mlx/issues/132)) ([d0a59b1](https://github.com/ManifoldKit/manifold-mlx/commit/d0a59b12a89060946ea8b29382b21444af878fa7))
+
 ## [0.2.17](https://github.com/ManifoldKit/manifold-mlx/compare/v0.2.16...v0.2.17) (2026-07-03)
 
 ### Highlights
