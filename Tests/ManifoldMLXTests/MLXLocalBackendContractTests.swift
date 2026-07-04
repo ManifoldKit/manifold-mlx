@@ -117,6 +117,19 @@ final class MLXLocalBackendContractTests: XCTestCase {
         }
     )
 
+    /// Clear the model-URL stash after every test so it only influences the
+    /// gated generation scenario that set it (via
+    /// `skipUnlessRealModelAvailable()`). Without this, on a real-model host
+    /// the stash written by an earlier gated test would leak into every later
+    /// `makeBackend()` in the same process — and
+    /// `test_capabilityGate_disclaimedRequirementThrows` depends on the
+    /// zero-state backend (its passing today under alphabetical ordering is
+    /// luck, not design).
+    override func tearDown() async throws {
+        Self.discoveredModelURL = nil
+        try await super.tearDown()
+    }
+
     /// Skips (via `XCTSkip`) unless a real MLX model is discoverable on this
     /// host, and stashes the discovered URL for `makeBackend` to load.
     ///

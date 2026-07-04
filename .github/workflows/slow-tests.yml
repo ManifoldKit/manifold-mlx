@@ -4,16 +4,18 @@ name: Slow Tests (Nightly)
 # hosted macos-15 runner (no pinned MLX model on disk, no
 # MANIFOLD_DISCOVER_LOCAL_MODELS opt-in).
 #
-# This does NOT produce real-model signal for the two
+# Honest scope: RUN_SLOW_TESTS gates exactly two tests in this repo — the
 # LocalBackendContractRunner generation scenarios in
 # MLXLocalBackendContractTests (test_generate_simplePrompt_emitsTokensInOrder,
-# test_generate_stopsGenerating_afterStreamEnd) — with no model discoverable,
-# `skipUnlessRealModelAvailable()` skips them cleanly. That real-model lane
-# is model-tests.yml, gated on a self-hosted Apple Silicon runner that does
-# not exist yet (workflow_dispatch-only in practice — see its own header).
-# This lane's value is running every OTHER RUN_SLOW_TESTS-gated / fast-lane
-# test in the target on a schedule, as a nightly backstop independent of
-# per-PR CI.
+# test_generate_stopsGenerating_afterStreamEnd) — and those two only execute
+# when a real MLX model is also discoverable
+# (skipUnlessRealModelAvailable()). On this hosted runner no model is
+# present, so they skip and the env var changes nothing. What this lane
+# actually is, therefore, is a nightly re-run of the fast-lane suite
+# (~460 tests) as a backstop independent of per-PR CI; the RUN_SLOW_TESTS
+# env only becomes meaningful if this job is ever pointed at a host with a
+# real model (that real-model lane is model-tests.yml, workflow_dispatch-only
+# until a self-hosted Apple Silicon runner exists — see its header).
 #
 # There is no automated tool in this repo (or core) for re-recording
 # Tests/Fixtures/backends/mlx/streaming/simple-prompt/expected.jsonl — core's

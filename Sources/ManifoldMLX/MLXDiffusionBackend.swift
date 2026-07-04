@@ -161,15 +161,17 @@ public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Senda
             // Strong capture: generation owns a logical unit of work; weak
             // capture would silently drop events on dealloc.
             let task = Task.detached(priority: .userInitiated) { [self] in
-                // Backstop only: `_isGenerating` is cleared explicitly right
-                // before every `continuation.finish()` call below so a
-                // consumer observing stream completion never races a
-                // `isGenerating` read against this defer still being pending
-                // (#132 — `test_stopGeneration_midStream_finishesEarly_andClearsIsGenerating`
-                // flaked ~1-in-6 because the defer ran strictly after
-                // `continuation.finish()` made completion visible to the
-                // consumer).
-                defer { self.withLock { self._isGenerating = false } }
+                // `_isGenerating` is cleared explicitly right before every
+                // `continuation.finish()` below, NOT via a task-level defer.
+                // A defer would fire strictly AFTER finish() makes completion
+                // visible to the consumer, so (a) a consumer reading
+                // `isGenerating` immediately after draining the stream races
+                // the clear (#132 —
+                // `test_stopGeneration_midStream_finishesEarly_andClearsIsGenerating`
+                // flaked ~1-in-6), and (b) a back-to-back second generate()
+                // started after finish() could have its freshly-set flag
+                // clobbered by this task's late-firing defer. All exits from
+                // this do/catch go through one of the finish() sites below.
                 do {
                     // Re-read under lock — unloadModel() could have run, but
                     // _isGenerating=true prevents concurrent unload on the

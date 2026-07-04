@@ -152,7 +152,16 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
 
         return AsyncThrowingStream { [self] continuation in
             let task = Task.detached(priority: .userInitiated) { [self] in
-                defer { self.withLock { self._isGenerating = false } }
+                // `_isGenerating` is cleared explicitly right before every
+                // `continuation.finish()` below, NOT via a task-level defer.
+                // A defer would fire strictly AFTER finish() makes completion
+                // visible to the consumer, so (a) a consumer reading
+                // `isGenerating` immediately after draining the stream races
+                // the clear (same flake as MLXDiffusionBackend, #132), and
+                // (b) a back-to-back second generate() started after finish()
+                // could have its freshly-set flag clobbered by this task's
+                // late-firing defer. All exits from this do/catch go through
+                // one of the finish() sites below.
                 do {
                     guard let generator = self.withLock({ self._generator }) else {
                         throw FluxDiffusionError.notLoaded
@@ -188,10 +197,13 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
 
                     let url = try run.finishImage(to: config.outputDirectory)
                     continuation.yield(.completed(url))
+                    self.withLock { self._isGenerating = false }
                     continuation.finish()
                 } catch is CancellationError {
+                    self.withLock { self._isGenerating = false }
                     continuation.finish()
                 } catch {
+                    self.withLock { self._isGenerating = false }
                     continuation.finish(throwing: error)
                 }
             }
