@@ -241,5 +241,4 @@ final class MLXManifestProbeTests: XCTestCase {
         XCTAssertFalse(MLXModelProbe.isUnsupportedGemma4(modelType: "llama"))
         XCTAssertFalse(MLXModelProbe.isUnsupportedGemma4(modelType: nil))
     }
-
 }
