@@ -241,22 +241,4 @@ final class MLXManifestProbeTests: XCTestCase {
         XCTAssertFalse(MLXModelProbe.isUnsupportedGemma4(modelType: "llama"))
         XCTAssertFalse(MLXModelProbe.isUnsupportedGemma4(modelType: nil))
     }
-
-    // MARK: - isUnsupportedQwen35 (upstream #157 gated-DeltaNet crash guard)
-
-    /// Both the dense and MoE Qwen 3.5 model types crash in the linear-attention
-    /// path and are refused.
-    func test_isUnsupportedQwen35_trueForQwen35Variants() {
-        XCTAssertTrue(MLXModelProbe.isUnsupportedQwen35(modelType: "qwen3_5"))
-        XCTAssertTrue(MLXModelProbe.isUnsupportedQwen35(modelType: "qwen3_5_moe"))
-    }
-
-    /// Earlier Qwen generations (which tick fine) and other architectures are
-    /// unaffected.
-    func test_isUnsupportedQwen35_falseForOtherArchitectures() {
-        XCTAssertFalse(MLXModelProbe.isUnsupportedQwen35(modelType: "qwen2"))
-        XCTAssertFalse(MLXModelProbe.isUnsupportedQwen35(modelType: "qwen3"))
-        XCTAssertFalse(MLXModelProbe.isUnsupportedQwen35(modelType: "qwen3_moe"))
-        XCTAssertFalse(MLXModelProbe.isUnsupportedQwen35(modelType: nil))
-    }
 }

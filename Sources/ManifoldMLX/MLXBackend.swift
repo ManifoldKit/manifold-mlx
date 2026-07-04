@@ -292,9 +292,8 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         // tick in mlx-swift-lm — a tensor is broadcast against the prompt length,
         // raising an uncatchable C++ abort + Swift fatal that takes down the
         // whole process. Covers Gemma 4 (sliding-window/KV-shared cache, upstream
-        // #282/#802) and Qwen 3.5 (gated-DeltaNet linear attention, #157). None
-        // have a released fix. Throwing here turns a process-killing
-        // mid-generation crash into a catchable load error.
+        // #282/#802), which has no released fix. Throwing here turns a
+        // process-killing mid-generation crash into a catchable load error.
         if let reason = MLXModelProbe.unsupportedGenerationReason(at: url) {
             throw InferenceError.modelLoadFailed(underlying: NSError(
                 domain: "ManifoldMLX",
