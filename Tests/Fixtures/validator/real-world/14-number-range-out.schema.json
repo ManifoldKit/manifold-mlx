@@ -1,7 +1,0 @@
-{
-  "type": "object",
-  "required": ["temperature"],
-  "properties": {
-    "temperature": {"type": "number", "minimum": -100, "maximum": 100}
-  }
-}
