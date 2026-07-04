@@ -27,7 +27,7 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.3"),
         // 3.31.3 ships the decoupled MLXHuggingFace target and adds the
         // `gemma4` model_type to LLMTypeRegistry.
-        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.3"),
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.4"),
         // Explicit dep required: mlx-swift-lm no longer pulls
         // swift-transformers transitively.
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.2.0"),
