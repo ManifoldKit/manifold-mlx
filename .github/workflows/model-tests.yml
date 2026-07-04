@@ -15,18 +15,21 @@ name: Model Tests (slow)
 # `RUN_SLOW_TESTS=1` and points the MLX model-discovery helper at a pinned tiny
 # model so the gated scenarios actually execute.
 #
-# IMPORTANT: hosted GitHub runners have no Apple-Silicon Metal device, so the
-# `swift test` step here only runs to completion when a self-hosted Apple
-# Silicon runner with the pinned model on disk is available. Until one exists
-# this lane is `workflow_dispatch`-only in practice — the nightly `schedule`
-# trigger is wired so it starts producing signal automatically the moment a
-# capable runner is registered. See ci.yml's `integration-tests` stub and
-# scripts/test-mlx-integration.sh for the matching real-model story.
+# IMPORTANT: hosted GitHub runners have no pinned MLX model on disk, so the
+# `swift test` step here only runs to completion when this job is retargeted
+# at a self-hosted Apple Silicon runner that carries the pinned model — one
+# does not exist yet. Until then this lane is `workflow_dispatch`-only: the
+# `schedule` trigger that used to run it nightly on the hosted runner was
+# removed (2026-07) because it was guaranteed red for the wrong reason —
+# `MLXLocalBackendContractTests` had no model-loading path to exercise even
+# when RUN_SLOW_TESTS=1 was set (see #132) — so this workflow's own "Guard
+# against an all-skipped (vacuous) run" step failed every single night with
+# zero actionable signal, purely spending CI minutes. Re-add a `schedule:`
+# trigger once a capable self-hosted runner is registered. See ci.yml's
+# `integration-tests` stub and scripts/test-mlx-integration.sh for the
+# matching real-model story.
 
 on:
-  schedule:
-    # 07:00 UTC nightly — after the per-PR CI lane is quiet.
-    - cron: '0 7 * * *'
   workflow_dispatch:
     inputs:
       model:

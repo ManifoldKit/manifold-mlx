@@ -1,14 +1,30 @@
 name: Slow Tests (Nightly)
 
-# Runs the RUN_SLOW_TESTS-gated unit tests on a nightly schedule.
-# These tests exercise the LocalBackendContractRunner's real-generation
-# scenarios, which require RUN_SLOW_TESTS=1 to unsuppress. They do NOT
-# require a real MLX model or Apple Silicon — the slow gate exists purely
-# to keep wall-clock CI time bounded on per-PR runs.
+# Runs the full ManifoldMLXTests target nightly with RUN_SLOW_TESTS=1, on a
+# hosted macos-15 runner (no pinned MLX model on disk, no
+# MANIFOLD_DISCOVER_LOCAL_MODELS opt-in).
 #
-# If the fixture at Tests/Fixtures/backends/mlx/streaming/simple-prompt/
-# expected.jsonl diverges from the current model output, re-record it:
-#   RUN_SLOW_TESTS=1 scripts/record-fixture.sh mlx streaming/simple-prompt
+# This does NOT produce real-model signal for the two
+# LocalBackendContractRunner generation scenarios in
+# MLXLocalBackendContractTests (test_generate_simplePrompt_emitsTokensInOrder,
+# test_generate_stopsGenerating_afterStreamEnd) — with no model discoverable,
+# `skipUnlessRealModelAvailable()` skips them cleanly. That real-model lane
+# is model-tests.yml, gated on a self-hosted Apple Silicon runner that does
+# not exist yet (workflow_dispatch-only in practice — see its own header).
+# This lane's value is running every OTHER RUN_SLOW_TESTS-gated / fast-lane
+# test in the target on a schedule, as a nightly backstop independent of
+# per-PR CI.
+#
+# There is no automated tool in this repo (or core) for re-recording
+# Tests/Fixtures/backends/mlx/streaming/simple-prompt/expected.jsonl — core's
+# scripts/record-fixture.sh takes a different (redaction-pipe) interface and
+# does not apply here. To re-record by hand: on Apple Silicon with a real MLX
+# model discoverable (MLX_TEST_MODEL / MANIFOLD_DISCOVER_LOCAL_MODELS=1), run
+# the participant's generate() call directly (see
+# MLXLocalBackendContractTests.makeBackend) against the model, capture the
+# emitted GenerationEvent stream, and hand-write it as one JSON object per
+# line into expected.jsonl (see Tests/Fixtures/backends/mlx/README.md for the
+# line format).
 on:
   schedule:
     - cron: '0 3 * * *'

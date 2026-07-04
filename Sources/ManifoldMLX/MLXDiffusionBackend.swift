@@ -161,6 +161,14 @@ public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Senda
             // Strong capture: generation owns a logical unit of work; weak
             // capture would silently drop events on dealloc.
             let task = Task.detached(priority: .userInitiated) { [self] in
+                // Backstop only: `_isGenerating` is cleared explicitly right
+                // before every `continuation.finish()` call below so a
+                // consumer observing stream completion never races a
+                // `isGenerating` read against this defer still being pending
+                // (#132 — `test_stopGeneration_midStream_finishesEarly_andClearsIsGenerating`
+                // flaked ~1-in-6 because the defer ran strictly after
+                // `continuation.finish()` made completion visible to the
+                // consumer).
                 defer { self.withLock { self._isGenerating = false } }
                 do {
                     // Re-read under lock — unloadModel() could have run, but
@@ -196,16 +204,20 @@ public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Senda
                     }
 
                     guard producedAny else {
+                        self.withLock { self._isGenerating = false }
                         continuation.finish(throwing: MLXDiffusionError.noLatentsProduced)
                         return
                     }
 
                     let imageURL = try run.finishImage(to: config.outputDirectory)
                     continuation.yield(.completed(imageURL))
+                    self.withLock { self._isGenerating = false }
                     continuation.finish()
                 } catch is CancellationError {
+                    self.withLock { self._isGenerating = false }
                     continuation.finish()
                 } catch {
+                    self.withLock { self._isGenerating = false }
                     continuation.finish(throwing: error)
                 }
             }
