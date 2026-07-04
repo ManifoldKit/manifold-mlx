@@ -44,8 +44,8 @@ final class MLXModelE2ETests: XCTestCase {
         modelURL = mlxDir
 
         // Some architectures load but crash on the first generation tick in
-        // mlx-swift-lm (Gemma 4 — #282/#802; Qwen 3.5 — #157), an uncatchable
-        // C++ abort + Swift fatal that would kill the xctest runner mid-suite.
+        // mlx-swift-lm (Gemma 4 — #282/#802), an uncatchable C++ abort + Swift
+        // fatal that would kill the xctest runner mid-suite.
         // Skip before any load when discovery resolves such a snapshot.
         // `MLXBackend.loadModel` also refuses them defensively (catchable error),
         // but skipping here keeps the lane green rather than red.
