@@ -1,14 +1,32 @@
 name: Slow Tests (Nightly)
 
-# Runs the RUN_SLOW_TESTS-gated unit tests on a nightly schedule.
-# These tests exercise the LocalBackendContractRunner's real-generation
-# scenarios, which require RUN_SLOW_TESTS=1 to unsuppress. They do NOT
-# require a real MLX model or Apple Silicon — the slow gate exists purely
-# to keep wall-clock CI time bounded on per-PR runs.
+# Runs the full ManifoldMLXTests target nightly with RUN_SLOW_TESTS=1, on a
+# hosted macos-15 runner (no pinned MLX model on disk, no
+# MANIFOLD_DISCOVER_LOCAL_MODELS opt-in).
 #
-# If the fixture at Tests/Fixtures/backends/mlx/streaming/simple-prompt/
-# expected.jsonl diverges from the current model output, re-record it:
-#   RUN_SLOW_TESTS=1 scripts/record-fixture.sh mlx streaming/simple-prompt
+# Honest scope: RUN_SLOW_TESTS gates exactly two tests in this repo — the
+# LocalBackendContractRunner generation scenarios in
+# MLXLocalBackendContractTests (test_generate_simplePrompt_emitsTokensInOrder,
+# test_generate_stopsGenerating_afterStreamEnd) — and those two only execute
+# when a real MLX model is also discoverable
+# (skipUnlessRealModelAvailable()). On this hosted runner no model is
+# present, so they skip and the env var changes nothing. What this lane
+# actually is, therefore, is a nightly re-run of the fast-lane suite
+# (~460 tests) as a backstop independent of per-PR CI; the RUN_SLOW_TESTS
+# env only becomes meaningful if this job is ever pointed at a host with a
+# real model (that real-model lane is model-tests.yml, workflow_dispatch-only
+# until a self-hosted Apple Silicon runner exists — see its header).
+#
+# There is no automated tool in this repo (or core) for re-recording
+# Tests/Fixtures/backends/mlx/streaming/simple-prompt/expected.jsonl — core's
+# scripts/record-fixture.sh takes a different (redaction-pipe) interface and
+# does not apply here. To re-record by hand: on Apple Silicon with a real MLX
+# model discoverable (MLX_TEST_MODEL / MANIFOLD_DISCOVER_LOCAL_MODELS=1), run
+# the participant's generate() call directly (see
+# MLXLocalBackendContractTests.makeBackend) against the model, capture the
+# emitted GenerationEvent stream, and hand-write it as one JSON object per
+# line into expected.jsonl (see Tests/Fixtures/backends/mlx/README.md for the
+# line format).
 on:
   schedule:
     - cron: '0 3 * * *'

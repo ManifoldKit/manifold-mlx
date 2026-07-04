@@ -2,22 +2,22 @@
 
 MLX generates non-deterministic token streams because the Metal GPU scheduler
 does not guarantee bit-for-bit reproducibility across runs. Fixtures for the
-`LocalBackendContractTests` MLX participant are therefore captured via
-`scripts/record-fixture.sh` on a specific model against Apple Silicon hardware
-and committed to this directory.
+`LocalBackendContractTests` MLX participant are captured by hand on a specific
+model against Apple Silicon hardware and committed to this directory.
 
 ## Capturing fixtures
 
-Run the following with `RUN_SLOW_TESTS=1` set and an MLX model checked out
-at the path your test expects:
-
-```
-RUN_SLOW_TESTS=1 scripts/record-fixture.sh mlx streaming/simple-prompt
-```
-
-The script calls `generate(prompt: "Hello", systemPrompt: nil, config: GenerationConfig())`
-through the backend and serialises each `GenerationEvent` as a JSON line into
-`streaming/simple-prompt/expected.jsonl`. Example output (model-dependent):
+There is no automated recording tool in this repo (core's
+`scripts/record-fixture.sh` is a generic SSE/NDJSON redaction pipe with an
+incompatible stdin interface — it does not drive a backend). To re-record by
+hand: with `RUN_SLOW_TESTS=1` set and an MLX model discoverable
+(`MLX_TEST_MODEL=<name-or-path>` or `MANIFOLD_DISCOVER_LOCAL_MODELS=1`) on
+Apple Silicon, call
+`generate(prompt: "Hello", systemPrompt: nil, config: GenerationConfig())`
+through `MLXBackend` (mirror `MLXLocalBackendContractTests.makeBackend`'s
+model-loading path), collect the emitted `GenerationEvent`s, and write each
+one as a JSON object per line into `streaming/simple-prompt/expected.jsonl`.
+Example output (model-dependent):
 
 ```jsonl
 {"event":"token","text":"Hello"}
