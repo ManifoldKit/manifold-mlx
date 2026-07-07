@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.19](https://github.com/ManifoldKit/manifold-mlx/compare/v0.2.18...v0.2.19) (2026-07-07)
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.66.0 ([#138](https://github.com/ManifoldKit/manifold-mlx/issues/138)) ([e92b283](https://github.com/ManifoldKit/manifold-mlx/commit/e92b283b0e944349b1da794e666834b4183e6bca))
+* lift Qwen 3.5 generation-crash guard (mlx-swift-lm 3.31.4 fixes [#157](https://github.com/ManifoldKit/manifold-mlx/issues/157)) ([#135](https://github.com/ManifoldKit/manifold-mlx/issues/135)) ([5ad93e5](https://github.com/ManifoldKit/manifold-mlx/commit/5ad93e50f99e04f34b5a8443272df755c201e232))
+
 ## [0.2.18](https://github.com/ManifoldKit/manifold-mlx/compare/v0.2.17...v0.2.18) (2026-07-04)
 
 ### Highlights
