@@ -794,7 +794,7 @@ final class MLXBackendGenerationTests: XCTestCase {
             ToolDefinition(name: "get_weather", description: "weather", parameters: .object([:]))
         ]
 
-        let stream = try backend.generate(prompt: "weather?", systemPrompt: nil, config: config)
+        let stream = try backend.generate(prompt: "weather?", systemPrompt: nil, config: config, hints: GenerationRuntimeHints())
         _ = try await collectAllEvents(from: stream)
 
         let threaded = try XCTUnwrap(mock.lastTools, "prepare(messages:tools:) must be the path taken")
@@ -820,7 +820,7 @@ final class MLXBackendGenerationTests: XCTestCase {
             ToolDefinition(name: "get_weather", description: "weather", parameters: .object([:]))
         ]
 
-        let stream = try backend.generate(prompt: "weather?", systemPrompt: nil, config: config)
+        let stream = try backend.generate(prompt: "weather?", systemPrompt: nil, config: config, hints: GenerationRuntimeHints())
         _ = try await collectAllEvents(from: stream)
 
         // The tools-aware overload IS hit, but with a nil tools array (prose path).

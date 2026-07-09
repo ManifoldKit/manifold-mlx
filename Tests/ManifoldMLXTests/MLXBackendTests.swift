@@ -93,7 +93,7 @@ final class MLXBackendTests: XCTestCase {
 
     func test_generate_beforeLoad_throws() {
         XCTAssertThrowsError(
-            try MLXBackend().generate(prompt: "hi", systemPrompt: nil, config: GenerationConfig())
+            try MLXBackend().generate(prompt: "hi", systemPrompt: nil, config: GenerationConfig(), hints: GenerationRuntimeHints())
         )
     }
 
@@ -107,7 +107,7 @@ final class MLXBackendTests: XCTestCase {
         var config = GenerationConfig()
         config.grammar = "root ::= \"yes\" | \"no\""
         XCTAssertThrowsError(
-            try MLXBackend().generate(prompt: "hi", systemPrompt: nil, config: config)
+            try MLXBackend().generate(prompt: "hi", systemPrompt: nil, config: config, hints: GenerationRuntimeHints())
         ) { error in
             if case InferenceError.unsupportedGrammar = error {
                 return XCTFail("A supported grammar must not throw unsupportedGrammar, got \(error)")
@@ -125,7 +125,7 @@ final class MLXBackendTests: XCTestCase {
         var config = GenerationConfig()
         config.grammar = "notroot ::= \"x\""
         XCTAssertThrowsError(
-            try MLXBackend().generate(prompt: "hi", systemPrompt: nil, config: config)
+            try MLXBackend().generate(prompt: "hi", systemPrompt: nil, config: config, hints: GenerationRuntimeHints())
         ) { error in
             guard case InferenceError.unsupportedGrammar(let reason) = error else {
                 return XCTFail("Expected unsupportedGrammar, got \(error)")

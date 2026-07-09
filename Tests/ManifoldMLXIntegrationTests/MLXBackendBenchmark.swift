@@ -42,7 +42,7 @@ final class MLXBackendBenchmark: XCTestCase {
 
     func test_throughput() async throws {
         let config = GenerationConfig(temperature: 0.3, maxOutputTokens: 300)
-        let warmup = try backend.generate(prompt: mlxBenchPrompt, systemPrompt: nil, config: config)
+        let warmup = try backend.generate(prompt: mlxBenchPrompt, systemPrompt: nil, config: config, hints: GenerationRuntimeHints())
         for try await _ in warmup.events {}
 
         var results: [(ttftMs: Double, totalMs: Double, tokens: Int)] = []
@@ -71,7 +71,7 @@ private func mlxTimedGenerate(
     var t1: ContinuousClock.Instant?
     var count = 0
 
-    let stream = try backend.generate(prompt: mlxBenchPrompt, systemPrompt: nil, config: config)
+    let stream = try backend.generate(prompt: mlxBenchPrompt, systemPrompt: nil, config: config, hints: GenerationRuntimeHints())
     for try await event in stream.events {
         if case .token = event {
             if t1 == nil { t1 = ContinuousClock.now }

@@ -87,7 +87,7 @@ final class MLXHybridCacheReuseIntegrationTests: XCTestCase {
     }
 
     private func runTurn(on backend: MLXBackend, prompt: String) async throws -> [GenerationEvent] {
-        let stream = try backend.generate(prompt: prompt, systemPrompt: nil, config: deterministicConfig)
+        let stream = try backend.generate(prompt: prompt, systemPrompt: nil, config: deterministicConfig, hints: GenerationRuntimeHints())
         var events: [GenerationEvent] = []
         for try await event in stream.events { events.append(event) }
         return events
