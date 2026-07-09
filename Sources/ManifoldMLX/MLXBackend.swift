@@ -131,7 +131,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// Thinking-marker pair auto-detected from the loaded model's
     /// `tokenizer_config.json` chat template. `nil` when the model is not
     /// loaded, the chat template is missing, or no known marker pair was
-    /// found in the template. `GenerationConfig.thinkingMarkers` always
+    /// found in the template. `GenerationRuntimeHints.thinkingMarkers` always
     /// overrides this — see the generate path below.
     /// Access only under `stateLock`.
     private var _autoDetectedThinkingMarkers: ThinkingMarkers?
@@ -253,10 +253,12 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// through the backend's surface.
     @_spi(Testing) public static func resolveThinkingMarkers(
         config: GenerationConfig,
+        hints: GenerationRuntimeHints,
         autoDetected: ThinkingMarkers?
     ) -> ThinkingMarkers? {
         MLXGenerationDriver.resolveThinkingMarkers(
             config: config,
+            hints: hints,
             autoDetected: autoDetected
         )
     }
@@ -421,7 +423,8 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     public func generate(
         prompt: String,
         systemPrompt: String?,
-        config: GenerationConfig
+        config: GenerationConfig,
+        hints: GenerationRuntimeHints
     ) throws -> GenerationStream {
         // Single critical section: validate, flip `_isGenerating`, and
         // snapshot every input the driver needs. The driver runs without
@@ -469,7 +472,8 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 grammar: Self.wrapToolCallGrammarIfNeeded(
                     parsedGrammar, dialect: _dialect, tools: config.tools,
                     toolChoice: config.toolChoice
-                )
+                ),
+                hints: hints
             )
             // Consume-once: the tool-dispatch orchestrator re-installs the full
             // tool-aware history before every turn, so clearing it after capture
@@ -512,6 +516,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                         self?.withStateLock { self?._promptCacheState.snapshot } ?? nil
                     },
                     grammar: snapshot.grammar,
+                    hints: snapshot.hints,
                     generationStream: generationStream,
                     continuation: continuation,
                     yieldHook: MLXBackend._yieldHookForTesting
@@ -573,6 +578,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         let kvCacheReuseEligible: Bool
         let pendingSnapshotTask: Task<Void, Never>?
         let grammar: GBNFGrammar?
+        let hints: GenerationRuntimeHints
     }
 
     /// Wraps a *bare* tool-call envelope grammar (the `{"name":…,"arguments":…}`
@@ -687,7 +693,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// Test-only seam: forces the auto-detected thinking markers to a specific
     /// value, simulating what the load path would have read from
     /// `tokenizer_config.json`. Tests use this to verify that
-    /// `config.thinkingMarkers` correctly overrides auto-detection without
+    /// `hints.thinkingMarkers` correctly overrides auto-detection without
     /// having to stage a real model directory.
     @_spi(Testing) public func _injectAutoDetectedThinkingMarkers(_ markers: ThinkingMarkers?) {
         withStateLock { _autoDetectedThinkingMarkers = markers }

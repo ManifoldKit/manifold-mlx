@@ -447,17 +447,19 @@ final class MLXBackendThinkingMarkerResolutionTests: XCTestCase {
         // Even with both override and auto-detected available, zero budget wins (#597).
         let resolved = MLXBackend.resolveThinkingMarkers(
             config: config,
+            hints: GenerationRuntimeHints(),
             autoDetected: .qwen3
         )
         XCTAssertNil(resolved)
     }
 
     func test_resolveThinkingMarkers_prefersConfigOverrideWhenSet() {
-        var config = GenerationConfig()
+        let config = GenerationConfig()
         let override = ThinkingMarkers(open: "<a>", close: "</a>")
-        config.thinkingMarkers = override
+        let hints = GenerationRuntimeHints(thinkingMarkers: override)
         let resolved = MLXBackend.resolveThinkingMarkers(
             config: config,
+            hints: hints,
             autoDetected: .qwen3
         )
         XCTAssertEqual(resolved, override)
@@ -466,6 +468,7 @@ final class MLXBackendThinkingMarkerResolutionTests: XCTestCase {
     func test_resolveThinkingMarkers_fallsBackToAutoDetectedWhenConfigUnset() {
         let resolved = MLXBackend.resolveThinkingMarkers(
             config: GenerationConfig(),
+            hints: GenerationRuntimeHints(),
             autoDetected: .qwen3
         )
         XCTAssertEqual(resolved, .qwen3)
@@ -474,6 +477,7 @@ final class MLXBackendThinkingMarkerResolutionTests: XCTestCase {
     func test_resolveThinkingMarkers_returnsNilWhenNeitherSourceProvided() {
         let resolved = MLXBackend.resolveThinkingMarkers(
             config: GenerationConfig(),
+            hints: GenerationRuntimeHints(),
             autoDetected: nil
         )
         XCTAssertNil(resolved)

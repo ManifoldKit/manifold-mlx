@@ -51,7 +51,11 @@ final class MLXBackendThinkingTests: XCTestCase {
     // MARK: - Helpers for config
 
     private func thinkingConfig() -> GenerationConfig {
-        GenerationConfig(thinkingMarkers: .qwen3)
+        GenerationConfig()
+    }
+
+    private func thinkingHints() -> GenerationRuntimeHints {
+        GenerationRuntimeHints(thinkingMarkers: .qwen3)
     }
 
     // MARK: - 1. Thinking tokens emitted separately from visible tokens
@@ -68,7 +72,8 @@ final class MLXBackendThinkingTests: XCTestCase {
         let stream = try backend.generate(
             prompt: "hi",
             systemPrompt: nil,
-            config: thinkingConfig()
+            config: thinkingConfig(),
+            hints: thinkingHints()
         )
 
         let allEvents = try await collectAllEvents(from: stream)
@@ -134,7 +139,8 @@ final class MLXBackendThinkingTests: XCTestCase {
         let stream = try backend.generate(
             prompt: "hi",
             systemPrompt: nil,
-            config: config
+            config: config,
+            hints: thinkingHints()
         )
 
         let allEvents = try await collectAllEvents(from: stream)
@@ -170,11 +176,12 @@ final class MLXBackendThinkingTests: XCTestCase {
         let backend = MLXBackend()
         backend._inject(mock)
 
-        // config.thinkingMarkers = nil → ThinkingTransform disabled
+        // hints.thinkingMarkers = nil → ThinkingTransform disabled
         let stream = try backend.generate(
             prompt: "hi",
             systemPrompt: nil,
-            config: GenerationConfig()  // no thinkingMarkers
+            config: GenerationConfig(),  // no thinkingMarkers
+            hints: GenerationRuntimeHints()
         )
 
         let allEvents = try await collectAllEvents(from: stream)
@@ -219,13 +226,14 @@ final class MLXBackendThinkingTests: XCTestCase {
         let backend = MLXBackend()
         backend._inject(mock)
 
-        var config = GenerationConfig()
-        config.thinkingMarkers = markers
+        let config = GenerationConfig()
+        let hints = GenerationRuntimeHints(thinkingMarkers: markers)
 
         let stream = try backend.generate(
             prompt: "hi",
             systemPrompt: nil,
-            config: config
+            config: config,
+            hints: hints
         )
 
         let allEvents = try await collectAllEvents(from: stream)
@@ -281,13 +289,14 @@ final class MLXBackendThinkingTests: XCTestCase {
         let backend = MLXBackend()
         backend._inject(mock)
 
-        var config = GenerationConfig(thinkingMarkers: .qwen3)
+        var config = GenerationConfig()
         config.maxThinkingTokens = 2
 
         let stream = try backend.generate(
             prompt: "hi",
             systemPrompt: nil,
-            config: config
+            config: config,
+            hints: thinkingHints()
         )
 
         let events = try await collectAllEvents(from: stream)
@@ -325,12 +334,13 @@ final class MLXBackendThinkingTests: XCTestCase {
         // model's tokenizer_config.json chat template.
         backend._injectAutoDetectedThinkingMarkers(.qwen3)
 
-        // config.thinkingMarkers stays nil — the parser must engage from the
+        // hints.thinkingMarkers stays nil — the parser must engage from the
         // auto-detected fallback.
         let stream = try backend.generate(
             prompt: "hi",
             systemPrompt: nil,
-            config: GenerationConfig()
+            config: GenerationConfig(),
+            hints: GenerationRuntimeHints()
         )
 
         let events = try await collectAllEvents(from: stream)
@@ -359,13 +369,14 @@ final class MLXBackendThinkingTests: XCTestCase {
         backend._injectAutoDetectedThinkingMarkers(.qwen3)
 
         // Caller forces .phi4 to match the actual stream content.
-        var config = GenerationConfig()
-        config.thinkingMarkers = .phi4
+        let config = GenerationConfig()
+        let hints = GenerationRuntimeHints(thinkingMarkers: .phi4)
 
         let stream = try backend.generate(
             prompt: "hi",
             systemPrompt: nil,
-            config: config
+            config: config,
+            hints: hints
         )
 
         let events = try await collectAllEvents(from: stream)
@@ -395,7 +406,8 @@ final class MLXBackendThinkingTests: XCTestCase {
         let stream = try backend.generate(
             prompt: "hi",
             systemPrompt: nil,
-            config: GenerationConfig()
+            config: GenerationConfig(),
+            hints: GenerationRuntimeHints()
         )
 
         let events = try await collectAllEvents(from: stream)
@@ -438,13 +450,14 @@ final class MLXBackendThinkingTests: XCTestCase {
         backend._inject(mock)
 
         // thinkingMarkers is set (template advertises thinking) but maxThinkingTokens = 0.
-        var config = GenerationConfig(thinkingMarkers: .qwen3)
+        var config = GenerationConfig()
         config.maxThinkingTokens = 0
 
         let stream = try backend.generate(
             prompt: "hi",
             systemPrompt: nil,
-            config: config
+            config: config,
+            hints: thinkingHints()
         )
 
         let events = try await collectAllEvents(from: stream)
