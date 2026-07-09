@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/ManifoldKit/manifold-mlx/compare/v0.2.19...v0.3.0) (2026-07-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* `MLXBackend.generate` and `MLXGenerationDriver.generate` require a `hints: GenerationRuntimeHints` parameter. This PR references ManifoldKit's unreleased main branch (core #2152) — it will not build against the released 0.66.0 pin and is staged to merge combined with the core-bump pin bump once the core release ships.
+* MLXBackend.generate(prompt:systemPrompt:config:) now requires a hints: GenerationRuntimeHints parameter to match ManifoldKit 0.67.0's InferenceBackend protocol.
+
+### Features
+
+* adopt GenerationRuntimeHints (config→hints split, ManifoldKit [#2152](https://github.com/ManifoldKit/manifold-mlx/issues/2152)) ([#139](https://github.com/ManifoldKit/manifold-mlx/issues/139)) ([50b6fc3](https://github.com/ManifoldKit/manifold-mlx/commit/50b6fc3cca878a1c7219d0af83caed74afa83b80))
+
+
+### Bug Fixes
+
+* adopt GenerationRuntimeHints for ManifoldKit 0.67.0 ([#140](https://github.com/ManifoldKit/manifold-mlx/issues/140)) ([bc0a92d](https://github.com/ManifoldKit/manifold-mlx/commit/bc0a92d3e4566491798f17bc9b20e9a49bcc7da1))
+
 ## [0.2.19](https://github.com/ManifoldKit/manifold-mlx/compare/v0.2.18...v0.2.19) (2026-07-07)
 
 
