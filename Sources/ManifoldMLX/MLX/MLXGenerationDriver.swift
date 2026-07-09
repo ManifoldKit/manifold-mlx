@@ -132,6 +132,9 @@ import ManifoldInference
         // `config.grammar` and the backend parsed it; the inner loop builds an
         // ``MLXGrammarLogitProcessor`` from it.
         grammar: GBNFGrammar?,
+        // Per-request runtime hints (ManifoldKit #2152) — carries
+        // `thinkingMarkers` now that it has moved off `GenerationConfig`.
+        hints: GenerationRuntimeHints,
         generationStream: GenerationStream,
         continuation: AsyncThrowingStream<GenerationEvent, Error>.Continuation,
         yieldHook: (@Sendable () async -> Void)?
@@ -197,6 +200,7 @@ import ManifoldInference
 
         let resolvedMarkers = resolveThinkingMarkers(
             config: config,
+            hints: hints,
             autoDetected: autoDetectedMarkers
         )
 
@@ -276,7 +280,7 @@ import ManifoldInference
     }
 
     /// Resolves the active thinking-marker pair from the per-request override
-    /// (`config.thinkingMarkers`), then the load-time auto-detected markers.
+    /// (`hints.thinkingMarkers`), then the load-time auto-detected markers.
     /// Returns `nil` when `config.maxThinkingTokens == 0` (issue #597) or when
     /// neither source supplied markers — both cases keep `ThinkingTransform` off.
     ///
@@ -285,19 +289,21 @@ import ManifoldInference
     /// with `MLXBackendHelpersTests`.
     nonisolated static func resolveThinkingMarkers(
         config: GenerationConfig,
+        hints: GenerationRuntimeHints,
         autoDetected: ThinkingMarkers?
     ) -> ThinkingMarkers? {
         if config.maxThinkingTokens == 0 { return nil }
-        return config.thinkingMarkers ?? autoDetected
+        return hints.thinkingMarkers ?? autoDetected
     }
 
     /// Non-static, `@MainActor` forwarder so call sites already inside the
     /// driver's actor don't need to qualify the type.
     func resolveThinkingMarkers(
         config: GenerationConfig,
+        hints: GenerationRuntimeHints,
         autoDetected: ThinkingMarkers?
     ) -> ThinkingMarkers? {
-        Self.resolveThinkingMarkers(config: config, autoDetected: autoDetected)
+        Self.resolveThinkingMarkers(config: config, hints: hints, autoDetected: autoDetected)
     }
 
     /// Drives the MLX stream:
