@@ -22,6 +22,11 @@ final class MLXBackendConformanceTests: XCTestCase,
 
     let contractBackendName = "MLXBackend"
 
+    // Instance-scoped: XCTest instantiates a fresh test case per method, so
+    // this registry starts empty for every method invocation. See
+    // BackendContractChecks.ClaimRegistry.
+    let capabilityClaimRegistry = BackendContractChecks.ClaimRegistry()
+
     func makeContractBackend() -> MLXBackend {
         MLXBackend()
     }
@@ -49,28 +54,33 @@ final class MLXBackendConformanceTests: XCTestCase,
     func test_contract_allCapabilityClaims() {
         // Reset first so a prior run of this method in the same process doesn't
         // leave stale claims that could mask a newly-removed flag.
-        BackendContractChecks.resetCapabilityClaims(forBackend: contractBackendName)
+        BackendContractChecks.resetCapabilityClaims(capabilityClaimRegistry, forBackend: contractBackendName)
 
         BackendContractChecks.claimWithoutBehaviouralAssertion(
+            capabilityClaimRegistry,
             backendName: contractBackendName,
             flag: "supportsToolCalling"
         )
         BackendContractChecks.claimWithoutBehaviouralAssertion(
+            capabilityClaimRegistry,
             backendName: contractBackendName,
             flag: "supportsThinking"
         )
         BackendContractChecks.claimWithoutBehaviouralAssertion(
+            capabilityClaimRegistry,
             backendName: contractBackendName,
             flag: "supportsTokenCounting"
         )
         // GBNF executor (#96): parser + matcher proven in `GBNFGrammarTests`;
         // end-to-end constrained decoding in `MLXGrammarSamplingE2ETests`.
         BackendContractChecks.claimWithoutBehaviouralAssertion(
+            capabilityClaimRegistry,
             backendName: contractBackendName,
             flag: "supportsGrammarConstrainedSampling"
         )
 
         BackendContractChecks.assertCapabilityMetaContract(
+            capabilityClaimRegistry,
             backendName: contractBackendName,
             capabilities: MLXBackend().capabilities
         )
