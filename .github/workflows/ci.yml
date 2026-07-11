@@ -8,6 +8,7 @@ on:
   # which is already the release flow (Highlights rewrite is hand-merged). Any
   # PR touching Sources/Package/etc. is unaffected and still runs the gate.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - 'CHANGELOG.md'
       - '.release-please-manifest.json'
@@ -19,7 +20,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -27,42 +28,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - name: Select newest Xcode 26 toolchain
-        # The image default (Xcode 16.4 / Swift 6.1) mis-resolves the
-        # dependency graph: its SwiftPM does not prune AnyLanguageModel's
-        # trait-disabled mlx-swift-lm 2.x edge inside core, producing a bogus
-        # "could not be resolved" conflict with mlx-swift-lm 3.x. Swift 6.3
-        # (Xcode 26.3) prunes it correctly — same toolchain as the local gate.
-        run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)/Contents/Developer"
-          swift --version
-      - name: Cache SwiftPM dependency material
-        uses: actions/cache@v4
-        with:
-          # Dependency material only (clones, registries, prebuilt binary
-          # artifacts — for manifold-mlx the big win is the cached checkout of the
-          # heavy ML dependency tree). Own-module .build/debug objects are
-          # deliberately NOT cached: SwiftPM embeds absolute paths in module
-          # fingerprints, so restored objects go stale on miss (same lesson
-          # as core's ci.yml).
-          path: |
-            ~/.swiftpm
-            .build/artifacts
-            .build/checkouts
-            .build/repositories
-          key: ${{ runner.os }}-swiftpm-${{ hashFiles('Package.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-swiftpm-
-      - name: Build
-        run: swift build
-      - name: Test
-        # NO --parallel: ManifoldBackendTestKit's BackendContractChecks claims
-        # registry is process-global; explicit parallelism interleaves backend
-        # test classes and races it.
-        run: swift test
+    uses: ManifoldKit/.github/.github/workflows/swift-ci.yml@main
 
   # Real-model MLX integration tests are NOT run in CI: they need Apple
   # Silicon Metal plus multi-GB local model snapshots that hosted runners
