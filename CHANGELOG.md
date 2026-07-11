@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1](https://github.com/ManifoldKit/manifold-mlx/compare/v0.3.0...v0.3.1) (2026-07-11)
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.68.0 ([#142](https://github.com/ManifoldKit/manifold-mlx/issues/142)) ([5602c7c](https://github.com/ManifoldKit/manifold-mlx/commit/5602c7ce05785259f01c03008818b016fa92b074))
+* bump ManifoldKit pin to v0.69.0 (wave-2 ClaimRegistry adapt) ([#144](https://github.com/ManifoldKit/manifold-mlx/issues/144)) ([2196529](https://github.com/ManifoldKit/manifold-mlx/commit/219652903b6404531fac4cb89566cfc937426334))
+
 ## [0.3.0](https://github.com/ManifoldKit/manifold-mlx/compare/v0.2.19...v0.3.0) (2026-07-09)
 
 
