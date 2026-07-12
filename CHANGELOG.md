@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/ManifoldKit/manifold-mlx/compare/v0.3.1...v0.3.2) (2026-07-11)
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.70.0 ([#147](https://github.com/ManifoldKit/manifold-mlx/issues/147)) ([dd4031d](https://github.com/ManifoldKit/manifold-mlx/commit/dd4031d3410a4a1e6f09b10c6b7e481739a0549a))
+
 ## [0.3.1](https://github.com/ManifoldKit/manifold-mlx/compare/v0.3.0...v0.3.1) (2026-07-11)
 
 
