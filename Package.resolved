@@ -1,5 +1,5 @@
 {
-  "originHash" : "74940c090ea91210130404c1348757f24288513d2dee29b9ec93d09776e0adc2",
+  "originHash" : "dfec1ca190eb328644de4bb45111557d90bb5bdb86a32e78c782ebed7ce6d41a",
   "pins" : [
     {
       "identity" : "anylanguagemodel",
@@ -33,8 +33,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/ManifoldKit/ManifoldKit",
       "state" : {
-        "revision" : "9ab6b35627a7bac21accf58de4e0584e27cd4fb0",
-        "version" : "0.70.0"
+        "revision" : "25c1a57c71e0fe1c64d7f95ce8ff01dfd2156181",
+        "version" : "0.71.0"
       }
     },
     {
