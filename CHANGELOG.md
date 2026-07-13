@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.3](https://github.com/ManifoldKit/manifold-mlx/compare/v0.3.2...v0.3.3) (2026-07-13)
+
+
+### Highlights
+
+#### ManifoldKit 0.71.0
+
+Re-pins the core dependency to [ManifoldKit 0.71.0](https://github.com/ManifoldKit/ManifoldKit/releases/tag/v0.71.0) — the Phase A API-surface tightening (29 core internals demoted to `package`) and the experimental-tier declaration. No MLX-side source changes were needed; the full build+test gate passed against the new core unchanged. See [#151](https://github.com/ManifoldKit/manifold-mlx/issues/151).
+
 ## [0.3.2](https://github.com/ManifoldKit/manifold-mlx/compare/v0.3.1...v0.3.2) (2026-07-11)
 
 
