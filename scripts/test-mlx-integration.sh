@@ -130,13 +130,15 @@ SCHEME="$(pick_scheme)"
 echo "==> Using xcodebuild scheme: $SCHEME"
 
 if [[ "$REBUILD" -eq 1 || ! -d "$DERIVED" ]]; then
-    echo "==> Building test bundle (xcodebuild build-for-testing)…"
+    echo "==> Building test bundle (xcodebuild build-for-testing, configuration=${MLX_TEST_CONFIGURATION:-Debug})…"
     rm -rf "$DERIVED"
     xcodebuild build-for-testing \
         -scheme "$SCHEME" \
         -only-testing ManifoldMLXIntegrationTests \
         -destination 'platform=macOS' \
         -derivedDataPath "$DERIVED" \
+        -configuration "${MLX_TEST_CONFIGURATION:-Debug}" \
+        ENABLE_TESTABILITY=YES \
         -quiet
 fi
 
