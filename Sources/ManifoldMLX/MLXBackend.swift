@@ -89,6 +89,15 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 maxOutputTokens: 4096,
                 supportsStreaming: true,
                 isRemote: false,
+                // Reports the *configured* reuse flag, not per-model eligibility.
+                // A default backend loading a VLM/MoE model (routed through
+                // `VLMModelFactory`) sets `_kvCacheReuseEligible = false` and will
+                // full-prefill every turn even though this reads `true`. Kept as
+                // the config flag rather than `_kvCacheReuseEligible` so a bare
+                // pre-load `MLXBackend()` advertises the capability it is
+                // configured for — the conformance meta-contract asserts against
+                // exactly that pre-load surface. Treat this as "configured to
+                // persist", not "will persist for the loaded model".
                 supportsKVCachePersistence: enableKVCacheReuse,
                 supportsGrammarConstrainedSampling: true,
                 supportsThinking: true,
