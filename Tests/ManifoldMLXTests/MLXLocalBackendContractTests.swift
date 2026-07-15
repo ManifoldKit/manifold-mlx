@@ -86,7 +86,7 @@ final class MLXLocalBackendContractTests: XCTestCase {
             maxOutputTokens: 4096,
             supportsStreaming: true,
             isRemote: false,
-            supportsKVCachePersistence: false,
+            supportsKVCachePersistence: true,
             supportsThinking: true,
             supportsVision: false,
             sharesMLXProcessResources: true

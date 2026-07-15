@@ -80,9 +80,9 @@ final class MLXBackendTests: XCTestCase {
         XCTAssertEqual(MLXBackend().capabilities.maxContextTokens, 8192)
     }
 
-    func test_capabilities_supportsKVCachePersistence_onlyWhenEnabled() {
-        XCTAssertFalse(MLXBackend().capabilities.supportsKVCachePersistence)
-        XCTAssertTrue(MLXBackend(enableKVCacheReuse: true).capabilities.supportsKVCachePersistence)
+    func test_capabilities_supportsKVCachePersistence_defaultsOnDisableToOptOut() {
+        XCTAssertTrue(MLXBackend().capabilities.supportsKVCachePersistence)
+        XCTAssertFalse(MLXBackend(enableKVCacheReuse: false).capabilities.supportsKVCachePersistence)
     }
 
     func test_capabilities_supportsVision_falseBeforeLoad() {

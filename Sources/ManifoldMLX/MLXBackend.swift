@@ -89,6 +89,15 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 maxOutputTokens: 4096,
                 supportsStreaming: true,
                 isRemote: false,
+                // Reports the *configured* reuse flag, not per-model eligibility.
+                // A default backend loading a VLM/MoE model (routed through
+                // `VLMModelFactory`) sets `_kvCacheReuseEligible = false` and will
+                // full-prefill every turn even though this reads `true`. Kept as
+                // the config flag rather than `_kvCacheReuseEligible` so a bare
+                // pre-load `MLXBackend()` advertises the capability it is
+                // configured for — the conformance meta-contract asserts against
+                // exactly that pre-load surface. Treat this as "configured to
+                // persist", not "will persist for the loaded model".
                 supportsKVCachePersistence: enableKVCacheReuse,
                 supportsGrammarConstrainedSampling: true,
                 supportsThinking: true,
@@ -190,7 +199,11 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// Policy controlling MLX's GPU buffer cache size. See `MLXCachePolicy`.
     /// Defaults to `.auto`, which picks a sensible value based on device RAM.
     public let cachePolicy: MLXCachePolicy
-    /// Safe-first rollout flag for prompt KV-cache reuse.
+    /// Prompt KV-cache reuse is on by default — within a session, consecutive turns
+    /// reuse the prior turn's KV snapshot instead of recomputing the shared prompt
+    /// prefix. Set to `false` to opt out (e.g. to isolate a suspected reuse bug).
+    /// Session switches still call `resetConversation()`/`secureWipe()`, which clear
+    /// the cache, so reuse never crosses a session boundary.
     public let enableKVCacheReuse: Bool
 
     // MARK: - Test seams
@@ -206,7 +219,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
 
     public init(
         cachePolicy: MLXCachePolicy = .auto,
-        enableKVCacheReuse: Bool = false
+        enableKVCacheReuse: Bool = true
     ) {
         self.cachePolicy = cachePolicy
         self.enableKVCacheReuse = enableKVCacheReuse

@@ -10,8 +10,8 @@ import ManifoldMLX
 /// the audit's open question: with `enableKVCacheReuse: true`, does a second
 /// turn that shares a prefix with the first reliably emit a
 /// `.kvCacheReuse(promptTokensReused:)` event with `promptTokensReused > 0`?
-/// And as a sabotage check, does the same flow with reuse disabled (the
-/// default) emit no `.kvCacheReuse` events?
+/// And as a sabotage check, does the same flow with reuse explicitly disabled
+/// emit no `.kvCacheReuse` events?
 ///
 /// Hardware-gated like the rest of the suite. Run via
 /// `scripts/test-mlx-integration.sh` so the `MLX_TEST_MODEL` env var reaches
@@ -159,12 +159,12 @@ final class MLXKVReuseIntegrationTests: XCTestCase {
         )
     }
 
-    func test_kvReuseDisabledByDefault() async throws {
-        // Explicit `enableKVCacheReuse: false` — also matches the default
-        // constructor's behaviour, asserted separately below.
-        XCTAssertFalse(
+    func test_kvReuseDisabledExplicitly() async throws {
+        // Reuse is now on by default — pin the opt-out instead of the old
+        // opt-in contract.
+        XCTAssertTrue(
             MLXBackend().enableKVCacheReuse,
-            "Default MLXBackend() must keep KV-cache reuse off — it's an opt-in feature"
+            "Default MLXBackend() must keep KV-cache reuse on"
         )
 
         let backend = try await loadBackend(enableReuse: false)
