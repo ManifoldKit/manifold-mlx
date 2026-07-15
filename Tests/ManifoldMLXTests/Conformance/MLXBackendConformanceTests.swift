@@ -78,6 +78,15 @@ final class MLXBackendConformanceTests: XCTestCase,
             backendName: contractBackendName,
             flag: "supportsGrammarConstrainedSampling"
         )
+        // `supportsKVCachePersistence`: on by default since prompt KV-cache
+        // reuse flipped to default-on. Behavioural proof lives in
+        // `MLXBackendGenerationTests` (mock-container reuse scenarios) and
+        // `MLXKVReuseIntegrationTests` (real-model two-turn reuse).
+        BackendContractChecks.claimWithoutBehaviouralAssertion(
+            capabilityClaimRegistry,
+            backendName: contractBackendName,
+            flag: "supportsKVCachePersistence"
+        )
 
         BackendContractChecks.assertCapabilityMetaContract(
             capabilityClaimRegistry,

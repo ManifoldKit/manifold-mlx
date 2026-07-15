@@ -190,7 +190,11 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// Policy controlling MLX's GPU buffer cache size. See `MLXCachePolicy`.
     /// Defaults to `.auto`, which picks a sensible value based on device RAM.
     public let cachePolicy: MLXCachePolicy
-    /// Safe-first rollout flag for prompt KV-cache reuse.
+    /// Prompt KV-cache reuse is on by default — within a session, consecutive turns
+    /// reuse the prior turn's KV snapshot instead of recomputing the shared prompt
+    /// prefix. Set to `false` to opt out (e.g. to isolate a suspected reuse bug).
+    /// Session switches still call `resetConversation()`/`secureWipe()`, which clear
+    /// the cache, so reuse never crosses a session boundary.
     public let enableKVCacheReuse: Bool
 
     // MARK: - Test seams
@@ -206,7 +210,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
 
     public init(
         cachePolicy: MLXCachePolicy = .auto,
-        enableKVCacheReuse: Bool = false
+        enableKVCacheReuse: Bool = true
     ) {
         self.cachePolicy = cachePolicy
         self.enableKVCacheReuse = enableKVCacheReuse
