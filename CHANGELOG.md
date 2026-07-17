@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.4](https://github.com/ManifoldKit/manifold-mlx/compare/v0.3.3...v0.3.4) (2026-07-17)
+
+
+### Features
+
+* **mlx:** enable prompt KV-cache reuse by default ([#153](https://github.com/ManifoldKit/manifold-mlx/issues/153)) ([91a3412](https://github.com/ManifoldKit/manifold-mlx/commit/91a3412617a306bb930475f1b7dfd6b9a4175b3d))
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.72.0 ([#156](https://github.com/ManifoldKit/manifold-mlx/issues/156)) ([ec596b9](https://github.com/ManifoldKit/manifold-mlx/commit/ec596b91baf9f5af92243733862e5149ec256354))
+
 ## [0.3.3](https://github.com/ManifoldKit/manifold-mlx/compare/v0.3.2...v0.3.3) (2026-07-13)
 
 
