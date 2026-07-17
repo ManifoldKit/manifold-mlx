@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.3.4](https://github.com/ManifoldKit/manifold-mlx/compare/v0.3.3...v0.3.4) (2026-07-17)
+
+
+### Highlights
+
+#### Prompt KV-cache reuse is on by default
+
+`MLXBackend.init(enableKVCacheReuse:)` flips from default-`false` to default-`true`, so within-session multi-turn prompt KV-cache reuse is active for every consumer out of the box. The reuse machinery (`MLXPromptCacheCoordinator`) was mature and tested but **dormant in every shipping path** — the registrar in `MLXBackends.swift` constructs a bare `MLXBackend()`, which took the old `false` default, so real multi-turn chat paid a full prefill on every turn. The warm path is now the default.
+
+Reuse only ever spans consecutive turns **within** a session. `resetConversation()`, `secureWipe()`, and `loadModel()`/`unloadModel()` all invalidate the snapshot, and restore is prefix-validated (`longestCommonPrefixLength`) so only byte-identical prompt-prefix tokens can restore KV — a session's divergent tokens are structurally incapable of crossing a boundary.
+
+`BackendCapabilities.supportsKVCachePersistence` derives from `enableKVCacheReuse` and therefore now reports `true` by default; consumers gating on it will observe the flip. It reflects *configured* reuse, not per-model eligibility — a VLM/MoE model routed through `VLMModelFactory` still full-prefills. Pass `enableKVCacheReuse: false` to opt out. See [#153](https://github.com/ManifoldKit/manifold-mlx/issues/153).
+
+#### ManifoldKit 0.72.0
+
+Re-pins the core dependency to [ManifoldKit 0.72.0](https://github.com/ManifoldKit/ManifoldKit/releases/tag/v0.72.0) — turn-loop content preservation (an edited message keeps its attachments; finalized thinking persists into the assistant message's `contentParts`), MCP server-initiated sampling, capability-probing for the Ollama backend, and a further round of pre-1.0 API rationalisation that removes the Run subsystem (`BackgroundTaskScheduler`, `MemoryBudget`) and demotes `HostTurnContextProvider`, the RAG internals, and `AccessibilityAnnouncer` to `package`.
+
+None of that removed or demoted surface is referenced by this package, and core's new `SendMessageError.emptyInput` case reaches no exhaustive `switch` here, so no MLX-side source changes were needed. The full build+test gate passed against the new core unchanged. See [#156](https://github.com/ManifoldKit/manifold-mlx/issues/156).
+
+#### Verified against real hardware
+
+Both changes above were re-verified on-device (Apple M5 Pro, Metal, `Llama-3.1-8B-Instruct-4bit`) against the 0.72.0 pin, rather than on CI's hosted runners where the integration lane cannot execute the model path: 26 passed, 0 failures, 7 environment-gated skips (FLUX, MoE, hybrid, and VLM suites, none of which Llama satisfies). This closes the verification gap left open by [#153](https://github.com/ManifoldKit/manifold-mlx/issues/153), which shipped with live within-session reuse proven only by mock unit tests — a warm second turn is now confirmed both **token-identical to a cold second turn** and **≥2× faster to first token** on real weights.
+
+
+### Features
+
+* **mlx:** enable prompt KV-cache reuse by default ([#153](https://github.com/ManifoldKit/manifold-mlx/issues/153)) ([91a3412](https://github.com/ManifoldKit/manifold-mlx/commit/91a3412617a306bb930475f1b7dfd6b9a4175b3d))
+
+
+### Bug Fixes
+
+* bump ManifoldKit pin to v0.72.0 ([#156](https://github.com/ManifoldKit/manifold-mlx/issues/156)) ([ec596b9](https://github.com/ManifoldKit/manifold-mlx/commit/ec596b91baf9f5af92243733862e5149ec256354))
+
 ## [0.3.3](https://github.com/ManifoldKit/manifold-mlx/compare/v0.3.2...v0.3.3) (2026-07-13)
 
 
