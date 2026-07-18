@@ -87,6 +87,39 @@ func fail(_ message: String, code: Int32 = 2) -> Never {
     exit(code)
 }
 
+/// Replay a recorded finding by hash against a fresh MLX backend — the MLX
+/// equivalent of `fuzz-chat --replay`, which cannot target MLX. Reruns the
+/// recorded input `attempts` times and reports whether the finding reproduces,
+/// so a "flaky" finding can be adjudicated real-vs-coincidence. Mirrors
+/// fuzz-chat's runReplay outcome→exit-code mapping (0 = ran, 2 = not found /
+/// drift refused, 3 = internal error).
+func runReplay(hash: String, force: Bool, outputDir: URL, factory: any FuzzBackendFactory) async -> Int32 {
+    let replayer = Replayer(findingsRoot: outputDir, factory: factory)
+    let outcome: Replayer.Outcome
+    do {
+        outcome = try await replayer.replay(hash: hash, attempts: 3, force: force)
+    } catch {
+        FileHandle.standardError.write(Data("replay \(hash): failed — \(error)\n".utf8))
+        return 3
+    }
+    switch outcome {
+    case .reproduced(let r):
+        let verdict = r.newSeverity == .confirmed ? "promoted to CONFIRMED" : "remains flaky"
+        let drift = r.drift != nil ? " [forced despite drift]" : ""
+        print("replay \(hash): reproduced \(r.successfulReproductions)/\(r.attempts) — \(verdict)\(drift)")
+        return 0
+    case .driftRefused(let report):
+        print("replay \(hash): drift refused (git \(report.recordedGitRev) → \(report.currentGitRev)); pass --force to override")
+        return 2
+    case .recordNotFound:
+        print("replay \(hash): record not found under \(outputDir.path)")
+        return 2
+    default:
+        print("replay \(hash): \(String(describing: outcome))")
+        return 2
+    }
+}
+
 /// Resolve a `--model` argument: a direct path to a model directory, or a
 /// case-insensitive substring matched against directories under
 /// ~/Documents/Models/mlx that contain a config.json.
@@ -114,27 +147,33 @@ func resolveModel(_ arg: String) -> (url: URL, id: String) {
     fail("no MLX model matching '\(arg)' under ~/Documents/Models/mlx. Available: [\(available)]")
 }
 
-/// A KV-reuse-biased session script: a long shared system prompt reused across
-/// several turns (exercises prefix KV reuse + TurnBoundaryKVStateDetector), a
-/// regenerate (turn-boundary KV state), and a verbatim-repeat probe (context
-/// leak). Appended to the bundled scripts, which already cover cancel-mid-stream
-/// (rapid-send-cancel) and cross-session leak (session-swap).
+/// A KV-reuse-biased session script. A LONG shared system prefix makes the KV
+/// prefix cache actually engage across turns, but every per-turn question is
+/// mutually UNRELATED and never asks the model to reference or repeat a prior
+/// turn — so any content from turn N-1 surfacing in turn N is genuine KV
+/// residue, not instructed continuity. (The earlier version asked the model to
+/// "restate"/"repeat verbatim"/"translate the prior answer", which manufactured
+/// 94% false positives in the residue-across-turns detector on 2026-07-18 — a
+/// probe must not request the behavior its detector flags.) A trailing
+/// regenerate still exercises the turn-boundary KV path without asking for
+/// continuity. Appended to the bundled scripts (cancel-mid-stream, session-swap).
 func kvReuseScript() -> SessionScript {
     let sharedPrefix = String(
-        repeating: "You are a meticulous assistant who follows every instruction to the letter. ",
+        repeating: "You are a factual assistant. Answer each question independently and concisely. ",
         count: 40
     )
     return SessionScript(
-        id: "kv-reuse-shared-prefix",
+        id: "kv-reuse-independent-turns",
         steps: [
-            .send(text: "Summarize your operating rules in exactly one sentence."),
-            .send(text: "Now restate them as three bullet points."),
-            .send(text: "Translate the first bullet into French."),
+            .send(text: "What is the boiling point of water at sea level in Celsius?"),
+            .send(text: "Name the largest moon of Saturn."),
+            .send(text: "In what year did the French Revolution begin?"),
+            .send(text: "How many sides does a hexagon have?"),
+            .send(text: "What is the chemical symbol for gold?"),
             .regenerate,
-            .send(text: "Repeat your previous answer verbatim, then append the word DONE."),
         ],
         systemPrompt: sharedPrefix,
-        sessionLabel: "kv-reuse"
+        sessionLabel: "kv-reuse-independent"
     )
 }
 
@@ -150,6 +189,8 @@ var seedSet = false
 var contextSize = 4096
 var outDir = "tmp/fuzz"
 var quiet = false
+var replayHash: String?
+var force = false
 
 var args = Array(CommandLine.arguments.dropFirst())
 var i = 0
@@ -177,6 +218,8 @@ while i < args.count {
     case "--context": contextSize = Int(value()) ?? { fail("--context requires an integer") }()
     case "--out": outDir = value()
     case "--quiet": quiet = true
+    case "--replay": replayHash = value()
+    case "--force": force = true
     case "-h", "--help":
         print("""
         fuzz-mlx — MLX backend fuzz/soak driver (reuses core ManifoldFuzz).
@@ -191,6 +234,8 @@ while i < args.count {
           --context <N>         Context window tokens (default 4096).
           --out <dir>           Findings output dir (default tmp/fuzz). INDEX.md lives here.
           --quiet               Reduce reporter chatter.
+          --replay <hash>       Rerun ONE recorded finding (needs --model + --out = its run dir).
+          --force               Replay despite git/model drift.
         """)
         exit(0)
     default:
@@ -200,15 +245,31 @@ while i < args.count {
 }
 
 guard let modelArg else { fail("--model is required (try --help)") }
-if minutes == nil && iterations == nil { minutes = 5 }
+if minutes == nil && iterations == nil && replayHash == nil { minutes = 5 }
 
 let (modelURL, modelId) = resolveModel(modelArg)
-// Default KV reuse ON only when driving multi-turn sessions (that is the feature
-// under test). Single-turn fuzz runs with reuse OFF for per-iteration isolation.
-let kvReuse = kvReuseOverride ?? useSessionScripts
+// Default KV reuse ON when driving multi-turn sessions OR replaying (both chase
+// the session/KV surface). Single-turn fuzz runs with reuse OFF for per-iteration
+// isolation.
+let kvReuse = kvReuseOverride ?? (replayHash != nil ? true : useSessionScripts)
 
 let resolvedSeed = seedSet ? seed : UInt64.random(in: 0...UInt64.max)
 let outURL = URL(fileURLWithPath: outDir, isDirectory: true)
+
+let factory = MLXFuzzFactory(
+    modelURL: modelURL,
+    modelId: modelId,
+    enableKVCacheReuse: kvReuse,
+    contextSize: contextSize
+)
+
+// Replay mode short-circuits the campaign: rerun one recorded finding and report
+// whether it reproduces. --out must point at the run dir that holds the finding.
+if let hash = replayHash {
+    let code = await runReplay(hash: hash, force: force, outputDir: outURL, factory: factory)
+    await factory.teardown()
+    exit(code)
+}
 
 FileHandle.standardError.write(Data(
     """
@@ -219,13 +280,6 @@ FileHandle.standardError.write(Data(
 
     """.utf8
 ))
-
-let factory = MLXFuzzFactory(
-    modelURL: modelURL,
-    modelId: modelId,
-    enableKVCacheReuse: kvReuse,
-    contextSize: contextSize
-)
 
 let config = FuzzConfig(
     backend: .mlx,
