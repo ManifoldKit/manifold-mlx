@@ -124,19 +124,10 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// not call order). Mirrors `LlamaBackend.cleanupTask`. Access only under
     /// `stateLock`.
     private var _cleanupTask: Task<Void, Never>?
-    /// Access only under `stateLock`.
-    private var _conversationHistory: [(role: String, content: String)] = []
     /// The tool-call dialect detected for the currently loaded model.
     /// Set by `loadModel(from:plan:)` via `MLXToolDialect.detect(at:)`.
     /// Access only under `stateLock`.
     private var _dialect: MLXToolDialect = .unknown
-    /// Tool-aware conversation history, set by `setToolAwareHistory(_:)`.
-    /// When non-nil this supersedes `_conversationHistory` for message building.
-    /// Access only under `stateLock`.
-    private var _toolAwareHistory: [ToolAwareHistoryEntry]?
-    /// Structured conversation history, including image parts for VLM turns.
-    /// Access only under `stateLock`.
-    private var _structuredHistory: [StructuredMessage]?
     /// Thinking-marker pair auto-detected from the loaded model's
     /// `tokenizer_config.json` chat template. `nil` when the model is not
     /// loaded, the chat template is missing, or no known marker pair was
@@ -442,8 +433,8 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         // Single critical section: validate, flip `_isGenerating`, and
         // snapshot every input the driver needs. The driver runs without
         // touching backend state — so once we leave the lock, the driver call
-        // is decoupled from `setLoadOptions` / `setConversationHistory` /
-        // `setToolAwareHistory` racing in.
+        // is decoupled from `setLoadOptions` racing in. Conversation history is
+        // no longer instance state — it rides `hints.history` per call (#2312).
         // Parse the GBNF grammar up front — before the no-model and
         // already-generating checks — so a grammar using a construct this
         // executor does not support yields a precise `unsupportedGrammar`
@@ -463,21 +454,31 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
             parsedGrammar = nil
         }
 
+        // Conversation history arrives per-call on `hints.history` (ManifoldKit
+        // #2312) — never from shared instance state. Derive the three shapes the
+        // driver consumes from that single structured value: the tool-aware wire
+        // history only when the turn actually carries tool parts (so a tools-free
+        // request never renders stale tool turns), and the structured history
+        // whenever any prior turn exists (carrying image parts for VLM turns).
+        let historyMessages = hints.history
+        let derivedConversationHistory = historyMessages.flattenedHistory
+        let derivedToolAwareHistory = historyMessages.containsToolParts ? historyMessages.toolAwareHistory : nil
+        let derivedStructuredHistory = historyMessages.isEmpty ? nil : historyMessages
+
         let snapshot: GenerationCallSnapshot = try withStateLock {
             guard _isModelLoaded, let container = _modelContainer else {
                 throw InferenceError.inferenceFailure("No model loaded")
             }
             guard !_isGenerating else {
-                _toolAwareHistory = nil
                 throw InferenceError.alreadyGenerating
             }
             _isGenerating = true
             let snapshot = GenerationCallSnapshot(
                 container: container,
                 loadOptions: _loadOptions,
-                conversationHistory: _conversationHistory,
-                toolAwareHistory: _toolAwareHistory,
-                structuredHistory: _structuredHistory,
+                conversationHistory: derivedConversationHistory,
+                toolAwareHistory: derivedToolAwareHistory,
+                structuredHistory: derivedStructuredHistory,
                 dialect: _dialect,
                 autoDetectedMarkers: _autoDetectedThinkingMarkers,
                 kvCacheReuseEligible: _kvCacheReuseEligible,
@@ -488,13 +489,6 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 ),
                 hints: hints
             )
-            // Consume-once: the tool-dispatch orchestrator re-installs the full
-            // tool-aware history before every turn, so clearing it after capture
-            // keeps it from leaking into a later, tools-free request on this reused
-            // backend instance (which would render stale tool turns). This replaces
-            // the eager clear that used to live in `setConversationHistory`.
-            // Mirrors `OllamaBackend`'s consume-once `toolAwareHistory`.
-            _toolAwareHistory = nil
             return snapshot
         }
         Self.logger.debug("MLX generate started")
@@ -733,9 +727,6 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
             _modelContainer = nil
             _isModelLoaded = false
             _isGenerating = false
-            _conversationHistory = []
-            _toolAwareHistory = nil
-            _structuredHistory = nil
             _dialect = .unknown
             _autoDetectedThinkingMarkers = nil
             _supportsVision = false
@@ -793,31 +784,9 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     }
 }
 
-// MARK: - ConversationHistoryReceiver
-
-extension MLXBackend: ConversationHistoryReceiver {
-    public func setConversationHistory(_ history: [(role: String, content: String)]) {
-        withStateLock {
-            _conversationHistory = history
-            // Do NOT clear `_toolAwareHistory` here. The tool-dispatch orchestrator
-            // (`GenerationToolDispatchLoop`) installs the tool-aware history first
-            // (`setToolAwareHistory`) and then immediately calls this string-only
-            // setter via `GenerationHistoryInstaller.installHistory` on every turn.
-            // Clearing the tool history here wiped the just-installed assistant
-            // tool-call + tool-result turns, so the model never saw the result and
-            // re-issued the same tool call forever (never terminating). Staleness
-            // across *separate* requests is instead handled by the consume-once
-            // reset in `generate(...)` — mirroring `OllamaBackend`'s pattern.
-        }
-    }
-}
-
 extension MLXBackend {
     public func resetConversation() {
         withStateLock {
-            _conversationHistory = []
-            _toolAwareHistory = nil
-            _structuredHistory = nil
             _promptCacheState.invalidate()
         }
     }
@@ -860,28 +829,6 @@ extension MLXBackend {
             }
             withStateLock { _cleanupTask = cleanup }
         }
-    }
-}
-
-// MARK: - StructuredHistoryReceiver
-
-extension MLXBackend: StructuredHistoryReceiver {
-    public func setStructuredHistory(_ messages: [StructuredMessage]) {
-        withStateLock { _structuredHistory = messages }
-    }
-}
-
-// MARK: - ToolCallingHistoryReceiver
-
-extension MLXBackend: ToolCallingHistoryReceiver {
-    /// Stores a tool-aware conversation history for the next `generate()` call.
-    ///
-    /// When set, this supersedes the plain `(role, content)` history provided
-    /// via `setConversationHistory(_:)`. The entries are encoded into the
-    /// Qwen 2.5 text format (or plain content for `.unknown` dialects) before
-    /// being passed to the MLX generate path.
-    public func setToolAwareHistory(_ messages: [ToolAwareHistoryEntry]) {
-        withStateLock { _toolAwareHistory = messages }
     }
 }
 

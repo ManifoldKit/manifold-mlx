@@ -86,8 +86,12 @@ final class MLXHybridCacheReuseIntegrationTests: XCTestCase {
         )
     }
 
-    private func runTurn(on backend: MLXBackend, prompt: String) async throws -> [GenerationEvent] {
-        let stream = try backend.generate(prompt: prompt, systemPrompt: nil, config: deterministicConfig, hints: GenerationRuntimeHints())
+    private func runTurn(
+        on backend: MLXBackend,
+        prompt: String,
+        history: [StructuredMessage] = []
+    ) async throws -> [GenerationEvent] {
+        let stream = try backend.generate(prompt: prompt, systemPrompt: nil, config: deterministicConfig, hints: GenerationRuntimeHints(history: history))
         var events: [GenerationEvent] = []
         for try await event in stream.events { events.append(event) }
         return events
@@ -117,12 +121,15 @@ final class MLXHybridCacheReuseIntegrationTests: XCTestCase {
         XCTAssertFalse(turn1Text.isEmpty, "Turn 1 must produce a reply on the hybrid model")
         XCTAssertNil(reuseCount(turn1), "Turn 1 has no prior cache — .kvCacheReuse must not fire")
 
-        backend.setConversationHistory([
-            ("user", firstUserPrompt),
-            ("assistant", turn1Text),
-            ("user", secondUserPrompt),
-        ])
-        let turn2 = try await runTurn(on: backend, prompt: secondUserPrompt)
+        let turn2 = try await runTurn(
+            on: backend,
+            prompt: secondUserPrompt,
+            history: [
+                StructuredMessage(role: "user", content: firstUserPrompt),
+                StructuredMessage(role: "assistant", content: turn1Text),
+                StructuredMessage(role: "user", content: secondUserPrompt),
+            ]
+        )
 
         // The model is a hybrid: depending on its exact layer composition the
         // warm turn either reuses a real prefix (every layer reducible to the

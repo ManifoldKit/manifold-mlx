@@ -97,12 +97,14 @@ final class MLXKVPersistenceIntegrationTests: XCTestCase {
         on backend: MLXBackend,
         prompt: String,
         systemPrompt: String? = nil,
-        config: GenerationConfig
+        config: GenerationConfig,
+        history: [StructuredMessage] = []
     ) async throws -> TimedGenerationResult {
         let stream = try backend.generate(
             prompt: prompt,
             systemPrompt: systemPrompt,
-            config: config
+            config: config,
+            hints: GenerationRuntimeHints(history: history)
         )
 
         let clock = ContinuousClock()
@@ -144,16 +146,15 @@ final class MLXKVPersistenceIntegrationTests: XCTestCase {
         )
         XCTAssertFalse(firstTurn.text.isEmpty, "Turn 1 must produce text so the follow-up history is well formed")
 
-        backend.setConversationHistory([
-            ("user", longSharedPrefixPrompt),
-            ("assistant", firstTurn.text),
-            ("user", followUpPrompt),
-        ])
-
         let secondTurn = try await generateTimed(
             on: backend,
             prompt: followUpPrompt,
-            config: config
+            config: config,
+            history: [
+                StructuredMessage(role: "user", content: longSharedPrefixPrompt),
+                StructuredMessage(role: "assistant", content: firstTurn.text),
+                StructuredMessage(role: "user", content: followUpPrompt),
+            ]
         )
         return SecondTurnSample(firstTurnText: firstTurn.text, secondTurn: secondTurn)
     }
@@ -212,15 +213,15 @@ final class MLXKVPersistenceIntegrationTests: XCTestCase {
         warmBackend.unloadModel()
 
         let coldBackend = try await loadBackend(enableReuse: false)
-        coldBackend.setConversationHistory([
-            ("user", longSharedPrefixPrompt),
-            ("assistant", warmSample.firstTurnText),
-            ("user", followUpPrompt),
-        ])
         let coldTurn2 = try await generateTimed(
             on: coldBackend,
             prompt: followUpPrompt,
-            config: deterministicConfig
+            config: deterministicConfig,
+            history: [
+                StructuredMessage(role: "user", content: longSharedPrefixPrompt),
+                StructuredMessage(role: "assistant", content: warmSample.firstTurnText),
+                StructuredMessage(role: "user", content: followUpPrompt),
+            ]
         )
 
         XCTAssertNil(
@@ -249,16 +250,16 @@ final class MLXKVPersistenceIntegrationTests: XCTestCase {
         XCTAssertFalse(firstTurn.text.isEmpty)
 
         let sharedHistory = [
-            ("user", longSharedPrefixPrompt),
-            ("assistant", firstTurn.text),
-            ("user", followUpPrompt),
+            StructuredMessage(role: "user", content: longSharedPrefixPrompt),
+            StructuredMessage(role: "assistant", content: firstTurn.text),
+            StructuredMessage(role: "user", content: followUpPrompt),
         ]
-        backend.setConversationHistory(sharedHistory)
 
         let cancelledStream = try backend.generate(
             prompt: followUpPrompt,
             systemPrompt: nil,
-            config: performanceConfig
+            config: performanceConfig,
+            hints: GenerationRuntimeHints(history: sharedHistory)
         )
         for try await event in cancelledStream.events {
             if case .token = event {
@@ -267,11 +268,11 @@ final class MLXKVPersistenceIntegrationTests: XCTestCase {
         }
         try await waitForIdle(backend)
 
-        backend.setConversationHistory(sharedHistory)
         let retriedTurn = try await generateTimed(
             on: backend,
             prompt: followUpPrompt,
-            config: performanceConfig
+            config: performanceConfig,
+            history: sharedHistory
         )
 
         let reuse = try XCTUnwrap(
