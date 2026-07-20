@@ -147,17 +147,17 @@ final class MLXBackendGenerationTests: XCTestCase {
 
         let backend = MLXBackend()
         backend._inject(mock, supportsVision: true)
-        backend.setStructuredHistory([
-            StructuredMessage(role: "user", parts: [
-                .text("Describe this image."),
-                .image(data: ImageFixtures.oneByOnePNGData, mimeType: "image/png"),
-            ])
-        ])
 
         let stream = try backend.generate(
             prompt: "fallback",
             systemPrompt: nil,
-            config: GenerationConfig()
+            config: GenerationConfig(),
+            hints: GenerationRuntimeHints(history: [
+                StructuredMessage(role: "user", parts: [
+                    .text("Describe this image."),
+                    .image(data: ImageFixtures.oneByOnePNGData, mimeType: "image/png"),
+                ])
+            ])
         )
 
         let tokens = try await collectTokens(from: stream)
@@ -175,27 +175,25 @@ final class MLXBackendGenerationTests: XCTestCase {
 
         let backend = MLXBackend()
         backend._inject(mock, supportsVision: true, dialect: .qwen25)
-        backend.setStructuredHistory([
-            StructuredMessage(role: "user", parts: [
-                .text("Please inspect this chart."),
-                .image(data: ImageFixtures.oneByOnePNGData, mimeType: "image/png"),
-            ])
-        ])
-        backend.setToolAwareHistory([
-            ToolAwareHistoryEntry(role: "user", content: "Please inspect this chart."),
-            ToolAwareHistoryEntry(
-                role: "assistant",
-                content: "",
-                toolCalls: [
-                    ToolCall(id: "call_1", toolName: "summarize_image", arguments: "{}")
-                ]
-            ),
-        ])
 
+        // A single structured history now carries both the image (on the user
+        // turn) and the tool call (on the assistant turn) — the encoder derives
+        // the image-preserving chat messages and the text-serialized tool-aware
+        // messages from this one array (#2312), so there is no longer a second,
+        // independently-settable tool-aware array to keep in sync.
         _ = try await collectTokens(from: try backend.generate(
             prompt: "fallback",
             systemPrompt: nil,
-            config: GenerationConfig()
+            config: GenerationConfig(),
+            hints: GenerationRuntimeHints(history: [
+                StructuredMessage(role: "user", parts: [
+                    .text("Please inspect this chart."),
+                    .image(data: ImageFixtures.oneByOnePNGData, mimeType: "image/png"),
+                ]),
+                StructuredMessage(role: "assistant", parts: [
+                    .toolCall(ToolCall(id: "call_1", toolName: "summarize_image", arguments: "{}"))
+                ]),
+            ])
         ))
 
         XCTAssertEqual(mock.lastChatMessages?.count, 2)
@@ -206,92 +204,59 @@ final class MLXBackendGenerationTests: XCTestCase {
         )
     }
 
-    /// Regression: the tool-call non-termination bug. The tool-dispatch
-    /// orchestrator installs the tool-aware history (assistant call + tool
-    /// result) via `setToolAwareHistory` and then, on the SAME turn, calls
-    /// `setConversationHistory` (through `GenerationHistoryInstaller`). The
-    /// string-only setter must NOT wipe the tool-aware history — doing so meant
-    /// the model never saw the tool result and re-issued the same call forever.
-    func test_generate_setConversationHistory_doesNotWipeToolAwareHistory() async throws {
+    /// Regression: the tool-call non-termination bug. Conversation history used
+    /// to live as two separately-settable pieces of backend instance state
+    /// (`_toolAwareHistory` + `_conversationHistory`), and the string-only
+    /// setter wiping the tool-aware one meant the model never saw the tool
+    /// result and re-issued the same call forever. History now arrives as a
+    /// single `hints.history: [StructuredMessage]` per call (#2312), so that
+    /// two-setter race is structurally impossible — there is only one array to
+    /// build. This test pins the render behavior the old regression protected:
+    /// the tool result must actually reach the model.
+    func test_generate_toolAwareHistory_rendersToolResultThroughHints() async throws {
         let mock = MockMLXModelContainer()
         mock.tokensToYield = ["320743"]
 
         let backend = MLXBackend()
         backend._inject(mock, dialect: .qwen25)
 
-        // 1. Orchestrator installs the post-tool-result tool-aware history.
-        backend.setToolAwareHistory([
-            ToolAwareHistoryEntry(role: "user", content: "What is 7823 * 41?"),
-            ToolAwareHistoryEntry(
-                role: "assistant",
-                content: "",
-                toolCalls: [
-                    ToolCall(id: "call_1", toolName: "calc", arguments: "{\"a\":7823,\"op\":\"*\",\"b\":41}")
-                ]
-            ),
-            ToolAwareHistoryEntry(role: "tool", content: "{\"answer\":320743}", toolCallId: "call_1"),
-        ])
-        // 2. Orchestrator then installs the flattened conversation history,
-        //    exactly as `GenerationHistoryInstaller.installHistory` does.
-        backend.setConversationHistory([("user", "What is 7823 * 41?")])
-
         _ = try await collectTokens(from: try backend.generate(
             prompt: "What is 7823 * 41?",
             systemPrompt: nil,
-            config: GenerationConfig()
+            config: GenerationConfig(),
+            hints: GenerationRuntimeHints(history: [
+                StructuredMessage(role: "user", content: "What is 7823 * 41?"),
+                StructuredMessage(role: "assistant", parts: [
+                    .toolCall(ToolCall(id: "call_1", toolName: "calc", arguments: "{\"a\":7823,\"op\":\"*\",\"b\":41}"))
+                ]),
+                StructuredMessage(role: "tool", parts: [
+                    .toolResult(ToolResult(callId: "call_1", content: "{\"answer\":320743}"))
+                ]),
+            ])
         ))
 
         let sent = try XCTUnwrap(mock.lastMessages)
         XCTAssertTrue(
             sent.contains { ($0["content"] ?? "").contains("320743") },
-            "The tool result must reach the model after setConversationHistory; wiping _toolAwareHistory there caused the infinite re-call loop"
+            "The tool result must reach the model when threaded through hints.history"
         )
         XCTAssertTrue(
             sent.contains { $0["role"] == "tool" },
             "The tool-role turn must survive into the rendered prompt"
         )
 
-        // Sabotage check: re-adding `_toolAwareHistory = nil` to
-        // setConversationHistory collapses the rendered prompt to [user] and
-        // fails both assertions (the original bug).
+        // Sabotage check: dropping the .toolResult part (or the tool-role
+        // message entirely) from hints.history collapses the rendered prompt
+        // and fails both assertions.
     }
 
-    /// Consume-once: after a tool-aware turn is rendered, the history must NOT
-    /// leak into a later tools-free request on the same reused backend — that
-    /// would render stale tool turns. This is the safeguard that replaces the
-    /// eager clear removed from `setConversationHistory`.
-    func test_generate_consumesToolAwareHistory_noStaleLeakAcrossRequests() async throws {
-        let mock = MockMLXModelContainer()
-        mock.tokensToYield = ["ok"]
-
-        let backend = MLXBackend()
-        backend._inject(mock, dialect: .qwen25)
-
-        backend.setToolAwareHistory([
-            ToolAwareHistoryEntry(role: "tool", content: "{\"answer\":320743}", toolCallId: "call_1"),
-        ])
-        _ = try await collectTokens(from: try backend.generate(
-            prompt: "q", systemPrompt: nil, config: GenerationConfig()
-        ))
-        XCTAssertTrue(
-            mock.lastMessages?.contains { ($0["content"] ?? "").contains("320743") } == true,
-            "First turn must render the installed tool-aware history"
-        )
-
-        // A later, tools-free request installs only conversation history.
-        backend.setConversationHistory([("user", "different question")])
-        _ = try await collectTokens(from: try backend.generate(
-            prompt: "different question", systemPrompt: nil, config: GenerationConfig()
-        ))
-        XCTAssertFalse(
-            mock.lastMessages?.contains { ($0["content"] ?? "").contains("320743") } == true,
-            "Consumed tool-aware history must not leak into a subsequent tools-free request"
-        )
-        XCTAssertTrue(
-            mock.lastMessages?.contains { $0["content"] == "different question" } == true,
-            "The fresh conversation turn must be rendered"
-        )
-    }
+    // removed: test_generate_consumesToolAwareHistory_noStaleLeakAcrossRequests
+    // — history receiver retired in ManifoldKit #2312, history threads via
+    // hints. The "consume-once" guard it pinned protected shared backend
+    // instance state (`_toolAwareHistory`) from leaking across requests; since
+    // history is now a per-call `hints.history` value with no shared mutable
+    // storage, a later call that omits `hints.history` cannot observe an
+    // earlier call's history by construction — there is nothing left to prove.
 
     func test_generate_withVisionHistory_andSystemPrompt_prependsSystemChatMessage() async throws {
         let mock = MockMLXModelContainer()
@@ -299,17 +264,17 @@ final class MLXBackendGenerationTests: XCTestCase {
 
         let backend = MLXBackend()
         backend._inject(mock, supportsVision: true)
-        backend.setStructuredHistory([
-            StructuredMessage(role: "user", parts: [
-                .text("Describe this image."),
-                .image(data: ImageFixtures.oneByOnePNGData, mimeType: "image/png"),
-            ])
-        ])
 
         _ = try await collectTokens(from: try backend.generate(
             prompt: "fallback",
             systemPrompt: "You are a precise image analyst.",
-            config: GenerationConfig()
+            config: GenerationConfig(),
+            hints: GenerationRuntimeHints(history: [
+                StructuredMessage(role: "user", parts: [
+                    .text("Describe this image."),
+                    .image(data: ImageFixtures.oneByOnePNGData, mimeType: "image/png"),
+                ])
+            ])
         ))
 
         XCTAssertEqual(mock.lastChatMessages?.count, 2)
@@ -1085,17 +1050,17 @@ final class MLXBackendGenerationTests: XCTestCase {
         let backend = MLXBackend()
         backend._inject(mock)
 
-        // Simulate two prior turns before the current user message.
-        backend.setConversationHistory([
-            ("user", "What is the capital of France?"),
-            ("assistant", "Paris."),
-            ("user", "And Germany?"),
-        ])
-
+        // Simulate two prior turns before the current user message, threaded
+        // via hints.history rather than a stored setter (#2312).
         let stream = try backend.generate(
             prompt: "And Germany?",
             systemPrompt: nil,
-            config: GenerationConfig()
+            config: GenerationConfig(),
+            hints: GenerationRuntimeHints(history: [
+                StructuredMessage(role: "user", content: "What is the capital of France?"),
+                StructuredMessage(role: "assistant", content: "Paris."),
+                StructuredMessage(role: "user", content: "And Germany?"),
+            ])
         )
         _ = try await collectTokens(from: stream)
 
@@ -1109,9 +1074,9 @@ final class MLXBackendGenerationTests: XCTestCase {
         XCTAssertEqual(sent[2]["role"], "user")
         XCTAssertEqual(sent[2]["content"], "And Germany?")
 
-        // Sabotage check: removing the setConversationHistory call causes the
-        // backend to fall back to the bare prompt path, producing a 1-element
-        // messages array and failing the count assertion.
+        // Sabotage check: passing GenerationRuntimeHints() (no history) causes
+        // the backend to fall back to the bare prompt path, producing a
+        // 1-element messages array and failing the count assertion.
     }
 
     // MARK: - WindowServer yield cadence (#747)

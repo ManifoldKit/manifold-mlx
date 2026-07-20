@@ -115,6 +115,7 @@ final class MLXVLMGateExperimentTests: XCTestCase {
     private func runTurn(
         on backend: MLXBackend,
         prompt: String,
+        history: [StructuredMessage] = [],
         timeoutSeconds: Double = 90
     ) async throws -> [GenerationEvent] {
         // Qwen2-VL two-turn hang guard (#26): the stream iteration has been observed
@@ -126,7 +127,8 @@ final class MLXVLMGateExperimentTests: XCTestCase {
                 let stream = try backend.generate(
                     prompt: prompt,
                     systemPrompt: nil,
-                    config: config
+                    config: config,
+                    hints: GenerationRuntimeHints(history: history)
                 )
                 var events: [GenerationEvent] = []
                 for try await event in stream.events {
@@ -181,12 +183,15 @@ final class MLXVLMGateExperimentTests: XCTestCase {
         let turn1Text = collectAssistantText(from: turn1Events)
         XCTAssertFalse(turn1Text.isEmpty, "Turn 1 must produce a reply on the VLM under test")
 
-        backend.setConversationHistory([
-            ("user", firstUserPrompt),
-            ("assistant", turn1Text),
-            ("user", secondUserPrompt),
-        ])
-        let turn2Events = try await runTurn(on: backend, prompt: secondUserPrompt)
+        let turn2Events = try await runTurn(
+            on: backend,
+            prompt: secondUserPrompt,
+            history: [
+                StructuredMessage(role: "user", content: firstUserPrompt),
+                StructuredMessage(role: "assistant", content: turn1Text),
+                StructuredMessage(role: "user", content: secondUserPrompt),
+            ]
+        )
 
         XCTAssertNil(
             reuseCount(in: turn1Events),

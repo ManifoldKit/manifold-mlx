@@ -81,12 +81,14 @@ final class MLXKVReuseIntegrationTests: XCTestCase {
 
     private func runTurn(
         on backend: MLXBackend,
-        prompt: String
+        prompt: String,
+        history: [StructuredMessage] = []
     ) async throws -> [GenerationEvent] {
         let stream = try backend.generate(
             prompt: prompt,
             systemPrompt: nil,
-            config: deterministicConfig
+            config: deterministicConfig,
+            hints: GenerationRuntimeHints(history: history)
         )
         var events: [GenerationEvent] = []
         for try await event in stream.events {
@@ -127,13 +129,15 @@ final class MLXKVReuseIntegrationTests: XCTestCase {
             "Turn 1 must produce a non-empty reply so the follow-up history is well-formed"
         )
 
-        backend.setConversationHistory([
-            ("user", firstUserPrompt),
-            ("assistant", turn1Text),
-            ("user", secondUserPrompt),
-        ])
-
-        let turn2Events = try await runTurn(on: backend, prompt: secondUserPrompt)
+        let turn2Events = try await runTurn(
+            on: backend,
+            prompt: secondUserPrompt,
+            history: [
+                StructuredMessage(role: "user", content: firstUserPrompt),
+                StructuredMessage(role: "assistant", content: turn1Text),
+                StructuredMessage(role: "user", content: secondUserPrompt),
+            ]
+        )
         return (turn1Events, turn2Events)
     }
 
