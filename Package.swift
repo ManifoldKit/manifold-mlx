@@ -16,6 +16,7 @@ let package = Package(
     products: [
         .library(name: "ManifoldMLX", targets: ["ManifoldMLX"]),
         .executable(name: "manifold-tools-mlx", targets: ["manifold-tools-mlx"]),
+        .executable(name: "fuzz-mlx", targets: ["fuzz-mlx"]),
     ],
     dependencies: [
         // Pulls ManifoldInference/Tools/Runtime/PersistenceSwiftData plus the
@@ -168,6 +169,20 @@ let package = Package(
             ],
             path: "Sources/manifold-tools-mlx",
             exclude: ["README.md"]
+        ),
+        // fuzz-mlx: overnight fuzz/soak driver. Reuses core's ManifoldFuzz
+        // engine + detectors against a REAL resident MLXBackend. Works as a
+        // plain `swift run` executable because the MLXMetallibPlugin prebuild
+        // plugin stages mlx.metallib next to the binary during `swift build`
+        // (issue #82) — the reason core's own fuzz-chat refuses --backend mlx.
+        .executableTarget(
+            name: "fuzz-mlx",
+            dependencies: [
+                .product(name: "ManifoldFuzz", package: "ManifoldKit"),
+                .product(name: "ManifoldInference", package: "ManifoldKit"),
+                "ManifoldMLX",
+            ],
+            path: "Sources/fuzz-mlx"
         ),
     ]
 )
