@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/ManifoldKit/manifold-mlx/compare/v0.4.0...v0.4.1) (2026-07-20)
+
+
+### Features
+
+* **fuzz:** add fuzz-mlx overnight fuzz/soak driver ([#161](https://github.com/ManifoldKit/manifold-mlx/issues/161)) ([9fd8217](https://github.com/ManifoldKit/manifold-mlx/commit/9fd8217987e384e4d832078861f93d0a13b1ca3d))
+
 ## [0.4.0](https://github.com/ManifoldKit/manifold-mlx/compare/v0.3.4...v0.4.0) (2026-07-20)
 
 
