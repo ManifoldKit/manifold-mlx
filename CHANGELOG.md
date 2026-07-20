@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/ManifoldKit/manifold-mlx/compare/v0.3.4...v0.4.0) (2026-07-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* thread conversation history through generate() hints (ManifoldKit #2312) ([#158](https://github.com/ManifoldKit/manifold-mlx/issues/158))
+
+### Features
+
+* thread conversation history through generate() hints (ManifoldKit [#2312](https://github.com/ManifoldKit/manifold-mlx/issues/2312)) ([#158](https://github.com/ManifoldKit/manifold-mlx/issues/158)) ([a3f17e8](https://github.com/ManifoldKit/manifold-mlx/commit/a3f17e8539350c8839f3859c326528d986bc840c))
+
 ## [0.3.4](https://github.com/ManifoldKit/manifold-mlx/compare/v0.3.3...v0.3.4) (2026-07-17)
 
 
