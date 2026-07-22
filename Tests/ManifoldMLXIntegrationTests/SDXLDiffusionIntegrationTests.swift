@@ -30,6 +30,22 @@ import UniformTypeIdentifiers
 ///
 /// **Xcode-only** — the MLX metallib is compiled by Xcode, not `swift build`.
 /// Run via `scripts/test-mlx-integration.sh`.
+///
+/// **First run is slow — this is expected, not a hang.** The first real
+/// invocation against a fresh `.build` directory pays a one-time Metal shader
+/// JIT compile at SDXL's 1024x1024 resolution (a wall of
+/// `[Metal Compiler Warning]` lines in the log is normal, not an error) —
+/// verified 2026-07-22: ~4 minutes end to end on an Apple Silicon M-series
+/// machine. Subsequent runs reuse the compiled shader cache and the actual
+/// `generate` test drops to ~9 seconds. Do not kill a run that looks quiet
+/// for a few minutes on its first invocation.
+///
+/// **Generated images are copied to a durable path for human inspection**
+/// (`$TMPDIR/manifold-mlx-phase-d/sdxl-turbo-<uuid>.png`, printed to the test
+/// log) before the per-test `outDir` is deleted — deliberately unconditional,
+/// not gated behind an env var, because the automated byte-size + pixel-
+/// variance checks below can pass on a coherent-but-wrong image (right
+/// statistics, garbage content) that only a human glance catches.
 @MainActor
 final class SDXLDiffusionIntegrationTests: XCTestCase {
 
@@ -97,12 +113,16 @@ final class SDXLDiffusionIntegrationTests: XCTestCase {
         config.outputDirectory = outDir
 
         var sawProgress = false
+        var lastStep = 0
+        var lastTotal = 0
         var producedURL: URL?
         let stream = try backend.generate(prompt: "a red apple on a wooden table, photograph", config: config)
         for try await event in stream {
             switch event {
-            case .progress:
+            case .progress(let step, let total):
                 sawProgress = true
+                lastStep = step
+                lastTotal = total
             case .completed(let imageURL):
                 producedURL = imageURL
             case .preview:
@@ -113,12 +133,28 @@ final class SDXLDiffusionIntegrationTests: XCTestCase {
                 break
             }
         }
+        // Turbo models run 1-4 denoising steps (the preset's own default is 2);
+        // many more would mean the config path is mis-wired and this run's
+        // output would not mean what the test thinks. Always logged, pass or
+        // fail, per the same "make the evidence visible" reasoning as the VLM
+        // test's reply logging.
+        print("[SDXLDiffusionIntegrationTests] progress: step=\(lastStep) total=\(lastTotal)")
 
         XCTAssertTrue(sawProgress, "Expected at least one progress tick")
         let finalURL = try XCTUnwrap(producedURL, "Expected a completed image URL")
         XCTAssertTrue(FileManager.default.fileExists(atPath: finalURL.path),
                       "The completed URL must point at a file on disk")
         XCTAssertEqual(finalURL.pathExtension, "png")
+
+        // Copy the produced image to a stable, non-cleaned-up location before
+        // this test's `defer` deletes `outDir` — a human needs to actually look
+        // at it (an automated variance check can pass on a coherent-but-wrong
+        // image; a glance catches what the assertion can't).
+        let debugDir = FileManager.default.temporaryDirectory.appending(component: "manifold-mlx-phase-d")
+        try? FileManager.default.createDirectory(at: debugDir, withIntermediateDirectories: true)
+        let debugCopyURL = debugDir.appending(component: "sdxl-turbo-\(UUID().uuidString).png")
+        try? FileManager.default.copyItem(at: finalURL, to: debugCopyURL)
+        print("[SDXLDiffusionIntegrationTests] saved a durable copy for human inspection: \(debugCopyURL.path)")
 
         let attrs = try FileManager.default.attributesOfItem(atPath: finalURL.path)
         let byteSize = (attrs[.size] as? Int) ?? 0
