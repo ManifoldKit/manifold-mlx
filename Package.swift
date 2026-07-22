@@ -142,6 +142,11 @@ let package = Package(
             dependencies: [
                 "ManifoldMLX",
                 "FluxSwift",
+                // Phase D (2026-07-22): the new SDXL real-weight test needs
+                // `StableDiffusionConfiguration` directly (to assert
+                // `detectPreset`'s resolved preset id), which ManifoldMLX does
+                // not re-export.
+                "StableDiffusion",
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "ManifoldInference", package: "ManifoldKit"),

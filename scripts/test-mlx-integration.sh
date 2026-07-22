@@ -204,6 +204,15 @@ if [[ -n "${MANIFOLD_FLUX_MODEL:-}" ]]; then
     echo "==> Forwarding MANIFOLD_FLUX_MODEL=$MANIFOLD_FLUX_MODEL to the FLUX diffusion tests"
 fi
 
+# Optional Stable Diffusion / SDXL model directory for
+# SDXLDiffusionIntegrationTests. Forwarded only when set; default runs skip
+# diffusion without a local snapshot.
+if [[ -n "${MANIFOLD_SD_MODEL:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Add $ENV_PATH:MANIFOLD_SD_MODEL string $MANIFOLD_SD_MODEL" "$RUNFILE" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Set $ENV_PATH:MANIFOLD_SD_MODEL $MANIFOLD_SD_MODEL" "$RUNFILE"
+    echo "==> Forwarding MANIFOLD_SD_MODEL=$MANIFOLD_SD_MODEL to the SDXL diffusion tests"
+fi
+
 echo "==> Running tests (xcodebuild test-without-building): -only-testing $ONLY_TESTING_RUN"
 xcodebuild test-without-building \
     -xctestrun "$RUNFILE" \
