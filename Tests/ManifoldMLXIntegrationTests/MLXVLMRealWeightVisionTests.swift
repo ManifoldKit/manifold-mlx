@@ -227,6 +227,12 @@ final class MLXVLMRealWeightVisionTests: XCTestCase {
 
         let events = try await runTurn(on: backend, prompt: question, history: history)
         let text = collectAssistantText(from: events)
+        // Always logged (pass or fail) so a human can eyeball the actual
+        // model output — an automated token-membership check can pass on a
+        // technically-matching but nonsensical reply, and a failure needs
+        // the verbatim text to judge whether the assertion or the model is
+        // wrong (see this file's header doc).
+        print("[MLXVLMRealWeightVisionTests] model=\(modelURL.lastPathComponent) reply=\"\(text)\"")
 
         XCTAssertFalse(text.isEmpty, "A real vision-capable model must produce a non-empty reply to an image question.")
 
