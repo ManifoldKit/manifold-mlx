@@ -163,6 +163,24 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// `BackendCapabilitiesContractTests`.
     public var manifest: ModelManifest? { withStateLock { _manifest } }
 
+    /// The load-time-budgeted context ceiling (`ModelLoadPlan.effectiveContextSize`),
+    /// captured at ``loadModel(from:plan:)`` (#2348).
+    ///
+    /// Unlike llama.cpp's `n_ctx`, MLX has no context parameter at load time —
+    /// `mlx-swift-lm`'s `KVCacheSimple` grows unbounded, silently, with no
+    /// truncation or error once a session's running context exceeds the
+    /// model's trained maximum. This value is the ceiling `MLXGenerationDriver`
+    /// compares the KV cache's actual `offset` against after each generation,
+    /// to log a visible warning (mirroring `LlamaBackend`'s fail-loud
+    /// discipline) rather than degrading silently. It intentionally does NOT
+    /// feed a `maxKVSize` cap / `RotatingKVCache` swap — that would evict
+    /// middle conversation turns with no `ContextEstimator` awareness of the
+    /// eviction (see issue #2348's investigation comments); this is
+    /// visibility-only. `nil` before any load, after ``unloadModel()``, and
+    /// for injected test doubles that skip `loadModel` (see `_inject`).
+    /// Access only under `stateLock`.
+    private var _configuredContextSize: Int?
+
     /// Backend tuning knobs (KV cache quantization, prefill batch size).
     /// Applied at every ``generate`` call's ``GenerateParameters`` construction.
     /// Access only under `stateLock`. MLX honours `kvCacheQuantization` and
@@ -174,6 +192,11 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// state lock. Lets plumbing tests assert the setter persisted the value
     /// without needing a real model load.
     @_spi(Testing) public var loadOptionsForTesting: BackendLoadOptions { withStateLock { _loadOptions } }
+
+    /// Test-only read accessor for `_configuredContextSize` (#2348) — lets
+    /// plumbing tests assert `loadModel(from:plan:)` captured
+    /// `plan.effectiveContextSize` without needing a real model load.
+    @_spi(Testing) public var configuredContextSizeForTesting: Int? { withStateLock { _configuredContextSize } }
 
     // MARK: - Load Progress
 
@@ -272,9 +295,11 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     public func loadModel(from url: URL, plan: ModelLoadPlan) async throws {
         assert(plan.verdict != .deny,
                "ModelLoadPlan was denied; callers must check verdict before invoking backend")
-        // MLX reads context sizing from the model container; `plan` is informational
-        // here and kept for consistency with the protocol. Future work could honour
-        // `plan.effectiveContextSize` to cap generation length.
+        // MLX has no load-time context parameter to size (unlike llama.cpp's
+        // n_ctx) — `mlx-swift-lm`'s KV cache grows however far a session runs
+        // it. `plan.effectiveContextSize` is captured into `_configuredContextSize`
+        // below and consulted post-generation to warn loudly rather than let
+        // the session silently exceed the model's trained context (#2348).
         unloadModel()
 
         // Stage the bundled `mlx.metallib` next to the running binary before the
@@ -373,6 +398,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 _autoDetectedThinkingMarkers = detectedThinkingMarkers
                 _supportsVision = supportsVision
                 _manifest = producedManifest
+                _configuredContextSize = plan.effectiveContextSize
                 _promptCacheState.invalidate()
                 _kvCacheReuseEligible = kvCacheReuseEligible
                 _hasInitializedRuntime = true
@@ -487,7 +513,8 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                     parsedGrammar, dialect: _dialect, tools: config.tools,
                     toolChoice: config.toolChoice
                 ),
-                hints: hints
+                hints: hints,
+                configuredContextSize: _configuredContextSize
             )
             return snapshot
         }
@@ -526,7 +553,8 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                     hints: snapshot.hints,
                     generationStream: generationStream,
                     continuation: continuation,
-                    yieldHook: MLXBackend._yieldHookForTesting
+                    yieldHook: MLXBackend._yieldHookForTesting,
+                    configuredContextSize: snapshot.configuredContextSize
                 )
 
                 if let self {
@@ -586,6 +614,9 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         let pendingSnapshotTask: Task<Void, Never>?
         let grammar: GBNFGrammar?
         let hints: GenerationRuntimeHints
+        /// Snapshot of `_configuredContextSize` at call time (#2348) — the
+        /// ceiling the driver warns against post-generation.
+        let configuredContextSize: Int?
     }
 
     /// Wraps a *bare* tool-call envelope grammar (the `{"name":…,"arguments":…}`
@@ -676,7 +707,8 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     @_spi(Testing) public func _inject(
         _ container: any MLXModelContainerProtocol,
         supportsVision: Bool = false,
-        dialect: MLXToolDialect = .unknown
+        dialect: MLXToolDialect = .unknown,
+        configuredContextSize: Int? = nil
     ) {
         withStateLock {
             _modelContainer = container
@@ -686,6 +718,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
             _promptCacheState.invalidate()
             _kvCacheReuseEligible = enableKVCacheReuse
             _hasInitializedRuntime = false
+            _configuredContextSize = configuredContextSize
         }
     }
 
@@ -731,6 +764,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
             _autoDetectedThinkingMarkers = nil
             _supportsVision = false
             _manifest = nil
+            _configuredContextSize = nil
             _promptCacheState.invalidate()
             _kvCacheReuseEligible = false
             _hasInitializedRuntime = false

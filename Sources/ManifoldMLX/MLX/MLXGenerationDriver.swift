@@ -28,6 +28,13 @@ import ManifoldInference
     /// `nil` in production.
     @_spi(Testing) public nonisolated(unsafe) static var _streamingPhaseSetInTailHook: (() -> Void)?
 
+    /// Invoked synchronously with `(runningContext, configuredContextSize)`
+    /// whenever `warnIfContextExceeded` determines the KV cache's running
+    /// offset exceeded the load-time-configured ceiling (#2348). Lets tests
+    /// assert the warning path was reached deterministically, without parsing
+    /// `os.Logger` output. `nil` in production.
+    @_spi(Testing) public nonisolated(unsafe) static var _contextExceededWarningHookForTesting: ((Int, Int) -> Void)?
+
     private static let logger = Logger(
         subsystem: ManifoldConfiguration.shared.logSubsystem,
         category: "inference"
@@ -137,7 +144,13 @@ import ManifoldInference
         hints: GenerationRuntimeHints,
         generationStream: GenerationStream,
         continuation: AsyncThrowingStream<GenerationEvent, Error>.Continuation,
-        yieldHook: (@Sendable () async -> Void)?
+        yieldHook: (@Sendable () async -> Void)?,
+        // Load-time `ModelLoadPlan.effectiveContextSize` (#2348), captured by
+        // `MLXBackend.loadModel`. Compared against the KV cache's actual
+        // `offset` after `run()` completes to warn — visibly, not silently —
+        // when a session's running context exceeds the model's trained
+        // maximum. `nil` for injected test doubles that skip `loadModel`.
+        configuredContextSize: Int?
     ) async throws -> GenerateResult {
         // Seed the MLX global RandomState before constructing GenerateParameters
         // so the sampler's per-instance `RandomState()` (initialised from the
@@ -249,6 +262,8 @@ import ManifoldInference
             yieldHook: yieldHook
         )
 
+        warnIfContextExceeded(cache: prepared.cache, configuredContextSize: configuredContextSize)
+
         let snapshotInputs: MLXPromptCacheCoordinator.SnapshotCaptureInputs? =
             if kvCacheReuseEligible,
                result.completedNormally,
@@ -277,6 +292,29 @@ import ManifoldInference
         continuation.yield(.usage(usage))
 
         return GenerateResult(run: result, snapshotInputs: snapshotInputs)
+    }
+
+    /// Warns — loudly, mirroring `LlamaBackend`'s fail-loud discipline rather
+    /// than degrading silently — when the KV cache's actual running offset has
+    /// grown past `configuredContextSize` (#2348).
+    ///
+    /// `mlx-swift-lm`'s default `KVCacheSimple` has no ceiling: it keeps
+    /// reallocating in 256-token steps for as long as a conversation runs, with
+    /// no truncation and no error once the model's trained context is
+    /// exceeded. This does not cap generation (that would require `maxKVSize`
+    /// / `RotatingKVCache`, explicitly out of scope — see issue #2348's
+    /// investigation comments on `ContextEstimator` not modelling mid-session
+    /// eviction) — it only turns an invisible quality cliff into a visible one.
+    /// A no-op when `configuredContextSize` is `nil` (test doubles that skip
+    /// `loadModel`) or the cache holds no layers.
+    private func warnIfContextExceeded(cache: MLXPromptCache, configuredContextSize: Int?) {
+        guard let configuredContextSize else { return }
+        guard let runningContext = cache.value.map(\.offset).max() else { return }
+        guard runningContext > configuredContextSize else { return }
+        Self.logger.warning(
+            "MLX session context (\(runningContext, privacy: .public) tokens) exceeded the model's configured context ceiling (\(configuredContextSize, privacy: .public) tokens). mlx-swift-lm's KV cache grows unbounded past this point — no truncation, no error — so generation quality may silently degrade. See ManifoldKit issue #2348."
+        )
+        Self._contextExceededWarningHookForTesting?(runningContext, configuredContextSize)
     }
 
     /// Resolves the active thinking-marker pair from the per-request override
