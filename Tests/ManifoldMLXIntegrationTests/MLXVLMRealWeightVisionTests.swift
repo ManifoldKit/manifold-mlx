@@ -287,9 +287,13 @@ final class MLXVLMRealWeightVisionTests: XCTestCase {
     /// turn is real evidence of vision — zero flake risk, and one model
     /// load instead of two.
     ///
-    /// `resetConversation()` runs between the two turns so the blind turn's
-    /// question/reply isn't sitting in the grounded turn's context — the
-    /// two turns must be independent, not a two-turn conversation.
+    /// `resetConversation()` runs between the two turns as belt-and-braces,
+    /// not because it's load-bearing here: `generate()` builds each turn's
+    /// messages purely from the `hints.history` + `prompt` passed to that
+    /// call, the backend itself holds no cross-call conversation state, and
+    /// KV-cache reuse is off twice over (`enableKVCacheReuse: false` below,
+    /// and a VLM always routes through the VLM factory regardless). Calling
+    /// it anyway keeps this test correct even if that stops being true.
     func test_realVLM_sentSyntheticImage_respondsWithImageGroundedContent() async throws {
         let backend = MLXBackend(enableKVCacheReuse: false)
         try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 2048))
@@ -302,6 +306,15 @@ final class MLXVLMRealWeightVisionTests: XCTestCase {
         let blindEvents = try await runTurn(on: backend, prompt: Self.visionQuestion, history: blindHistory)
         let blindText = collectAssistantText(from: blindEvents)
         print("[MLXVLMRealWeightVisionTests] (blind control, no image) model=\(modelURL.lastPathComponent) reply=\"\(blindText)\"")
+        // The whole derivation below only means anything if the model
+        // actually answered — an empty blind reply would vacuously leave
+        // every palette color as a "candidate", and a subsequent grounded
+        // reply of e.g. "green" would pass without having demonstrated
+        // anything about vision.
+        XCTAssertFalse(
+            blindText.isEmpty,
+            "Blind control turn produced no reply; the derived probe colour is then not evidence of anything."
+        )
         let blindTokens = Self.wordTokens(of: blindText)
 
         backend.resetConversation()

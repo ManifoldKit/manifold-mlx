@@ -53,6 +53,22 @@ import UniformTypeIdentifiers
 @MainActor
 final class SDXLDiffusionIntegrationTests: XCTestCase {
 
+    override func setUp() {
+        super.setUp()
+        // XCTest's own per-test execution-time-allowance defaults to 600s.
+        // Nothing enables that mechanism today (the script passes neither
+        // `-test-timeouts-enabled` nor
+        // `-default-test-execution-time-allowance`), so it's inert now, but
+        // `test_generate_realSDXLTurboSnapshot_writesNonDegeneratePNG`'s own
+        // 900s deadline exceeds it — if that mechanism is ever switched on,
+        // XCTest's own 600s would fire first and hard-kill the runner
+        // instead of yielding that test's own clean SDXLGenerateTimeoutError.
+        // Set here (not mid-test) so the allowance is armed before whatever
+        // internal timer XCTest starts it against, whichever that turns out
+        // to be once the mechanism is actually enabled.
+        self.executionTimeAllowance = 1200
+    }
+
     private func requireSDModelURL() throws -> URL {
         try XCTSkipUnless(HardwareRequirements.isAppleSilicon, "Requires Apple Silicon")
         try XCTSkipUnless(HardwareRequirements.hasMetalDevice, "Requires Metal GPU")
@@ -147,17 +163,6 @@ final class SDXLDiffusionIntegrationTests: XCTestCase {
             let seconds: Double
             var description: String { "SDXL generate stream timed out after \(seconds)s — possible denoise-loop hang" }
         }
-        // XCTest's own per-test execution-time-allowance defaults to 600s.
-        // Nothing enables that mechanism today (the script passes neither
-        // `-test-timeouts-enabled` nor
-        // `-default-test-execution-time-allowance`), so it's inert now, but
-        // the 900s deadline below exceeds it — if that mechanism is ever
-        // switched on, XCTest's own 600s would fire first and hard-kill the
-        // runner instead of yielding this test's own clean
-        // SDXLGenerateTimeoutError. Raise this test's allowance to stay
-        // above the deadline it's supposed to race against.
-        self.executionTimeAllowance = 1200
-
         let timeoutSeconds: Double = 900
         // Create the stream on the main actor (it captures `backend`/`config`,
         // both main-actor-isolated) and hand only the already-created,
@@ -177,21 +182,34 @@ final class SDXLDiffusionIntegrationTests: XCTestCase {
             }
             defer {
                 group.cancelAll()
+                // This defer runs on EVERY exit of the group's closure, not
+                // only the timeout branch — including the normal success
+                // path, right after `group.next()` returns below.
                 // `group.cancelAll()` only cancels the collect Task above;
                 // the detached denoise loop inside `backend.generate()` is a
                 // separately-owned Task.detached that checks
                 // `_stopRequested` per iteration (MLXDiffusionBackend.swift),
-                // not `Task.isCancelled`. On the timeout branch specifically,
-                // the collect Task's cancellation never reaches that loop,
-                // and `onTermination(.cancelled)` on the underlying
-                // AsyncThrowingStream is documented unreliable
-                // (MLXDiffusionBackend.swift:230-234) — so without this
-                // explicit call, a real hang would leave the denoise loop
-                // running (and `backend`'s `_generator` referenced by it)
-                // even after this test function returns and its
+                // not `Task.isCancelled`, and `onTermination(.cancelled)` on
+                // the underlying AsyncThrowingStream is documented
+                // unreliable (MLXDiffusionBackend.swift:230-234) — so on a
+                // real timeout, without this explicit call, the denoise loop
+                // could keep running (and keep `backend`'s `_generator`
+                // referenced) even after this test function returns and its
                 // `unloadModel()` defer clears `_generator` out from under
                 // it. `stopGeneration()` sets `_stopRequested` directly,
                 // which the loop's own per-iteration check honors.
+                //
+                // On the success path this call is a verified no-op: by the
+                // time `group.next()` returns the winning collect Task's
+                // result, `_isGenerating` is already `false` (set before
+                // `continuation.finish()`), nothing downstream reads
+                // `_stopRequested` after that point, and both
+                // `unloadModel()` and the next `generate()` call reset it
+                // anyway. It runs unconditionally here (rather than only on
+                // the timeout branch) because there's no way to distinguish
+                // the two branches from inside this shared `defer` — that's
+                // fine precisely because it's a no-op on the branch where it
+                // doesn't matter.
                 backend.stopGeneration()
             }
             return try await group.next() ?? []
