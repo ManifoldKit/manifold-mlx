@@ -166,20 +166,45 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// The load-time-budgeted context ceiling (`ModelLoadPlan.effectiveContextSize`),
     /// captured at ``loadModel(from:plan:)`` (#2348).
     ///
-    /// Unlike llama.cpp's `n_ctx`, MLX has no context parameter at load time —
-    /// `mlx-swift-lm`'s `KVCacheSimple` grows unbounded, silently, with no
-    /// truncation or error once a session's running context exceeds the
-    /// model's trained maximum. This value is the ceiling `MLXGenerationDriver`
-    /// compares the KV cache's actual `offset` against after each generation,
-    /// to log a visible warning (mirroring `LlamaBackend`'s fail-loud
-    /// discipline) rather than degrading silently. It intentionally does NOT
+    /// **This is a memory/KV-allocation budget, NOT the model's trained
+    /// context** (review finding MLX-1 — an earlier revision of this comment
+    /// conflated the two, which made the warning built on this value
+    /// misdiagnose an ordinary long chat as "exceeding the trained context"
+    /// when the real trained ceiling was ~16× further out). `effectiveContextSize`
+    /// is `min(requestedContextSize, trainedContextLength, absoluteCeiling,
+    /// memoryCeiling)` computed by core's `ModelLoadPlan` — with no session
+    /// override it is usually the conservative 8192 default, regardless of
+    /// how large the model's real trained context is. `_manifest?.contextWindow`
+    /// (from the model's own `config.json`) is the value that represents the
+    /// model's real trained maximum.
+    ///
+    /// `_configuredContextSize` feeds a secondary, explicitly budget-scoped
+    /// warning (`reportContextCheck(runningContext:)`) — a memory-headroom
+    /// signal distinct from the primary trained-context warning, worded so
+    /// the two are never conflated in a log line. It intentionally does NOT
     /// feed a `maxKVSize` cap / `RotatingKVCache` swap — that would evict
     /// middle conversation turns with no `ContextEstimator` awareness of the
-    /// eviction (see issue #2348's investigation comments); this is
-    /// visibility-only. `nil` before any load, after ``unloadModel()``, and
-    /// for injected test doubles that skip `loadModel` (see `_inject`).
-    /// Access only under `stateLock`.
+    /// eviction (see issue #2348's investigation comments); both warnings
+    /// built on this backend's state are visibility-only. `nil` before any
+    /// load, after ``unloadModel()``, and for injected test doubles that skip
+    /// `loadModel` (see `_inject`). Access only under `stateLock`.
     private var _configuredContextSize: Int?
+
+    /// `true` once this session has already logged the primary
+    /// trained-context-exceeded warning (#2348) — rate-limits
+    /// `reportContextCheck(runningContext:)` to fire at most once per session
+    /// (defined, like KV-cache reuse, as "between `loadModel`/`resetConversation`/
+    /// `unloadModel`" — review finding MLX-5) rather than once per turn for
+    /// the rest of a long conversation. Reset alongside the KV cache itself
+    /// in ``unloadModel()`` and ``resetConversation()``. Access only under
+    /// `stateLock`.
+    private var _hasWarnedTrainedContextExceeded = false
+
+    /// Sibling of `_hasWarnedTrainedContextExceeded` rate-limiting the
+    /// separate budget-crossing warning (#2348, MLX-1 item 2). Independent
+    /// flag because the two ceilings are independent facts that can each
+    /// cross at a different turn.
+    private var _hasWarnedBudgetExceeded = false
 
     /// Backend tuning knobs (KV cache quantization, prefill batch size).
     /// Applied at every ``generate`` call's ``GenerateParameters`` construction.
@@ -192,11 +217,6 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// state lock. Lets plumbing tests assert the setter persisted the value
     /// without needing a real model load.
     @_spi(Testing) public var loadOptionsForTesting: BackendLoadOptions { withStateLock { _loadOptions } }
-
-    /// Test-only read accessor for `_configuredContextSize` (#2348) — lets
-    /// plumbing tests assert `loadModel(from:plan:)` captured
-    /// `plan.effectiveContextSize` without needing a real model load.
-    @_spi(Testing) public var configuredContextSizeForTesting: Int? { withStateLock { _configuredContextSize } }
 
     // MARK: - Load Progress
 
@@ -228,6 +248,33 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     ///
     /// `nil` in production — the real cooperative yield runs instead.
     @_spi(Testing) public nonisolated(unsafe) static var _yieldHookForTesting: (@Sendable () async -> Void)?
+
+    /// Test-injection hook for the primary trained-context-exceeded warning
+    /// (#2348) — invoked with `(runningContext, trainedContextMax)` the first
+    /// time `reportContextCheck(runningContext:)` newly crosses
+    /// `_manifest?.contextWindow` in a session. Lock-guarded (mirrors
+    /// `CloudImageEncoding._encodeHook`) rather than a bare
+    /// `nonisolated(unsafe) static var` — review finding MLX-3: an unlocked
+    /// static var read on the live generation path and written by test
+    /// setup/teardown is a real cross-thread race under `swift test --parallel`,
+    /// not just a style nit (core AGENTS.md Swift-6 gotcha 7). `nil` in
+    /// production.
+    private static let _trainedContextExceededHook =
+        OSAllocatedUnfairLock<(@Sendable (Int, Int) -> Void)?>(initialState: nil)
+
+    /// Installs (or clears, with `nil`) the trained-context test hook race-free.
+    @_spi(Testing) public static func setTrainedContextExceededHookForTesting(_ hook: (@Sendable (Int, Int) -> Void)?) {
+        _trainedContextExceededHook.withLock { $0 = hook }
+    }
+
+    /// Sibling of `_trainedContextExceededHook` for the secondary
+    /// budget-crossing warning. Same lock-guarded shape, same rationale.
+    private static let _budgetExceededHook =
+        OSAllocatedUnfairLock<(@Sendable (Int, Int) -> Void)?>(initialState: nil)
+
+    @_spi(Testing) public static func setBudgetExceededHookForTesting(_ hook: (@Sendable (Int, Int) -> Void)?) {
+        _budgetExceededHook.withLock { $0 = hook }
+    }
 
     // MARK: - Init
 
@@ -297,9 +344,11 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                "ModelLoadPlan was denied; callers must check verdict before invoking backend")
         // MLX has no load-time context parameter to size (unlike llama.cpp's
         // n_ctx) — `mlx-swift-lm`'s KV cache grows however far a session runs
-        // it. `plan.effectiveContextSize` is captured into `_configuredContextSize`
-        // below and consulted post-generation to warn loudly rather than let
-        // the session silently exceed the model's trained context (#2348).
+        // it. `plan.effectiveContextSize` (the load-time memory budget — see
+        // `_configuredContextSize`'s doc, NOT the model's trained maximum) is
+        // captured below and consulted post-generation alongside the real
+        // trained maximum (`_manifest?.contextWindow`) to warn loudly rather
+        // than let the session silently exceed either (#2348, `reportContextCheck`).
         unloadModel()
 
         // Stage the bundled `mlx.metallib` next to the running binary before the
@@ -513,8 +562,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                     parsedGrammar, dialect: _dialect, tools: config.tools,
                     toolChoice: config.toolChoice
                 ),
-                hints: hints,
-                configuredContextSize: _configuredContextSize
+                hints: hints
             )
             return snapshot
         }
@@ -554,7 +602,13 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                     generationStream: generationStream,
                     continuation: continuation,
                     yieldHook: MLXBackend._yieldHookForTesting,
-                    configuredContextSize: snapshot.configuredContextSize
+                    // The driver reports the KV cache's raw running offset;
+                    // this backend owns comparison thresholds, rate-limiting,
+                    // and the actual warning (review MLX-1/MLX-5 — see
+                    // `reportContextCheck(runningContext:)`).
+                    onContextCheck: { [weak self] running in
+                        self?.reportContextCheck(runningContext: running)
+                    }
                 )
 
                 if let self {
@@ -599,6 +653,74 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         return generationStream
     }
 
+    // MARK: - Context ceiling warnings (#2348)
+
+    /// Compares the KV cache's actual running offset — reported by
+    /// `MLXGenerationDriver` after every generation attempt, including a
+    /// thrown or cancelled one — against the two independent ceilings this
+    /// backend tracks, and logs a visible, rate-limited warning for each one
+    /// newly crossed this session.
+    ///
+    /// **Two ceilings, two messages, never conflated (review MLX-1 — the
+    /// blocker).** An earlier revision of this warning compared only against
+    /// `_configuredContextSize` (the memory-budget-clamped
+    /// `ModelLoadPlan.effectiveContextSize`, usually the conservative 8192
+    /// default with no session override) and *called it* the model's trained
+    /// context. That made the warning fire on essentially every long chat
+    /// while the model's real trained ceiling — `_manifest?.contextWindow`,
+    /// from `config.json` — was still ~16× further out for a real
+    /// Llama-3.1-8B-4bit snapshot. A warning that names the wrong cause is
+    /// worse than no warning: it trains the reader to ignore the signal, the
+    /// exact inversion of Principle 6 ("errors are visible"). So:
+    /// - **Primary** — `runningContext > _manifest?.contextWindow`: this is
+    ///   the actual quality cliff #2348 asks to make visible. Named "trained
+    ///   context" in the log line.
+    /// - **Secondary** — `runningContext > _configuredContextSize`: a
+    ///   memory-headroom signal, not a quality cliff (with no session
+    ///   override this fires on almost every session, since the budget
+    ///   default is much smaller than most models' trained context — that is
+    ///   expected and is explicitly NOT the same claim as the primary
+    ///   warning). Named "budgeted KV allocation" in the log line so it is
+    ///   never mistaken for the trained-context warning.
+    ///
+    /// **Rate-limited to once per session** (review MLX-5) via
+    /// `_hasWarnedTrainedContextExceeded` / `_hasWarnedBudgetExceeded`, reset
+    /// in `unloadModel()` and `resetConversation()` — the same session
+    /// boundary `InferenceBackend`'s KV-reuse contract documents. Without
+    /// this, a long conversation would re-log the same warning on every
+    /// subsequent turn.
+    private func reportContextCheck(runningContext: Int) {
+        let toWarn: (trained: Int?, budget: Int?) = withStateLock {
+            var trainedToWarn: Int?
+            var budgetToWarn: Int?
+            if let trainedMax = _manifest?.contextWindow,
+               runningContext > trainedMax,
+               !_hasWarnedTrainedContextExceeded {
+                _hasWarnedTrainedContextExceeded = true
+                trainedToWarn = trainedMax
+            }
+            if let budget = _configuredContextSize,
+               runningContext > budget,
+               !_hasWarnedBudgetExceeded {
+                _hasWarnedBudgetExceeded = true
+                budgetToWarn = budget
+            }
+            return (trainedToWarn, budgetToWarn)
+        }
+        if let trainedMax = toWarn.trained {
+            Self.logger.warning(
+                "MLX session context (\(runningContext, privacy: .public) tokens) exceeded the model's trained context (\(trainedMax, privacy: .public) tokens). mlx-swift-lm's KV cache grows unbounded past this point — no truncation, no error — so generation quality may silently degrade. See ManifoldKit issue #2348."
+            )
+            MLXBackend._trainedContextExceededHook.withLock { $0 }?(runningContext, trainedMax)
+        }
+        if let budget = toWarn.budget {
+            Self.logger.warning(
+                "MLX session context (\(runningContext, privacy: .public) tokens) exceeded the budgeted KV allocation (\(budget, privacy: .public) tokens). This is a memory-headroom signal, not a quality cliff — set a session context-size override to raise it. See ManifoldKit issue #2348."
+            )
+            MLXBackend._budgetExceededHook.withLock { $0 }?(runningContext, budget)
+        }
+    }
+
     /// Coherent per-call snapshot of every piece of backend state the driver
     /// reads. Captured under `stateLock` so the driver's view stays consistent
     /// even if a `set*History` / `setLoadOptions` call lands mid-stream.
@@ -614,9 +736,6 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         let pendingSnapshotTask: Task<Void, Never>?
         let grammar: GBNFGrammar?
         let hints: GenerationRuntimeHints
-        /// Snapshot of `_configuredContextSize` at call time (#2348) — the
-        /// ceiling the driver warns against post-generation.
-        let configuredContextSize: Int?
     }
 
     /// Wraps a *bare* tool-call envelope grammar (the `{"name":…,"arguments":…}`
@@ -739,6 +858,15 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         withStateLock { _autoDetectedThinkingMarkers = markers }
     }
 
+    /// Test-only seam: forces `_manifest` to a specific value, simulating what
+    /// `loadModel(from:plan:)` would have populated from `config.json` (#2348).
+    /// `reportContextCheck(runningContext:)`'s primary trained-context warning
+    /// reads `_manifest?.contextWindow`, so tests need this to exercise that
+    /// path without a real model load — mirrors `_injectAutoDetectedThinkingMarkers`.
+    @_spi(Testing) public func _injectManifest(_ manifest: ModelManifest?) {
+        withStateLock { _manifest = manifest }
+    }
+
     // MARK: - Control
 
     public func stopGeneration() {
@@ -765,6 +893,8 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
             _supportsVision = false
             _manifest = nil
             _configuredContextSize = nil
+            _hasWarnedTrainedContextExceeded = false
+            _hasWarnedBudgetExceeded = false
             _promptCacheState.invalidate()
             _kvCacheReuseEligible = false
             _hasInitializedRuntime = false
@@ -822,6 +952,14 @@ extension MLXBackend {
     public func resetConversation() {
         withStateLock {
             _promptCacheState.invalidate()
+            // A conversation reset starts a fresh KV-cache session (same
+            // boundary the `InferenceBackend` KV-reuse contract documents:
+            // "between loadModel(), resetConversation(), and unloadModel()").
+            // Both context warnings are per-session, not per-process, so they
+            // must be eligible to fire again in the new conversation (#2348,
+            // MLX-5).
+            _hasWarnedTrainedContextExceeded = false
+            _hasWarnedBudgetExceeded = false
         }
     }
 
