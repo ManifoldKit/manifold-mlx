@@ -206,6 +206,26 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// cross at a different turn.
     private var _hasWarnedBudgetExceeded = false
 
+    /// Whether `_manifest?.contextWindow` was actually measured from the
+    /// loaded model's `config.json` (`MLXModelProbe.contextWindowWasDetected(at:)`),
+    /// as opposed to `produceManifest` silently substituting its conservative
+    /// 8192 default because no recognised context-length key was present
+    /// (SSM/Mamba/RWKV-shaped configs, a stripped snapshot — #2348, review
+    /// finding MLX-A).
+    ///
+    /// `reportContextCheck(runningContext:)`'s primary warning gates on this:
+    /// a fallback default is a guess, not a measurement, and stating it as
+    /// "the model's trained context" would misdiagnose the cause exactly the
+    /// way the pre-fix MLX-1 comparison did — just narrower (wrong-guess
+    /// instead of wrong-value). A model whose config lacks the key gets no
+    /// primary warning at all, silence over stating an unverified number as
+    /// fact; the secondary budget warning is unaffected and still fires
+    /// independently. Set at load time alongside `_manifest`; reset in
+    /// ``unloadModel()`` only — like `_manifest` itself, this is a load-time
+    /// fact about the model/config, not a per-conversation one, so
+    /// `resetConversation()` must NOT touch it. Access only under `stateLock`.
+    private var _trainedContextWasDetected = false
+
     /// Backend tuning knobs (KV cache quantization, prefill batch size).
     /// Applied at every ``generate`` call's ``GenerateParameters`` construction.
     /// Access only under `stateLock`. MLX honours `kvCacheQuantization` and
@@ -440,6 +460,10 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 detectedThinkingMarkers: detectedThinkingMarkers,
                 supportsVision: supportsVision
             )
+            // #2348, MLX-A: whether contextWindow above is a real measurement
+            // from config.json or produceManifest's silent 8192 substitute —
+            // gates the primary trained-context warning below.
+            let trainedContextWasDetected = MLXModelProbe.contextWindowWasDetected(at: url)
             let kvCacheReuseEligible = enableKVCacheReuse && !routeThroughVLMFactory
             withStateLock {
                 _modelContainer = container
@@ -447,6 +471,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 _autoDetectedThinkingMarkers = detectedThinkingMarkers
                 _supportsVision = supportsVision
                 _manifest = producedManifest
+                _trainedContextWasDetected = trainedContextWasDetected
                 _configuredContextSize = plan.effectiveContextSize
                 _promptCacheState.invalidate()
                 _kvCacheReuseEligible = kvCacheReuseEligible
@@ -689,11 +714,24 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// boundary `InferenceBackend`'s KV-reuse contract documents. Without
     /// this, a long conversation would re-log the same warning on every
     /// subsequent turn.
+    ///
+    /// **The primary warning also gates on `_trainedContextWasDetected`
+    /// (review MLX-A)** — `_manifest?.contextWindow` can itself be a guess:
+    /// `produceManifest` silently substitutes 8192 when `config.json` carries
+    /// none of the recognised context-length keys. Stating that substitute as
+    /// "the model's trained context" would be the same class of defect MLX-1
+    /// fixed, just narrower — a real 128k model whose config omits the key
+    /// would otherwise be told, falsely, that it blew an 8192 ceiling the
+    /// first time a chat ran long. No detection → no primary warning; the
+    /// secondary budget warning is unaffected and still fires independently
+    /// (`_configuredContextSize` always comes from `ModelLoadPlan`, never a
+    /// guess).
     private func reportContextCheck(runningContext: Int) {
         let toWarn: (trained: Int?, budget: Int?) = withStateLock {
             var trainedToWarn: Int?
             var budgetToWarn: Int?
-            if let trainedMax = _manifest?.contextWindow,
+            if _trainedContextWasDetected,
+               let trainedMax = _manifest?.contextWindow,
                runningContext > trainedMax,
                !_hasWarnedTrainedContextExceeded {
                 _hasWarnedTrainedContextExceeded = true
@@ -838,6 +876,15 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
             _kvCacheReuseEligible = enableKVCacheReuse
             _hasInitializedRuntime = false
             _configuredContextSize = configuredContextSize
+            // Review MLX-C: unlike `unloadModel()`, this was leaving the
+            // once-per-session warning flags untouched, so a *second* inject
+            // into the same backend instance would silently start with an
+            // already-suppressed warning. Harmless while every test injects
+            // into a fresh `MLXBackend()`, but not a contract worth leaving
+            // unstated. `_trainedContextWasDetected` is deliberately NOT
+            // reset here — it is set by `_injectManifest`, called separately.
+            _hasWarnedTrainedContextExceeded = false
+            _hasWarnedBudgetExceeded = false
         }
     }
 
@@ -858,13 +905,24 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         withStateLock { _autoDetectedThinkingMarkers = markers }
     }
 
-    /// Test-only seam: forces `_manifest` to a specific value, simulating what
-    /// `loadModel(from:plan:)` would have populated from `config.json` (#2348).
-    /// `reportContextCheck(runningContext:)`'s primary trained-context warning
-    /// reads `_manifest?.contextWindow`, so tests need this to exercise that
-    /// path without a real model load — mirrors `_injectAutoDetectedThinkingMarkers`.
-    @_spi(Testing) public func _injectManifest(_ manifest: ModelManifest?) {
-        withStateLock { _manifest = manifest }
+    /// Test-only seam: forces `_manifest` (and, by default, `_trainedContextWasDetected`)
+    /// to specific values, simulating what `loadModel(from:plan:)` would have
+    /// populated from `config.json` (#2348). `reportContextCheck(runningContext:)`'s
+    /// primary trained-context warning reads both, so tests need this to
+    /// exercise that path without a real model load — mirrors
+    /// `_injectAutoDetectedThinkingMarkers`.
+    ///
+    /// `wasDetected` defaults to `true`: every existing call site injects a
+    /// manifest to stand in for a real, successfully-probed `config.json`, so
+    /// the default preserves that intent without touching call sites. Pass
+    /// `false` to simulate `produceManifest`'s fallback-to-8192 path (review
+    /// MLX-A) — a manifest is present, but its `contextWindow` was never
+    /// actually measured.
+    @_spi(Testing) public func _injectManifest(_ manifest: ModelManifest?, wasDetected: Bool = true) {
+        withStateLock {
+            _manifest = manifest
+            _trainedContextWasDetected = wasDetected
+        }
     }
 
     // MARK: - Control
@@ -892,6 +950,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
             _autoDetectedThinkingMarkers = nil
             _supportsVision = false
             _manifest = nil
+            _trainedContextWasDetected = false
             _configuredContextSize = nil
             _hasWarnedTrainedContextExceeded = false
             _hasWarnedBudgetExceeded = false
