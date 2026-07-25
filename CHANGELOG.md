@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.1](https://github.com/ManifoldKit/manifold-mlx/compare/v0.4.0...v0.4.1) (2026-07-25)
+
+
+### Features
+
+* **fuzz:** add fuzz-mlx overnight fuzz/soak driver ([#161](https://github.com/ManifoldKit/manifold-mlx/issues/161)) ([9fd8217](https://github.com/ManifoldKit/manifold-mlx/commit/9fd8217987e384e4d832078861f93d0a13b1ca3d))
+
+
+### Bug Fixes
+
+* **deps:** bump ManifoldKit pin to v0.74.0 ([de02df9](https://github.com/ManifoldKit/manifold-mlx/commit/de02df9a57708c7b74012cec017980116e3d68fa))
+* **mlx:** honor plan.effectiveContextSize and warn when a session exceeds it ([#164](https://github.com/ManifoldKit/manifold-mlx/issues/164)) ([826c297](https://github.com/ManifoldKit/manifold-mlx/commit/826c297fab5aa07b00e02d0243e7ce41b5006694))
+
 ## [0.4.0](https://github.com/ManifoldKit/manifold-mlx/compare/v0.3.4...v0.4.0) (2026-07-20)
 
 
