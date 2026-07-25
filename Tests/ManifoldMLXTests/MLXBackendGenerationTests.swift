@@ -1370,4 +1370,392 @@ final class MLXBackendGenerationTests: XCTestCase {
         // Sabotage check: removing the `generation.toolCall` forwarding in
         // MLXGenerationDriver leaves `toolCalls` empty (the previous behavior).
     }
+
+    // MARK: - #2348: visible warnings when a session exceeds its context ceilings
+
+    /// Records `(running, ceiling)` pairs from one of `MLXBackend`'s
+    /// lock-guarded test hooks. Thread-safe because the hook can fire from
+    /// the `@MainActor` generation task while the test reads `calls` from the
+    /// test-runner thread.
+    private final class ContextWarningCapture: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls: [(running: Int, ceiling: Int)] = []
+        func record(_ running: Int, _ ceiling: Int) {
+            lock.lock(); defer { lock.unlock() }
+            _calls.append((running, ceiling))
+        }
+        var calls: [(running: Int, ceiling: Int)] {
+            lock.lock(); defer { lock.unlock() }
+            return _calls
+        }
+    }
+
+    /// A `ModelManifest` fixture with an explicit `contextWindow`, standing
+    /// in for what `MLXModelProbe.produceManifest` would have read from a
+    /// real `config.json` at `loadModel(from:plan:)` time.
+    private func makeManifest(contextWindow: Int) -> ModelManifest {
+        ModelManifest(
+            contextWindow: contextWindow,
+            supportsTools: true,
+            supportsThinking: false,
+            thinkingMarkers: nil,
+            supportsSeed: true,
+            supportedSamplingParameters: [.temperature, .topP],
+            modelIdentifier: "ctx-warning-fixture",
+            producerKind: .local
+        )
+    }
+
+    /// The #2348 regression, correctly diagnosed (review MLX-1 — this
+    /// replaces an earlier revision of this test suite that compared against
+    /// the memory-budget `configuredContextSize` and mislabelled it "trained
+    /// context"). This asserts the PRIMARY warning fires against the model's
+    /// real trained maximum (`_manifest.contextWindow`, injected here to
+    /// stand in for a real `config.json` probe) — the actual quality cliff
+    /// #2348 exists to make visible — and that it does NOT fire merely
+    /// because the memory budget was exceeded (the budget here, 5, is far
+    /// below the running context, so this also proves the two warnings are
+    /// independently gated, not conflated into one).
+    func test_generate_warnsWhenRunningContextExceedsTrainedMaximum() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["ok"]
+        mock.simulatedCacheCompletionTokenCount = 3
+        mock.preparedTokenBatches = [[1, 2, 3, 4, 5, 6, 7, 8]] // 8 prompt + 3 completion = 11
+
+        let backend = MLXBackend()
+        backend._inject(mock, configuredContextSize: 5)
+        backend._injectManifest(makeManifest(contextWindow: 10))
+
+        let trainedCapture = ContextWarningCapture()
+        MLXBackend.setTrainedContextExceededHookForTesting { trainedCapture.record($0, $1) }
+        defer { MLXBackend.setTrainedContextExceededHookForTesting(nil) }
+
+        _ = try await collectAllEvents(from: try backend.generate(
+            prompt: "hi",
+            systemPrompt: nil,
+            config: GenerationConfig()
+        ))
+
+        XCTAssertEqual(trainedCapture.calls.count, 1, "the primary warning must fire exactly once when the running context (11) exceeds the model's trained maximum (10)")
+        XCTAssertEqual(trainedCapture.calls.first?.running, 11)
+        XCTAssertEqual(trainedCapture.calls.first?.ceiling, 10)
+
+        // Sabotage check: commenting out the
+        // `MLXBackend._trainedContextExceededHook.withLock { $0 }?(...)` call
+        // in `reportContextCheck` (or its `runningContext > trainedMax`
+        // guard) turns this red — verified manually, reverted after confirming.
+    }
+
+    /// A session that stays within the model's trained maximum must never
+    /// trip the primary warning — the flip side of the above.
+    func test_generate_doesNotWarnWhenRunningContextStaysWithinTrainedMaximum() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["ok"]
+        mock.simulatedCacheCompletionTokenCount = 1
+        mock.preparedTokenBatches = [[1, 2, 3]] // 3 prompt + 1 completion = 4, well under 100
+
+        let backend = MLXBackend()
+        backend._injectManifest(makeManifest(contextWindow: 100))
+
+        let trainedCapture = ContextWarningCapture()
+        MLXBackend.setTrainedContextExceededHookForTesting { trainedCapture.record($0, $1) }
+        defer { MLXBackend.setTrainedContextExceededHookForTesting(nil) }
+        backend._inject(mock)
+
+        _ = try await collectAllEvents(from: try backend.generate(
+            prompt: "hi",
+            systemPrompt: nil,
+            config: GenerationConfig()
+        ))
+
+        XCTAssertTrue(trainedCapture.calls.isEmpty, "a running context under the trained maximum must never trigger the primary warning")
+    }
+
+    /// A running context that exceeds the memory-budget ceiling but NOT the
+    /// model's trained maximum must fire only the SECONDARY (budget) warning
+    /// — never the primary one, and with distinct wording (review MLX-1 item
+    /// 2: the two must never be conflated). This is the "ordinary long chat"
+    /// scenario the review flagged as routinely misdiagnosed by the old code:
+    /// budget (8) crossed, trained maximum (1000) nowhere close.
+    func test_generate_warnsOnBudgetOnly_whenTrainedMaximumNotExceeded() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["ok"]
+        mock.simulatedCacheCompletionTokenCount = 2
+        mock.preparedTokenBatches = [[1, 2, 3, 4, 5, 6, 7, 8]] // 8 prompt + 2 completion = 10
+
+        let backend = MLXBackend()
+        backend._inject(mock, configuredContextSize: 8)
+        backend._injectManifest(makeManifest(contextWindow: 1_000))
+
+        let trainedCapture = ContextWarningCapture()
+        let budgetCapture = ContextWarningCapture()
+        MLXBackend.setTrainedContextExceededHookForTesting { trainedCapture.record($0, $1) }
+        MLXBackend.setBudgetExceededHookForTesting { budgetCapture.record($0, $1) }
+        defer {
+            MLXBackend.setTrainedContextExceededHookForTesting(nil)
+            MLXBackend.setBudgetExceededHookForTesting(nil)
+        }
+
+        _ = try await collectAllEvents(from: try backend.generate(
+            prompt: "hi",
+            systemPrompt: nil,
+            config: GenerationConfig()
+        ))
+
+        XCTAssertTrue(trainedCapture.calls.isEmpty, "the running context (10) is nowhere near the trained maximum (1000) — the primary warning must not fire")
+        XCTAssertEqual(budgetCapture.calls.count, 1, "the running context (10) exceeds the budget (8) — the secondary warning must fire")
+        XCTAssertEqual(budgetCapture.calls.first?.running, 10)
+        XCTAssertEqual(budgetCapture.calls.first?.ceiling, 8)
+    }
+
+    /// Injected test doubles with no manifest (`_manifest` stays `nil`, as
+    /// every other test in this file leaves it) must never fire the primary
+    /// warning — there is no real trained ceiling to compare against, and a
+    /// `nil`-triggers-warning bug would spuriously trip every other test in
+    /// this suite.
+    func test_generate_noManifest_neverWarnsTrainedMaximum() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["ok"]
+        mock.simulatedCacheCompletionTokenCount = 1_000_000 // absurdly large — would trip any real ceiling
+        mock.preparedTokenBatches = [[1, 2, 3]]
+
+        let backend = MLXBackend()
+        backend._inject(mock) // no manifest injected
+
+        let trainedCapture = ContextWarningCapture()
+        MLXBackend.setTrainedContextExceededHookForTesting { trainedCapture.record($0, $1) }
+        defer { MLXBackend.setTrainedContextExceededHookForTesting(nil) }
+
+        _ = try await collectAllEvents(from: try backend.generate(
+            prompt: "hi",
+            systemPrompt: nil,
+            config: GenerationConfig()
+        ))
+
+        XCTAssertTrue(trainedCapture.calls.isEmpty, "no injected manifest (nil trained ceiling) must never warn, regardless of running context size")
+    }
+
+    /// Review MLX-5 (rate limiting): a long conversation that stays over the
+    /// trained maximum for many turns must only log the primary warning
+    /// ONCE per session, not on every subsequent turn.
+    func test_generate_trainedMaximumWarning_firesOnlyOncePerSession() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["ok"]
+        mock.simulatedCacheCompletionTokenCount = 3
+        // Every turn's prepared batch is long enough alone to exceed the
+        // trained maximum (5), independent of KV reuse bookkeeping.
+        mock.preparedTokenBatches = [[1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6]]
+
+        let backend = MLXBackend(enableKVCacheReuse: false)
+        backend._inject(mock)
+        backend._injectManifest(makeManifest(contextWindow: 5))
+
+        let trainedCapture = ContextWarningCapture()
+        MLXBackend.setTrainedContextExceededHookForTesting { trainedCapture.record($0, $1) }
+        defer { MLXBackend.setTrainedContextExceededHookForTesting(nil) }
+
+        for _ in 0..<3 {
+            _ = try await collectAllEvents(from: try backend.generate(
+                prompt: "hi",
+                systemPrompt: nil,
+                config: GenerationConfig()
+            ))
+        }
+
+        XCTAssertEqual(trainedCapture.calls.count, 1, "three consecutive over-ceiling turns in the same session must log the primary warning exactly once, not once per turn")
+    }
+
+    /// Review MLX-5 (session boundary): `resetConversation()` starts a new
+    /// KV-cache session — the same boundary `InferenceBackend`'s own reuse
+    /// contract documents — so the once-per-session warning must be eligible
+    /// to fire again after a reset, not stay permanently silenced.
+    func test_generate_trainedMaximumWarning_rearmsAfterResetConversation() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["ok"]
+        mock.simulatedCacheCompletionTokenCount = 3
+        mock.preparedTokenBatches = [[1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6]]
+
+        let backend = MLXBackend(enableKVCacheReuse: false)
+        backend._inject(mock)
+        backend._injectManifest(makeManifest(contextWindow: 5))
+
+        let trainedCapture = ContextWarningCapture()
+        MLXBackend.setTrainedContextExceededHookForTesting { trainedCapture.record($0, $1) }
+        defer { MLXBackend.setTrainedContextExceededHookForTesting(nil) }
+
+        _ = try await collectAllEvents(from: try backend.generate(
+            prompt: "first", systemPrompt: nil, config: GenerationConfig()
+        ))
+        XCTAssertEqual(trainedCapture.calls.count, 1, "precondition: first over-ceiling turn warns")
+
+        backend.resetConversation()
+
+        _ = try await collectAllEvents(from: try backend.generate(
+            prompt: "second", systemPrompt: nil, config: GenerationConfig()
+        ))
+        XCTAssertEqual(trainedCapture.calls.count, 2, "resetConversation() must re-arm the once-per-session warning for the new session")
+    }
+
+    /// Review MLX-5 (fires on throw, not just clean completion): a
+    /// generation that throws mid-stream must still report the KV cache's
+    /// running offset, because the cache can already have grown past a
+    /// ceiling before the failure. This is exactly what moving the check
+    /// into a `defer` around `run(...)` in `MLXGenerationDriver.generate`
+    /// fixes — before that fix, a throw skipped the check entirely.
+    func test_generate_warnsEvenWhenGenerationThrows() async throws {
+        struct SimulatedGenerationFailure: Error {}
+
+        // `MockMLXModelContainer.generatePreparedInput` throws `generateError`
+        // synchronously before it ever touches the cache (mirrors the mock's
+        // real behavior — see its implementation), so growing the offset via
+        // `simulatedCacheCompletionTokenCount` would never execute on this
+        // path. Model the realistic scenario instead: the cache already
+        // carries offset 8 from prior KV-reuse history, and *this* turn's
+        // generation call fails outright — the running context that already
+        // exceeded the ceiling predates the failure, exactly the case
+        // `defer` exists to catch.
+        let mock = MockMLXModelContainer()
+        mock.cacheFactory = {
+            let cache = KVCacheSimple()
+            cache.offset = 8
+            return [cache]
+        }
+        mock.generateError = SimulatedGenerationFailure()
+
+        let backend = MLXBackend()
+        backend._inject(mock)
+        backend._injectManifest(makeManifest(contextWindow: 5))
+
+        let trainedCapture = ContextWarningCapture()
+        MLXBackend.setTrainedContextExceededHookForTesting { trainedCapture.record($0, $1) }
+        defer { MLXBackend.setTrainedContextExceededHookForTesting(nil) }
+
+        let stream = try backend.generate(prompt: "hi", systemPrompt: nil, config: GenerationConfig())
+        do {
+            for try await _ in stream.events {}
+            XCTFail("expected the stream to throw the simulated generation error")
+        } catch {
+            // Expected — the mock's generateError propagates through the stream.
+        }
+
+        XCTAssertEqual(trainedCapture.calls.count, 1, "a throwing generation must still report the running context that had already exceeded the trained maximum before the failure")
+
+        // Sabotage check: moving `warnIfContextExceeded`/`onContextCheck`
+        // back to a plain post-`run()` statement (undoing the `defer`) turns
+        // this red because `run()` throws before that statement is ever
+        // reached — verified manually, reverted after confirming.
+    }
+
+    // MARK: - #2348 review round 2: MLX-A (guess vs. measurement) and MLX-C (rate-limit reset on re-inject)
+
+    /// Review MLX-A (the blocker's narrower cousin): `_manifest.contextWindow`
+    /// can itself be a guess — `produceManifest` silently substitutes 8192
+    /// when `config.json` carries none of the recognised context-length keys
+    /// (SSM/Mamba/RWKV-shaped configs, a stripped snapshot). Before this fix,
+    /// the primary warning stated that substitute as fact ("exceeded the
+    /// model's trained context"), which is exactly the wrong-cause defect
+    /// MLX-1 fixed, just narrower. This asserts the primary warning stays
+    /// silent when the manifest's context window was never actually
+    /// measured — `wasDetected: false` simulates the fallback path without
+    /// needing a real undetectable `config.json` on disk.
+    func test_generate_doesNotWarnPrimary_whenTrainedContextWasNotDetected() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["ok"]
+        mock.simulatedCacheCompletionTokenCount = 3
+        mock.preparedTokenBatches = [[1, 2, 3, 4, 5, 6, 7, 8]] // 8 prompt + 3 completion = 11, over the fixture's ceiling of 10
+
+        let backend = MLXBackend()
+        backend._inject(mock)
+        backend._injectManifest(makeManifest(contextWindow: 10), wasDetected: false)
+
+        let trainedCapture = ContextWarningCapture()
+        MLXBackend.setTrainedContextExceededHookForTesting { trainedCapture.record($0, $1) }
+        defer { MLXBackend.setTrainedContextExceededHookForTesting(nil) }
+
+        _ = try await collectAllEvents(from: try backend.generate(
+            prompt: "hi", systemPrompt: nil, config: GenerationConfig()
+        ))
+
+        XCTAssertTrue(trainedCapture.calls.isEmpty, "an undetected (fallback-default) contextWindow must never drive the primary trained-context warning — the number was never measured, even though the running context (11) numerically exceeds it (10)")
+
+        // Sabotage check: removing the `_trainedContextWasDetected` guard
+        // from `reportContextCheck` turns this red — verified manually,
+        // reverted after confirming.
+    }
+
+    /// The secondary budget warning is a fact about `ModelLoadPlan`
+    /// (`_configuredContextSize`), never a config.json guess — it must keep
+    /// firing regardless of `_trainedContextWasDetected`. The trained ceiling
+    /// here (1000) is set deliberately far above the running context (11) so
+    /// this test isolates "budget fires independent of detection provenance"
+    /// from "primary correctly stays silent," which the test above already covers.
+    func test_generate_stillWarnsBudget_whenTrainedContextWasNotDetected() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["ok"]
+        mock.simulatedCacheCompletionTokenCount = 3
+        mock.preparedTokenBatches = [[1, 2, 3, 4, 5, 6, 7, 8]] // 8 prompt + 3 completion = 11
+
+        let backend = MLXBackend()
+        backend._inject(mock, configuredContextSize: 5)
+        backend._injectManifest(makeManifest(contextWindow: 1_000), wasDetected: false)
+
+        let trainedCapture = ContextWarningCapture()
+        let budgetCapture = ContextWarningCapture()
+        MLXBackend.setTrainedContextExceededHookForTesting { trainedCapture.record($0, $1) }
+        MLXBackend.setBudgetExceededHookForTesting { budgetCapture.record($0, $1) }
+        defer {
+            MLXBackend.setTrainedContextExceededHookForTesting(nil)
+            MLXBackend.setBudgetExceededHookForTesting(nil)
+        }
+
+        _ = try await collectAllEvents(from: try backend.generate(
+            prompt: "hi", systemPrompt: nil, config: GenerationConfig()
+        ))
+
+        XCTAssertTrue(trainedCapture.calls.isEmpty, "running (11) is nowhere near the fixture's contextWindow (1000), so the primary warning correctly stays silent regardless of detection provenance")
+        XCTAssertEqual(budgetCapture.calls.count, 1, "the budget warning is independent of detection provenance and must still fire when running (11) exceeds the budget (5)")
+    }
+
+    /// Review MLX-C: unlike `unloadModel()`, `_inject(...)` previously left
+    /// the once-per-session warning flags untouched, so a *second* inject
+    /// into the same backend instance would silently inherit a suppressed
+    /// warning from the first. This proves the fix: re-injecting resets the
+    /// rate limit and the primary warning fires again.
+    func test_reinject_resetsRateLimitedWarningFlags() async throws {
+        let firstMock = MockMLXModelContainer()
+        firstMock.tokensToYield = ["ok"]
+        firstMock.simulatedCacheCompletionTokenCount = 3
+        firstMock.preparedTokenBatches = [[1, 2, 3, 4, 5, 6, 7, 8]] // 11 tokens, over ceiling 10
+
+        let backend = MLXBackend()
+        backend._inject(firstMock)
+        backend._injectManifest(makeManifest(contextWindow: 10))
+
+        let trainedCapture = ContextWarningCapture()
+        MLXBackend.setTrainedContextExceededHookForTesting { trainedCapture.record($0, $1) }
+        defer { MLXBackend.setTrainedContextExceededHookForTesting(nil) }
+
+        _ = try await collectAllEvents(from: try backend.generate(
+            prompt: "first", systemPrompt: nil, config: GenerationConfig()
+        ))
+        XCTAssertEqual(trainedCapture.calls.count, 1, "precondition: first over-ceiling turn on the first injected container warns")
+
+        // Re-inject a second container into the SAME backend instance — the
+        // scenario MLX-C's `_hasWarnedTrainedContextExceeded` reset guards.
+        let secondMock = MockMLXModelContainer()
+        secondMock.tokensToYield = ["ok"]
+        secondMock.simulatedCacheCompletionTokenCount = 3
+        secondMock.preparedTokenBatches = [[1, 2, 3, 4, 5, 6, 7, 8]]
+        backend._inject(secondMock)
+        backend._injectManifest(makeManifest(contextWindow: 10))
+
+        _ = try await collectAllEvents(from: try backend.generate(
+            prompt: "second", systemPrompt: nil, config: GenerationConfig()
+        ))
+        XCTAssertEqual(trainedCapture.calls.count, 2, "_inject(...) must reset the once-per-session warning flags — a re-injected backend must not silently inherit a suppressed warning from the previous container")
+
+        // Sabotage check: removing the `_hasWarnedTrainedContextExceeded = false`
+        // / `_hasWarnedBudgetExceeded = false` lines from `_inject` turns this
+        // red (count stays 1) — verified manually, reverted after confirming.
+    }
 }

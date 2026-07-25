@@ -137,7 +137,17 @@ import ManifoldInference
         hints: GenerationRuntimeHints,
         generationStream: GenerationStream,
         continuation: AsyncThrowingStream<GenerationEvent, Error>.Continuation,
-        yieldHook: (@Sendable () async -> Void)?
+        yieldHook: (@Sendable () async -> Void)?,
+        // Reports the KV cache's running `offset` (prompt + completion tokens,
+        // including any reused-turn history) after every generation attempt —
+        // success, thrown error, or cancellation (#2348). The driver is a pure
+        // reporter here: it does not know the model's trained context or the
+        // load-time memory budget, and does not decide whether either ceiling
+        // was crossed or whether to log anything. `MLXBackend` owns that
+        // policy (comparison thresholds, once-per-session rate limiting, the
+        // actual warning) because it is the one with persistent per-session
+        // state — this driver is deliberately stateless (see the type doc).
+        onContextCheck: @MainActor @Sendable (_ runningContext: Int) -> Void
     ) async throws -> GenerateResult {
         // Seed the MLX global RandomState before constructing GenerateParameters
         // so the sampler's per-instance `RandomState()` (initialised from the
@@ -233,6 +243,20 @@ import ManifoldInference
             Self.logger.debug(
                 "MLX prompt-cache reuse missed: \(prepared.reuseReason.description, privacy: .public)"
             )
+        }
+
+        // `defer`, not a post-call statement: MLX-5 review — a turn that
+        // throws (e.g. a tokenizer/model error) or is cancelled must still
+        // report the cache's running offset, since the cache can have already
+        // grown past a ceiling before the failure. `defer` runs on every exit
+        // path from here, including `try await run(...)` throwing. Cancellation
+        // does not throw (the inner loop `break`s and `run` returns normally),
+        // so it was already covered before this comment — this only fixes the
+        // throw path.
+        defer {
+            if let runningContext = prepared.cache.value.map(\.offset).max() {
+                onContextCheck(runningContext)
+            }
         }
 
         let result = try await run(

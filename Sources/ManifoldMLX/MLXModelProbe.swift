@@ -350,6 +350,35 @@ import ManifoldInference
         )
     }
 
+    /// Whether ``produceManifest(at:detectedThinkingMarkers:supportsVision:)``
+    /// would populate `contextWindow` from a real signal in `config.json`
+    /// (top-level `max_position_embeddings`, the nested `text_config`
+    /// equivalent, or `model_max_length`) rather than falling back to the
+    /// conservative 8192 default (#2348, review finding MLX-A).
+    ///
+    /// A fallback default is a guess about the model's trained context, not a
+    /// measurement of it — an SSM/Mamba/RWKV-shaped config, or a snapshot
+    /// with a stripped `config.json`, has none of the recognised keys, and
+    /// `produceManifest` silently substitutes 8192. `MLXBackend` calls this at
+    /// load time so its primary trained-context warning (#2348) can tell the
+    /// difference and stay silent rather than state an unverified number as
+    /// fact — the same class of defect MLX-1 fixed for the budget-vs-trained
+    /// conflation, narrowed to "was this specific number even measured."
+    ///
+    /// Duplicates `produceManifest`'s config.json read (one extra file read
+    /// at load time, negligible next to the model-weight load it accompanies)
+    /// rather than changing `produceManifest`'s public signature or
+    /// `ModelManifest`'s shape — both have other callers/tests that don't
+    /// need to know about detection provenance.
+    public static func contextWindowWasDetected(at url: URL) -> Bool {
+        let configURL = url.appendingPathComponent("config.json")
+        guard let data = try? Data(contentsOf: configURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return extractContextWindow(from: json) != nil
+    }
+
     /// Pulls the model's max position embedding count out of an MLX
     /// `config.json` payload. Returns `nil` when no recognised key is present.
     static func extractContextWindow(from json: [String: Any]) -> Int? {
