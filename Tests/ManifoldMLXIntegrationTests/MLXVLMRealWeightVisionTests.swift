@@ -140,6 +140,18 @@ final class MLXVLMRealWeightVisionTests: XCTestCase {
         ProbeColor(name: "orange", red: 0.95, green: 0.5, blue: 0.02),
     ]
 
+    /// A CG/ImageIO step failed while synthesising the in-process probe
+    /// image. This is thrown, never `XCTSkip`ped — `solidSquarePNGData` is
+    /// called (see the call site below) AFTER `loadModel` has already run,
+    /// so an `XCTSkip` here would report the whole test skipped-green having
+    /// already paid the model load, with zero vision coverage. The harness
+    /// failing to synthesise its own probe image is a defect in this test,
+    /// not an environment gate to skip past.
+    private struct ProbeImageSynthesisError: Error, CustomStringConvertible {
+        let stage: String
+        var description: String { "Could not synthesise the probe image: \(stage)" }
+    }
+
     /// Draws a solid-color square PNG in-memory — an unambiguous, asset-free
     /// probe: any working VLM should be able to name the dominant color when
     /// asked directly, without depending on photographic detail or an
@@ -153,23 +165,23 @@ final class MLXVLMRealWeightVisionTests: XCTestCase {
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else {
-            throw XCTSkip("Could not create a CGContext to synthesise the probe image.")
+            throw ProbeImageSynthesisError(stage: "could not create a CGContext")
         }
         context.setFillColor(red: color.red, green: color.green, blue: color.blue, alpha: 1.0)
         context.fill(CGRect(x: 0, y: 0, width: side, height: side))
         guard let cgImage = context.makeImage() else {
-            throw XCTSkip("Could not render the probe image to a CGImage.")
+            throw ProbeImageSynthesisError(stage: "could not render to a CGImage")
         }
 
         let mutable = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(
             mutable as CFMutableData, UTType.png.identifier as CFString, 1, nil
         ) else {
-            throw XCTSkip("Could not create a PNG destination for the probe image.")
+            throw ProbeImageSynthesisError(stage: "could not create a PNG destination")
         }
         CGImageDestinationAddImage(dest, cgImage, nil)
         guard CGImageDestinationFinalize(dest) else {
-            throw XCTSkip("Could not finalize the probe image PNG.")
+            throw ProbeImageSynthesisError(stage: "could not finalize the PNG")
         }
         return mutable as Data
     }
@@ -248,53 +260,72 @@ final class MLXVLMRealWeightVisionTests: XCTestCase {
 
     private static let visionQuestion = "What color is the shape in this image? Answer in one word."
 
-    /// Picks a random probe color plus the "other" colors from the same
-    /// palette it must NOT appear alongside — used by both the positive test
-    /// and the negative control so the two are apples-to-apples.
-    private static func pickProbeColor() -> (chosen: ProbeColor, others: [ProbeColor]) {
-        // probeColorPalette is a non-empty static literal, so this force-unwrap
-        // can never actually fail.
-        let chosen = probeColorPalette.randomElement()!
-        let others = probeColorPalette.filter { $0.name != chosen.name }
-        return (chosen, others)
-    }
-
-    /// True iff `text` names `chosen.name` (word-boundary match) and none of
-    /// `others`. Shared by the positive test (must hold) and the negative
-    /// control (must not hold) so both exercise the identical check.
-    private static func repliesGrounded(_ text: String, chosen: ProbeColor, others: [ProbeColor]) -> Bool {
-        let tokens = wordTokens(of: text)
-        guard tokens.contains(chosen.name) else { return false }
-        return !others.contains { tokens.contains($0.name) }
-    }
-
     // MARK: - The real vision test
 
-    /// Loads a real vision-capable MLX model, sends it a synthesised
-    /// solid-color square (color chosen at random each run from
-    /// `probeColorPalette`) with a direct question about its color, and
-    /// asserts the reply names the chosen color and none of the other two
-    /// palette colors.
+    /// Loads a real vision-capable MLX model and runs two turns against it:
     ///
-    /// The color is randomized (rather than always red) specifically so a
-    /// text-only model that never looked at the image can't pass by guessing
-    /// the modal color-word answer — see `probeColorPalette`'s doc. The
-    /// match is word-boundary (``wordTokens(of:)``), not `String.contains`,
-    /// so "orange" can't false-positive-match inside an unrelated word.
+    /// 1. **Blind control turn** — the same question, no image anywhere in
+    ///    history. Whatever color name(s) the model volunteers here are
+    ///    exactly what it would say by guessing alone.
+    /// 2. **Grounded turn** — the same question, this time with a probe
+    ///    square whose color is chosen to be one the blind turn did NOT
+    ///    name. Asserts the reply names that color and none of the
+    ///    remaining palette colors.
+    ///
+    /// This derives the probe color from the model's own blind answer
+    /// instead of rolling it independently at random. An earlier revision
+    /// picked the blind-turn color and the grounded-turn color as two
+    /// independent random draws from the same 3-color palette: since a
+    /// deterministic (temperature 0, fixed seed) model gives the same blind
+    /// reply on every run, a 1-in-3 random draw would coincidentally match
+    /// that reply and the test would flake red exactly once every three
+    /// runs — the worst possible signature for an unattended lane. Deriving
+    /// the probe color from the actual blind reply instead of rolling
+    /// independently of it makes the discrimination hold *by construction*:
+    /// the grounded turn's color is provably not something this model would
+    /// say without looking at the image, on this run, so a passing grounded
+    /// turn is real evidence of vision — zero flake risk, and one model
+    /// load instead of two.
+    ///
+    /// `resetConversation()` runs between the two turns so the blind turn's
+    /// question/reply isn't sitting in the grounded turn's context — the
+    /// two turns must be independent, not a two-turn conversation.
     func test_realVLM_sentSyntheticImage_respondsWithImageGroundedContent() async throws {
         let backend = MLXBackend(enableKVCacheReuse: false)
         try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 2048))
         loadedBackends.append(backend)
 
-        let (chosen, others) = Self.pickProbeColor()
-        let imageData = try Self.solidSquarePNGData(color: chosen)
+        // 1. Blind control turn — no image anywhere in history.
+        let blindHistory: [StructuredMessage] = [
+            StructuredMessage(role: "user", parts: [.text(Self.visionQuestion)]),
+        ]
+        let blindEvents = try await runTurn(on: backend, prompt: Self.visionQuestion, history: blindHistory)
+        let blindText = collectAssistantText(from: blindEvents)
+        print("[MLXVLMRealWeightVisionTests] (blind control, no image) model=\(modelURL.lastPathComponent) reply=\"\(blindText)\"")
+        let blindTokens = Self.wordTokens(of: blindText)
 
+        backend.resetConversation()
+
+        // Candidates: palette colors the blind turn did NOT name. Any one of
+        // these is provable-by-construction to not be a guess this model
+        // would make on this run.
+        let candidates = Self.probeColorPalette.filter { !blindTokens.contains($0.name) }
+        let chosen = try XCTUnwrap(
+            candidates.first,
+            "Blind reply \"\(blindText)\" named every color in the probe palette "
+            + "(\(Self.probeColorPalette.map(\.name))) — this palette can't discriminate vision from "
+            + "a guess for this model. Widen probeColorPalette or pick a less color-chatty question."
+        )
+        let others = Self.probeColorPalette.filter { $0.name != chosen.name }
+
+        // 2. Grounded turn — same question, this time with the probe image.
+        let imageData = try Self.solidSquarePNGData(color: chosen)
         // The current turn's image must ride in `history` (not just `prompt`)
         // — `MLXChatMessageEncoder`'s image threading only inspects the
         // structured history, so the turn carrying the image must appear
         // there, mirroring how `MLXVLMGateExperimentTests` always includes
         // the live turn as the final history entry.
-        let history: [StructuredMessage] = [
+        let groundedHistory: [StructuredMessage] = [
             StructuredMessage(
                 role: "user",
                 parts: [
@@ -303,15 +334,14 @@ final class MLXVLMRealWeightVisionTests: XCTestCase {
                 ]
             ),
         ]
-
-        let events = try await runTurn(on: backend, prompt: Self.visionQuestion, history: history)
+        let events = try await runTurn(on: backend, prompt: Self.visionQuestion, history: groundedHistory)
         let text = collectAssistantText(from: events)
         // Always logged (pass or fail) so a human can eyeball the actual
         // model output — an automated token-membership check can pass on a
         // technically-matching but nonsensical reply, and a failure needs
         // the verbatim text to judge whether the assertion or the model is
         // wrong (see this file's header doc).
-        print("[MLXVLMRealWeightVisionTests] model=\(modelURL.lastPathComponent) chosenColor=\(chosen.name) reply=\"\(text)\"")
+        print("[MLXVLMRealWeightVisionTests] (grounded) model=\(modelURL.lastPathComponent) chosenColor=\(chosen.name) reply=\"\(text)\"")
 
         XCTAssertFalse(text.isEmpty, "A real vision-capable model must produce a non-empty reply to an image question.")
 
@@ -319,7 +349,8 @@ final class MLXVLMRealWeightVisionTests: XCTestCase {
         XCTAssertTrue(
             tokens.contains(chosen.name),
             """
-            Reply did not mention "\(chosen.name)", the actual fill color of the probe square. \
+            Reply did not mention "\(chosen.name)", the actual fill color of the probe square (chosen \
+            specifically because the blind control turn, \"\(blindText)\", did not name it). \
             Got: "\(text)". This suggests the image never actually reached the model \
             (silently dropped/ignored) rather than a real vision failure — the wiring is \
             supposed to be real per MLXChatMessageEncoder, but this is the first real-weight \
@@ -333,42 +364,5 @@ final class MLXVLMRealWeightVisionTests: XCTestCase {
                 + "color (\(chosen.name)). Got: \"\(text)\"."
             )
         }
-    }
-
-    /// Negative control for the test above: sends the identical question
-    /// through the identical turn-driving machinery, but with the `.image`
-    /// part removed from `history` — so this is exactly the same setup minus
-    /// the one thing the positive test claims is doing the work. If a
-    /// text-only model could still pass ``repliesGrounded(_:chosen:others:)``
-    /// here, that would mean the positive test's assertion isn't actually
-    /// discriminating between "the model saw the image" and "the model
-    /// guessed" — which is the null hypothesis the positive test exists to
-    /// reject. This must FAIL the grounded-color check.
-    func test_negativeControl_sameQuestionWithoutImage_doesNotGroundColorReply() async throws {
-        let backend = MLXBackend(enableKVCacheReuse: false)
-        try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 2048))
-        loadedBackends.append(backend)
-
-        let (chosen, others) = Self.pickProbeColor()
-
-        // No `.image` part — this is the only difference from the positive
-        // test's turn.
-        let history: [StructuredMessage] = [
-            StructuredMessage(role: "user", parts: [.text(Self.visionQuestion)]),
-        ]
-
-        let events = try await runTurn(on: backend, prompt: Self.visionQuestion, history: history)
-        let text = collectAssistantText(from: events)
-        print("[MLXVLMRealWeightVisionTests] (negative control, no image) model=\(modelURL.lastPathComponent) chosenColor=\(chosen.name) reply=\"\(text)\"")
-
-        XCTAssertFalse(
-            Self.repliesGrounded(text, chosen: chosen, others: others),
-            """
-            Negative control failed: with NO image in history, the reply still names "\(chosen.name)" \
-            and none of \(others.map(\.name)). Got: "\(text)". Either the grounded-color assertion in \
-            the positive test is not actually discriminating vision from a guess, or image data is \
-            leaking into the turn some other way even without a `.image` part in history.
-            """
-        )
     }
 }
