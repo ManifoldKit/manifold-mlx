@@ -171,37 +171,55 @@ ENV_PATH=":TestConfigurations:0:TestTargets:$TARGET_INDEX:EnvironmentVariables"
     || /usr/libexec/PlistBuddy -c "Set $ENV_PATH:MANIFOLD_DISCOVER_LOCAL_MODELS 1" "$RUNFILE"
 
 if [[ -n "$MODEL_HINT" ]]; then
-    /usr/libexec/PlistBuddy -c "Add $ENV_PATH:MLX_TEST_MODEL string $MODEL_HINT" "$RUNFILE" 2>/dev/null \
-        || /usr/libexec/PlistBuddy -c "Set $ENV_PATH:MLX_TEST_MODEL $MODEL_HINT" "$RUNFILE"
+    /usr/libexec/PlistBuddy -c "Add $ENV_PATH:MLX_TEST_MODEL string \"$MODEL_HINT\"" "$RUNFILE" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Set $ENV_PATH:MLX_TEST_MODEL \"$MODEL_HINT\"" "$RUNFILE"
     echo "==> Selecting MLX model whose name contains: $MODEL_HINT"
 else
     echo "==> Discovering MLX models from \$HOME/Documents/Models/ (first valid wins)"
+    /usr/libexec/PlistBuddy -c "Delete $ENV_PATH:MLX_TEST_MODEL" "$RUNFILE" 2>/dev/null || true
 fi
 
 # Optional VLM-only selector for tests that need a vision model in addition to
 # (or instead of) the text-only MLX_TEST_MODEL fixture. Forwarded only when set
 # in the calling shell so default runs stay green without a downloaded VLM.
 if [[ -n "${MLX_VLM_TEST_MODEL:-}" ]]; then
-    /usr/libexec/PlistBuddy -c "Add $ENV_PATH:MLX_VLM_TEST_MODEL string $MLX_VLM_TEST_MODEL" "$RUNFILE" 2>/dev/null \
-        || /usr/libexec/PlistBuddy -c "Set $ENV_PATH:MLX_VLM_TEST_MODEL $MLX_VLM_TEST_MODEL" "$RUNFILE"
+    /usr/libexec/PlistBuddy -c "Add $ENV_PATH:MLX_VLM_TEST_MODEL string \"$MLX_VLM_TEST_MODEL\"" "$RUNFILE" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Set $ENV_PATH:MLX_VLM_TEST_MODEL \"$MLX_VLM_TEST_MODEL\"" "$RUNFILE"
     echo "==> Forwarding MLX_VLM_TEST_MODEL=$MLX_VLM_TEST_MODEL to the VLM gate experiment"
+else
+    /usr/libexec/PlistBuddy -c "Delete $ENV_PATH:MLX_VLM_TEST_MODEL" "$RUNFILE" 2>/dev/null || true
 fi
 
 # Optional hybrid (recurrent+attention) selector for the per-layer hybrid cache
 # reuse test. Like MLX_VLM_TEST_MODEL, forwarded only when set so default runs
 # stay green without a downloaded hybrid checkpoint (e.g. Falcon-H1 / Qwen3-Next).
 if [[ -n "${MLX_HYBRID_TEST_MODEL:-}" ]]; then
-    /usr/libexec/PlistBuddy -c "Add $ENV_PATH:MLX_HYBRID_TEST_MODEL string $MLX_HYBRID_TEST_MODEL" "$RUNFILE" 2>/dev/null \
-        || /usr/libexec/PlistBuddy -c "Set $ENV_PATH:MLX_HYBRID_TEST_MODEL $MLX_HYBRID_TEST_MODEL" "$RUNFILE"
+    /usr/libexec/PlistBuddy -c "Add $ENV_PATH:MLX_HYBRID_TEST_MODEL string \"$MLX_HYBRID_TEST_MODEL\"" "$RUNFILE" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Set $ENV_PATH:MLX_HYBRID_TEST_MODEL \"$MLX_HYBRID_TEST_MODEL\"" "$RUNFILE"
     echo "==> Forwarding MLX_HYBRID_TEST_MODEL=$MLX_HYBRID_TEST_MODEL to the hybrid cache reuse test"
+else
+    /usr/libexec/PlistBuddy -c "Delete $ENV_PATH:MLX_HYBRID_TEST_MODEL" "$RUNFILE" 2>/dev/null || true
 fi
 
 # Optional FLUX diffusion model directory for the FLUX image-generation tests.
 # Forwarded only when set; default runs skip diffusion without a local snapshot.
 if [[ -n "${MANIFOLD_FLUX_MODEL:-}" ]]; then
-    /usr/libexec/PlistBuddy -c "Add $ENV_PATH:MANIFOLD_FLUX_MODEL string $MANIFOLD_FLUX_MODEL" "$RUNFILE" 2>/dev/null \
-        || /usr/libexec/PlistBuddy -c "Set $ENV_PATH:MANIFOLD_FLUX_MODEL $MANIFOLD_FLUX_MODEL" "$RUNFILE"
+    /usr/libexec/PlistBuddy -c "Add $ENV_PATH:MANIFOLD_FLUX_MODEL string \"$MANIFOLD_FLUX_MODEL\"" "$RUNFILE" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Set $ENV_PATH:MANIFOLD_FLUX_MODEL \"$MANIFOLD_FLUX_MODEL\"" "$RUNFILE"
     echo "==> Forwarding MANIFOLD_FLUX_MODEL=$MANIFOLD_FLUX_MODEL to the FLUX diffusion tests"
+else
+    /usr/libexec/PlistBuddy -c "Delete $ENV_PATH:MANIFOLD_FLUX_MODEL" "$RUNFILE" 2>/dev/null || true
+fi
+
+# Optional Stable Diffusion / SDXL model directory for
+# SDXLDiffusionIntegrationTests. Forwarded only when set; default runs skip
+# diffusion without a local snapshot.
+if [[ -n "${MANIFOLD_SD_MODEL:-}" ]]; then
+    /usr/libexec/PlistBuddy -c "Add $ENV_PATH:MANIFOLD_SD_MODEL string \"$MANIFOLD_SD_MODEL\"" "$RUNFILE" 2>/dev/null \
+        || /usr/libexec/PlistBuddy -c "Set $ENV_PATH:MANIFOLD_SD_MODEL \"$MANIFOLD_SD_MODEL\"" "$RUNFILE"
+    echo "==> Forwarding MANIFOLD_SD_MODEL=$MANIFOLD_SD_MODEL to the SDXL diffusion tests"
+else
+    /usr/libexec/PlistBuddy -c "Delete $ENV_PATH:MANIFOLD_SD_MODEL" "$RUNFILE" 2>/dev/null || true
 fi
 
 echo "==> Running tests (xcodebuild test-without-building): -only-testing $ONLY_TESTING_RUN"
