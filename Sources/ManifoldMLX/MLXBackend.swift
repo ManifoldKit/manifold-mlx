@@ -54,15 +54,27 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         return try body()
     }
 
-    /// Fallback `maxContextTokens` for `capabilities` when no manifest is
-    /// available yet — before the first `loadModel(from:plan:)` completes,
-    /// or for injected test doubles that bypass it entirely. `maxContextTokens`
-    /// is a non-optional `Int32`, so this call site must name *something*;
-    /// since core PR #2404 made `ModelManifest.contextWindow` optional, this
-    /// constant is that named choice, not a measurement — mirrors
-    /// `OpenAIBackend.unknownModelContextWindow`. Conservative on purpose: an
-    /// undersized budget only wastes headroom, an oversized one risks
-    /// overflowing a small local model's real trained context.
+    /// Fallback `maxContextTokens` for `capabilities` whenever no *measured*
+    /// context window is available. Two distinct cases reach this, both
+    /// deliberately: (1) before the first `loadModel(from:plan:)` completes,
+    /// or for injected test doubles that bypass it entirely — `_manifest` is
+    /// `nil`; and (2) **after a real, successful load** whose `config.json`
+    /// carried none of the recognised context-length keys —
+    /// `MLXModelProbe.produceManifest` now leaves `contextWindow` `nil`
+    /// rather than fabricating a number (core PR #2404), and that `nil`
+    /// flows straight through here. Case 2 is the one worth naming plainly:
+    /// this constant is exactly the kind of guess `#2404` asks each consumer
+    /// to own explicitly rather than let the manifest itself assert as fact,
+    /// but the guess still lands in `capabilities.maxContextTokens` — which
+    /// core's `PromptAssembler` trims prompts against — so a genuinely
+    /// oversized model with an unrecognised `config.json` shape is still
+    /// budgeted at 8k here, same as before this PR, just now an auditable,
+    /// named choice instead of a silent one buried in the manifest.
+    /// `maxContextTokens` is a non-optional `Int32`, so this call site must
+    /// name *something*; mirrors `OpenAIBackend.unknownModelContextWindow`.
+    /// Conservative on purpose: an undersized budget only wastes headroom,
+    /// an oversized one risks overflowing a small local model's real trained
+    /// context.
     static let unknownModelContextWindow: Int32 = 8192
 
     // MARK: - Capabilities
@@ -70,9 +82,11 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     public var capabilities: BackendCapabilities {
         withStateLock {
             // The manifest is populated at loadModel-time from config.json's
-            // `max_position_embeddings`. Until a load completes, fall back to
-            // ``unknownModelContextWindow`` rather than a manifest the probe
-            // never produced.
+            // `max_position_embeddings`. Falls back to
+            // ``unknownModelContextWindow`` both before any load completes
+            // AND when a completed load's manifest has `contextWindow == nil`
+            // (config.json had no recognised key) — see that constant's doc
+            // for why the latter case still matters post-#2404.
             let ctxTokens = _manifest?.contextWindow.map(Int32.init) ?? Self.unknownModelContextWindow
             // M5 + macOS 26.2: MLX activates Neural Accelerator dispatch automatically (~3-4x TTFT).
             // Query NeuralAcceleratorProbe.availability in ManifoldHardware for informational UI only.

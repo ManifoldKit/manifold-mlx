@@ -1665,8 +1665,15 @@ final class MLXBackendGenerationTests: XCTestCase {
     func test_generate_doesNotWarnPrimary_whenTrainedContextWasNotDetected() async throws {
         let mock = MockMLXModelContainer()
         mock.tokensToYield = ["ok"]
-        mock.simulatedCacheCompletionTokenCount = 3
-        mock.preparedTokenBatches = [[1, 2, 3, 4, 5, 6, 7, 8]] // 8 prompt + 3 completion = 11
+        // Absurdly large — must exceed any plausible reintroduced fallback
+        // default (e.g. `MLXBackend.unknownModelContextWindow` == 8192), not
+        // just the fixture's own numbers. A running context of merely ~11
+        // would stay silently under an 8192 default too, so a guard that
+        // regressed to `_manifest?.contextWindow ?? 8192` instead of a real
+        // `if let` would pass this test undetected — mirrors
+        // `test_generate_noManifest_neverWarnsTrainedMaximum` above.
+        mock.simulatedCacheCompletionTokenCount = 1_000_000
+        mock.preparedTokenBatches = [[1, 2, 3]]
 
         let backend = MLXBackend()
         backend._inject(mock)
@@ -1680,25 +1687,37 @@ final class MLXBackendGenerationTests: XCTestCase {
             prompt: "hi", systemPrompt: nil, config: GenerationConfig()
         ))
 
-        XCTAssertTrue(trainedCapture.calls.isEmpty, "a nil contextWindow must never drive the primary trained-context warning — there is no measured number to compare the running context (11) against")
+        XCTAssertTrue(trainedCapture.calls.isEmpty, "a nil contextWindow must never drive the primary trained-context warning, even when the running context (~1,000,003) is enormous — there is no measured number to compare against")
 
-        // Sabotage check: removing the `_manifest.flatMap(\.contextWindow)`
-        // optional-binding guard from `reportContextCheck` (e.g. comparing
-        // against a force-unwrapped or defaulted value instead) turns this
-        // red — verified manually, reverted after confirming.
+        // Sabotage check: changing `if let trainedMax = _manifest?.contextWindow`
+        // to `let trainedMax = _manifest?.contextWindow ?? 8192` (reintroducing
+        // a defaulted fallback instead of a real optional-binding guard) turns
+        // this red — verified manually 2026-07-27, reverted after confirming.
+        // (An earlier version of this test used a running context of only 11,
+        // which stayed under 8192 even with that regression present and so
+        // never caught it — see PR #167 review round 3.)
     }
 
     /// The secondary budget warning is a fact about `ModelLoadPlan`
     /// (`_configuredContextSize`), never a config.json guess — it must keep
     /// firing regardless of whether the trained context was measured. The
-    /// manifest here has no `contextWindow` at all, so this test isolates
-    /// "budget fires independent of trained-context detection" from "primary
-    /// correctly stays silent," which the test above already covers.
+    /// distinguishing setup versus the test above is `configuredContextSize`
+    /// being present at all: this exercises the primary-silent guard on the
+    /// same call where the sibling budget code path is *also* active, not
+    /// just in isolation. Its `trainedCapture.calls.isEmpty` assertion is a
+    /// lighter-weight duplicate of the load-bearing check above (same
+    /// oversized running context, so it stays meaningful rather than
+    /// tautological) — the assertion that carries unique weight here is
+    /// `budgetCapture.calls.count`.
     func test_generate_stillWarnsBudget_whenTrainedContextWasNotDetected() async throws {
         let mock = MockMLXModelContainer()
         mock.tokensToYield = ["ok"]
-        mock.simulatedCacheCompletionTokenCount = 3
-        mock.preparedTokenBatches = [[1, 2, 3, 4, 5, 6, 7, 8]] // 8 prompt + 3 completion = 11
+        // Same oversized running context as the primary-silence test above,
+        // for the same reason: must exceed any plausible reintroduced
+        // fallback default, not just the budget ceiling (5) this test cares
+        // about.
+        mock.simulatedCacheCompletionTokenCount = 1_000_000
+        mock.preparedTokenBatches = [[1, 2, 3]]
 
         let backend = MLXBackend()
         backend._inject(mock, configuredContextSize: 5)
@@ -1717,8 +1736,8 @@ final class MLXBackendGenerationTests: XCTestCase {
             prompt: "hi", systemPrompt: nil, config: GenerationConfig()
         ))
 
-        XCTAssertTrue(trainedCapture.calls.isEmpty, "the fixture's contextWindow is nil, so the primary warning correctly stays silent regardless of the running context")
-        XCTAssertEqual(budgetCapture.calls.count, 1, "the budget warning is independent of detection provenance and must still fire when running (11) exceeds the budget (5)")
+        XCTAssertTrue(trainedCapture.calls.isEmpty, "the fixture's contextWindow is nil, so the primary warning correctly stays silent even at a running context of ~1,000,003")
+        XCTAssertEqual(budgetCapture.calls.count, 1, "the budget warning is independent of detection provenance and must still fire when running (~1,000,003) exceeds the budget (5)")
     }
 
     /// Review MLX-C: unlike `unloadModel()`, `_inject(...)` previously left
