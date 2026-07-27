@@ -304,10 +304,13 @@ import ManifoldInference
     /// vision-capability flag to populate the manifest.
     ///
     /// Falls back to ``ModelManifest/unknown(modelIdentifier:producerKind:)``
-    /// (with a `Log.warn`) when `config.json` is missing or carries no
-    /// position-embedding hint. The conservative default (8k) keeps prompts
-    /// shorter than necessary on misconfigured snapshots, which is safer than
-    /// over-trimming or over-feeding the model.
+    /// (with a `Log.warn`) when `config.json` is missing or unreadable — that
+    /// case is a producer-identity fallback, not a context-window guess.
+    /// When `config.json` is readable but carries none of the recognised
+    /// context-length keys, the manifest is still real, just with
+    /// `contextWindow: nil` (also logged) — since core PR #2404, `nil` is how
+    /// "could not determine" is represented, so this no longer substitutes a
+    /// conservative 8192 guess a caller could mistake for a measurement.
     ///
     /// On M5 hardware with macOS 26.2 or later, MLX activates Neural Accelerator
     /// dispatch automatically (~3–4× TTFT speedup). Check
@@ -328,12 +331,11 @@ import ManifoldInference
         }
 
         let contextWindow = extractContextWindow(from: json)
-            ?? {
-                Log.inference.warning(
-                    "MLX manifest probe: no max_position_embeddings / model_max_length found for \(modelIdentifier, privacy: .public); falling back to 8192"
-                )
-                return 8192
-            }()
+        if contextWindow == nil {
+            Log.inference.warning(
+                "MLX manifest probe: no max_position_embeddings / model_max_length found for \(modelIdentifier, privacy: .public); contextWindow left nil"
+            )
+        }
 
         return ModelManifest(
             contextWindow: contextWindow,
@@ -348,35 +350,6 @@ import ManifoldInference
             modelIdentifier: modelIdentifier,
             producerKind: .local
         )
-    }
-
-    /// Whether ``produceManifest(at:detectedThinkingMarkers:supportsVision:)``
-    /// would populate `contextWindow` from a real signal in `config.json`
-    /// (top-level `max_position_embeddings`, the nested `text_config`
-    /// equivalent, or `model_max_length`) rather than falling back to the
-    /// conservative 8192 default (#2348, review finding MLX-A).
-    ///
-    /// A fallback default is a guess about the model's trained context, not a
-    /// measurement of it — an SSM/Mamba/RWKV-shaped config, or a snapshot
-    /// with a stripped `config.json`, has none of the recognised keys, and
-    /// `produceManifest` silently substitutes 8192. `MLXBackend` calls this at
-    /// load time so its primary trained-context warning (#2348) can tell the
-    /// difference and stay silent rather than state an unverified number as
-    /// fact — the same class of defect MLX-1 fixed for the budget-vs-trained
-    /// conflation, narrowed to "was this specific number even measured."
-    ///
-    /// Duplicates `produceManifest`'s config.json read (one extra file read
-    /// at load time, negligible next to the model-weight load it accompanies)
-    /// rather than changing `produceManifest`'s public signature or
-    /// `ModelManifest`'s shape — both have other callers/tests that don't
-    /// need to know about detection provenance.
-    public static func contextWindowWasDetected(at url: URL) -> Bool {
-        let configURL = url.appendingPathComponent("config.json")
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return false
-        }
-        return extractContextWindow(from: json) != nil
     }
 
     /// Pulls the model's max position embedding count out of an MLX

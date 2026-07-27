@@ -1392,8 +1392,11 @@ final class MLXBackendGenerationTests: XCTestCase {
 
     /// A `ModelManifest` fixture with an explicit `contextWindow`, standing
     /// in for what `MLXModelProbe.produceManifest` would have read from a
-    /// real `config.json` at `loadModel(from:plan:)` time.
-    private func makeManifest(contextWindow: Int) -> ModelManifest {
+    /// real `config.json` at `loadModel(from:plan:)` time. Pass `nil` to
+    /// simulate a `config.json` with no recognised context-length key —
+    /// since core PR #2404 that is the only signal `reportContextCheck`'s
+    /// primary warning needs to stay silent (review MLX-A).
+    private func makeManifest(contextWindow: Int?) -> ModelManifest {
         ModelManifest(
             contextWindow: contextWindow,
             supportsTools: true,
@@ -1649,24 +1652,25 @@ final class MLXBackendGenerationTests: XCTestCase {
     // MARK: - #2348 review round 2: MLX-A (guess vs. measurement) and MLX-C (rate-limit reset on re-inject)
 
     /// Review MLX-A (the blocker's narrower cousin): `_manifest.contextWindow`
-    /// can itself be a guess — `produceManifest` silently substitutes 8192
-    /// when `config.json` carries none of the recognised context-length keys
-    /// (SSM/Mamba/RWKV-shaped configs, a stripped snapshot). Before this fix,
-    /// the primary warning stated that substitute as fact ("exceeded the
-    /// model's trained context"), which is exactly the wrong-cause defect
-    /// MLX-1 fixed, just narrower. This asserts the primary warning stays
-    /// silent when the manifest's context window was never actually
-    /// measured — `wasDetected: false` simulates the fallback path without
-    /// needing a real undetectable `config.json` on disk.
+    /// can itself be absent — `produceManifest` leaves it `nil` when
+    /// `config.json` carries none of the recognised context-length keys
+    /// (SSM/Mamba/RWKV-shaped configs, a stripped snapshot; core PR #2404
+    /// retired the `8192`-fabrication behavior this guarded against, and with
+    /// it the separate `_trainedContextWasDetected` side-channel — absence is
+    /// now directly representable on the manifest). This asserts the primary
+    /// warning stays silent when the manifest's context window was never
+    /// actually measured — injecting a manifest with `contextWindow: nil`
+    /// simulates that path without needing a real undetectable `config.json`
+    /// on disk.
     func test_generate_doesNotWarnPrimary_whenTrainedContextWasNotDetected() async throws {
         let mock = MockMLXModelContainer()
         mock.tokensToYield = ["ok"]
         mock.simulatedCacheCompletionTokenCount = 3
-        mock.preparedTokenBatches = [[1, 2, 3, 4, 5, 6, 7, 8]] // 8 prompt + 3 completion = 11, over the fixture's ceiling of 10
+        mock.preparedTokenBatches = [[1, 2, 3, 4, 5, 6, 7, 8]] // 8 prompt + 3 completion = 11
 
         let backend = MLXBackend()
         backend._inject(mock)
-        backend._injectManifest(makeManifest(contextWindow: 10), wasDetected: false)
+        backend._injectManifest(makeManifest(contextWindow: nil))
 
         let trainedCapture = ContextWarningCapture()
         MLXBackend.setTrainedContextExceededHookForTesting { trainedCapture.record($0, $1) }
@@ -1676,19 +1680,20 @@ final class MLXBackendGenerationTests: XCTestCase {
             prompt: "hi", systemPrompt: nil, config: GenerationConfig()
         ))
 
-        XCTAssertTrue(trainedCapture.calls.isEmpty, "an undetected (fallback-default) contextWindow must never drive the primary trained-context warning — the number was never measured, even though the running context (11) numerically exceeds it (10)")
+        XCTAssertTrue(trainedCapture.calls.isEmpty, "a nil contextWindow must never drive the primary trained-context warning — there is no measured number to compare the running context (11) against")
 
-        // Sabotage check: removing the `_trainedContextWasDetected` guard
-        // from `reportContextCheck` turns this red — verified manually,
-        // reverted after confirming.
+        // Sabotage check: removing the `_manifest.flatMap(\.contextWindow)`
+        // optional-binding guard from `reportContextCheck` (e.g. comparing
+        // against a force-unwrapped or defaulted value instead) turns this
+        // red — verified manually, reverted after confirming.
     }
 
     /// The secondary budget warning is a fact about `ModelLoadPlan`
     /// (`_configuredContextSize`), never a config.json guess — it must keep
-    /// firing regardless of `_trainedContextWasDetected`. The trained ceiling
-    /// here (1000) is set deliberately far above the running context (11) so
-    /// this test isolates "budget fires independent of detection provenance"
-    /// from "primary correctly stays silent," which the test above already covers.
+    /// firing regardless of whether the trained context was measured. The
+    /// manifest here has no `contextWindow` at all, so this test isolates
+    /// "budget fires independent of trained-context detection" from "primary
+    /// correctly stays silent," which the test above already covers.
     func test_generate_stillWarnsBudget_whenTrainedContextWasNotDetected() async throws {
         let mock = MockMLXModelContainer()
         mock.tokensToYield = ["ok"]
@@ -1697,7 +1702,7 @@ final class MLXBackendGenerationTests: XCTestCase {
 
         let backend = MLXBackend()
         backend._inject(mock, configuredContextSize: 5)
-        backend._injectManifest(makeManifest(contextWindow: 1_000), wasDetected: false)
+        backend._injectManifest(makeManifest(contextWindow: nil))
 
         let trainedCapture = ContextWarningCapture()
         let budgetCapture = ContextWarningCapture()
@@ -1712,7 +1717,7 @@ final class MLXBackendGenerationTests: XCTestCase {
             prompt: "hi", systemPrompt: nil, config: GenerationConfig()
         ))
 
-        XCTAssertTrue(trainedCapture.calls.isEmpty, "running (11) is nowhere near the fixture's contextWindow (1000), so the primary warning correctly stays silent regardless of detection provenance")
+        XCTAssertTrue(trainedCapture.calls.isEmpty, "the fixture's contextWindow is nil, so the primary warning correctly stays silent regardless of the running context")
         XCTAssertEqual(budgetCapture.calls.count, 1, "the budget warning is independent of detection provenance and must still fire when running (11) exceeds the budget (5)")
     }
 

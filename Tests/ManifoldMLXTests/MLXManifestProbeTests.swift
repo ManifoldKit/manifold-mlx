@@ -111,14 +111,14 @@ final class MLXManifestProbeTests: XCTestCase {
             detectedThinkingMarkers: nil,
             supportsVision: false
         )
-        XCTAssertEqual(manifest.contextWindow, 8192,
-                       "Missing config.json must fall back to the conservative 8k default")
+        XCTAssertNil(manifest.contextWindow,
+                     "Missing config.json must leave contextWindow nil — ModelManifest.unknown no longer fabricates 8192 (core PR #2404)")
         XCTAssertFalse(manifest.supportsThinking)
         XCTAssertFalse(manifest.supportsTools,
                        "ModelManifest.unknown reports no tool support")
     }
 
-    func test_fallsBackTo8k_whenNoContextHintFound() throws {
+    func test_leavesContextWindowNil_whenNoContextHintFound() throws {
         let dir = try makeTempDir()
         try writeConfig([
             "model_type": "minimal",
@@ -129,8 +129,8 @@ final class MLXManifestProbeTests: XCTestCase {
             detectedThinkingMarkers: nil,
             supportsVision: false
         )
-        XCTAssertEqual(manifest.contextWindow, 8192,
-                       "Configs without max_position_embeddings / model_max_length must fall back to 8k")
+        XCTAssertNil(manifest.contextWindow,
+                     "Configs without max_position_embeddings / model_max_length must leave contextWindow nil rather than guessing 8k")
     }
 
     // MARK: - positiveInt coercion of max_position_embeddings
@@ -178,7 +178,7 @@ final class MLXManifestProbeTests: XCTestCase {
                        "an Int64 max_position_embeddings must coerce to Int")
     }
 
-    func test_maxPositionEmbeddings_zero_fallsBackToDefault() throws {
+    func test_maxPositionEmbeddings_zero_leavesContextWindowNil() throws {
         let dir = try makeTempDir()
         try writeConfig([
             "model_type": "qwen3",
@@ -188,11 +188,11 @@ final class MLXManifestProbeTests: XCTestCase {
         let manifest = MLXModelProbe.produceManifest(
             at: dir, detectedThinkingMarkers: nil, supportsVision: false
         )
-        XCTAssertEqual(manifest.contextWindow, 8192,
-                       "zero is rejected by positiveInt and must fall back to the 8k default")
+        XCTAssertNil(manifest.contextWindow,
+                     "zero is rejected by positiveInt and must leave contextWindow nil, not guess 8k")
     }
 
-    func test_maxPositionEmbeddings_negative_fallsBackToDefault() throws {
+    func test_maxPositionEmbeddings_negative_leavesContextWindowNil() throws {
         let dir = try makeTempDir()
         try writeConfig([
             "model_type": "qwen3",
@@ -202,8 +202,8 @@ final class MLXManifestProbeTests: XCTestCase {
         let manifest = MLXModelProbe.produceManifest(
             at: dir, detectedThinkingMarkers: nil, supportsVision: false
         )
-        XCTAssertEqual(manifest.contextWindow, 8192,
-                       "a negative value is rejected by positiveInt and must fall back to the 8k default")
+        XCTAssertNil(manifest.contextWindow,
+                     "a negative value is rejected by positiveInt and must leave contextWindow nil, not guess 8k")
     }
 
     // MARK: - Thinking marker plumbing
@@ -242,90 +242,22 @@ final class MLXManifestProbeTests: XCTestCase {
         XCTAssertFalse(MLXModelProbe.isUnsupportedGemma4(modelType: nil))
     }
 
-    // MARK: - contextWindowWasDetected (#2348, review MLX-A)
-
-    /// `MLXBackend.loadModel` reads this once at load time to gate the
-    /// primary trained-context warning (#2348) — a config that carries a
-    /// recognised context-length key was actually measured, not guessed.
-    func test_contextWindowWasDetected_trueForTopLevelKey() throws {
-        let dir = try makeTempDir()
-        try writeConfig([
-            "model_type": "qwen3",
-            "max_position_embeddings": 32_768,
-        ], in: dir)
-
-        XCTAssertTrue(MLXModelProbe.contextWindowWasDetected(at: dir))
-    }
-
-    func test_contextWindowWasDetected_trueForNestedTextConfigKey() throws {
-        let dir = try makeTempDir()
-        try writeConfig([
-            "model_type": "gemma4",
-            "text_config": ["max_position_embeddings": 131_072] as [String: Any],
-        ], in: dir)
-
-        XCTAssertTrue(MLXModelProbe.contextWindowWasDetected(at: dir))
-    }
-
-    /// The false side of MLX-A's guard: a config with no recognised key
-    /// (SSM/Mamba/RWKV-shaped, or otherwise) must report `false` — this is
-    /// what tells `MLXBackend` the 8192 `produceManifest` fell back to is a
-    /// guess, not a measurement, so the primary warning must stay silent.
-    func test_contextWindowWasDetected_falseWhenNoRecognisedKeyPresent() throws {
-        let dir = try makeTempDir()
-        try writeConfig([
-            "model_type": "minimal",
-        ], in: dir)
-
-        XCTAssertFalse(MLXModelProbe.contextWindowWasDetected(at: dir))
-    }
-
-    /// Mirrors `produceManifest`'s own missing-`config.json` fallback path —
-    /// no file to read means nothing was detected.
-    func test_contextWindowWasDetected_falseWhenConfigJsonMissing() throws {
-        let dir = try makeTempDir()
-        // No config.json written.
-
-        XCTAssertFalse(MLXModelProbe.contextWindowWasDetected(at: dir))
-    }
-
-    /// A zero/negative `max_position_embeddings` is rejected by `positiveInt`
-    /// the same way `produceManifest`'s own `contextWindow` extraction
-    /// rejects it (see `test_maxPositionEmbeddings_zero_fallsBackToDefault`
-    /// above) — `contextWindowWasDetected` must agree, not just `contextWindow`.
-    func test_contextWindowWasDetected_falseForNonPositiveValue() throws {
-        let dir = try makeTempDir()
-        try writeConfig([
-            "model_type": "qwen3",
-            "max_position_embeddings": 0,
-        ], in: dir)
-
-        XCTAssertFalse(MLXModelProbe.contextWindowWasDetected(at: dir))
-
-        // Sabotage check: changing `extractContextWindow(from:) != nil` to
-        // `true` (or deleting the `positiveInt` guard `extractContextWindow`
-        // itself relies on) turns this red — verified manually, reverted
-        // after confirming.
-    }
-
     // MARK: - #2348 review round 2, item 2: closes the `_injectManifest`-only test gap
     //
     // Every executed test for the #2348 context-ceiling warning
     // (`MLXBackendGenerationTests.swift`) goes through
-    // `MLXBackend._injectManifest(_:wasDetected:)`, a test-only seam that
-    // bypasses `loadModel(from:plan:)` entirely. That leaves the claim "the
-    // primary warning is live in production" resting on a static trace
-    // through `loadModel` → `produceManifest`/`contextWindowWasDetected` →
-    // `withStateLock { _manifest = ...; _trainedContextWasDetected = ... }`,
+    // `MLXBackend._injectManifest(_:)`, a test-only seam that bypasses
+    // `loadModel(from:plan:)` entirely. That leaves the claim "the primary
+    // warning is live in production" resting on a static trace through
+    // `loadModel` → `produceManifest` → `withStateLock { _manifest = ... }`,
     // not on anything executed — the exact gap MK-4 closed on the
     // ManifoldKit side (`ModelStorageServiceTests.swift`'s
     // `test_discoverModels_mlxDirectory_populatesDetectedContextLengthFromConfig`).
     // `loadModel` itself needs real Apple-Silicon hardware and can't be
     // exercised here (`MLXBackendTests.swift`'s own header comment: hardware-
     // gated load→unload cycles are covered by `ManifoldE2ETests`, not local
-    // unit tests) — but the piece that actually determines both the
-    // warning's threshold AND whether it's trustworthy — `produceManifest`
-    // and `contextWindowWasDetected` reading a real on-disk `config.json` —
+    // unit tests) — but the piece that actually determines the warning's
+    // threshold — `produceManifest` reading a real on-disk `config.json` —
     // needs neither GPU nor weights. This test is the explicit bridge: it
     // names the connection to the #2348 warning feature so a future reader
     // doesn't have to rediscover it, and pins the value (131072) at the
@@ -333,8 +265,11 @@ final class MLXManifestProbeTests: XCTestCase {
 
     /// A value that would drive a real #2348 primary-warning threshold, read
     /// from disk with no injection anywhere in the call chain — this is what
-    /// `MLXBackend.loadModel` assigns to `_manifest`/`_trainedContextWasDetected`,
-    /// which `reportContextCheck`'s primary warning compares against.
+    /// `MLXBackend.loadModel` assigns to `_manifest`, which
+    /// `reportContextCheck`'s primary warning compares against. Since core
+    /// PR #2404, a non-`nil` `contextWindow` on its own is what tells the
+    /// primary warning the number was measured, not guessed — there is no
+    /// separate detection side-channel to assert on any more.
     func test_contextWindow_fromRealConfigOnDisk_matchesWhatWouldDriveThePrimaryWarningThreshold() throws {
         let dir = try makeTempDir()
         try writeConfig([
@@ -352,13 +287,9 @@ final class MLXManifestProbeTests: XCTestCase {
             manifest.contextWindow, 131_072,
             "produceManifest must read the real trained context from config.json on disk"
         )
-        XCTAssertTrue(
-            MLXModelProbe.contextWindowWasDetected(at: dir),
-            "the same real config.json must also report as detected, so loadModel's primary warning would be live (not silenced by MLX-A's guard) for this model"
-        )
 
         // Sabotage check: replacing `extractContextWindow(from: json)` with
-        // `nil` (simulating a broken key-reader) turns this test red on both
-        // assertions — verified manually, reverted after confirming.
+        // `nil` (simulating a broken key-reader) turns this test red —
+        // verified manually, reverted after confirming.
     }
 }
