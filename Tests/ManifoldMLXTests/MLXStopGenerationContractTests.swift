@@ -17,12 +17,71 @@ import ManifoldMLX
 /// only need to know when the underlying generation task has unwound. Free
 /// function rather than a method so the consuming `Task` does not capture the
 /// non-`Sendable` `XCTestCase`.
-private func drain(_ stream: GenerationStream) async {
+@discardableResult
+private func drain(_ stream: GenerationStream) async -> Int {
+    var tokenCount = 0
     do {
-        for try await _ in stream {}
+        for try await event in stream {
+            if case .token = event { tokenCount += 1 }
+        }
     } catch {
         // A cancelled stream terminating with an error is expected here.
     }
+    return tokenCount
+}
+
+/// Fails the test instead of hanging it. `waitUntilArrived()` and awaiting a
+/// consumer task are both unbounded, and XCTest applies no default timeout to
+/// an `async` test method — so if the driver ever stops reaching the yield hook
+/// (a throw before the first chunk, or a change in yield cadence) these would
+/// park forever. On the merge gate that surfaces as a hung CI job killed at the
+/// workflow timeout with no useful output, which is strictly worse than a red
+/// assertion. Bounded waits turn it back into a diagnosable failure.
+private func withTestTimeout(
+    _ seconds: Double = 10,
+    _ description: String,
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    _ body: @escaping @Sendable () async -> Void
+) async {
+    let completed = await withTaskGroup(of: Bool.self) { group in
+        group.addTask { await body(); return true }
+        group.addTask {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            return false
+        }
+        let first = await group.next() ?? false
+        group.cancelAll()
+        return first
+    }
+    if !completed {
+        XCTFail("Timed out after \(seconds)s waiting for: \(description)", file: file, line: line)
+    }
+}
+
+/// Value-returning variant of `withTestTimeout`, for awaits whose result the
+/// test needs. Returns `nil` and fails the test on timeout.
+private func withTestTimeoutValue<T: Sendable>(
+    _ seconds: Double = 10,
+    _ description: String,
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    _ body: @escaping @Sendable () async -> T
+) async -> T? {
+    let result = await withTaskGroup(of: T?.self) { group in
+        group.addTask { await body() }
+        group.addTask {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            return nil
+        }
+        let first = await group.next() ?? nil
+        group.cancelAll()
+        return first
+    }
+    if result == nil {
+        XCTFail("Timed out after \(seconds)s waiting for: \(description)", file: file, line: line)
+    }
+    return result
 }
 
 final class MLXStopGenerationContractTests: XCTestCase {
@@ -58,6 +117,24 @@ final class MLXStopGenerationContractTests: XCTestCase {
         }
     }
 
+    /// One-shot latch so a hook that may fire more than once acts only the
+    /// first time. `NSLock`-guarded rather than a bare `Bool` because the hook
+    /// is `@Sendable`.
+    private final class OneShot: @unchecked Sendable {
+        private let lock = NSLock()
+        private var used = false
+        func claim() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if used { return false }
+            used = true
+            return true
+        }
+    }
+
+    /// Enough chunks that a *completed* generation is unmistakably distinct
+    /// from a cancelled one.
+    private let mockTokenCount = 64
+
     private func stallingConfig() -> GenerationConfig {
         var config = GenerationConfig()
         // Hook fires every `yieldEveryNTokens` chunks; 1 makes arrival prompt.
@@ -67,13 +144,92 @@ final class MLXStopGenerationContractTests: XCTestCase {
 
     private func makeMock() -> MockMLXModelContainer {
         let mock = MockMLXModelContainer()
-        mock.tokensToYield = Array(repeating: "tok", count: 64)
+        mock.tokensToYield = Array(repeating: "tok", count: mockTokenCount)
         return mock
     }
 
     override func tearDown() {
         MLXBackend._yieldHookForTesting = nil
+        MLXBackend._preTaskInstallHookForTesting = nil
         super.tearDown()
+    }
+
+    /// Review finding F1: `stopGeneration()` landing between `generate()`'s
+    /// critical section and the install of `_generationTask`.
+    ///
+    /// The stop finds no task to cancel, but still bumps the epoch and clears
+    /// `_isGenerating`. If the launching call then installed unconditionally,
+    /// it would leave an **uncancelled** task that no later `stopGeneration()`
+    /// can reach, while `isGenerating` reads `false` — so the next `generate()`
+    /// is admitted and two generations run concurrently on one
+    /// `ModelContainer`.
+    ///
+    /// The window predates #171 but was benign then: the missed cancel left
+    /// `_isGenerating == true`, so a resend bounced with `alreadyGenerating`.
+    /// Clearing the flag synchronously is what makes it real concurrency, so
+    /// this test guards the fix that made the clearing safe — not the clearing.
+    func test_stopGenerationDuringLaunchWindow_cancelsTheOrphanedGeneration() async throws {
+        let gate = Gate()
+        MLXBackend._yieldHookForTesting = { await gate.wait() }
+
+        let backend = MLXBackend()
+        backend._inject(makeMock())
+
+        // Fire exactly once, in the launch window, from inside generate().
+        let stopped = OneShot()
+        MLXBackend._preTaskInstallHookForTesting = { [weak backend] in
+            guard stopped.claim() else { return }
+            backend?.stopGeneration()
+        }
+
+        let stream = try backend.generate(
+            prompt: "raced",
+            systemPrompt: nil,
+            config: stallingConfig(),
+            hints: GenerationRuntimeHints()
+        )
+        let consumer = Task { await drain(stream) }
+
+        XCTAssertFalse(
+            backend.isGenerating,
+            "The stop landed after the epoch was claimed, so the backend must report idle"
+        )
+
+        // THE assertion. Everything else here (isGenerating false, the backend
+        // still usable, the consumer completing) holds whether or not the
+        // install honours the epoch — a first draft of this test asserted only
+        // those and passed against the unfixed code. What actually differs is
+        // whether the orphaned generation was *cancelled*: guarded, it is
+        // cancelled at install and yields almost nothing; unguarded, it is
+        // installed uncancelled and runs the mock to completion.
+        await gate.open()
+        let producedTokens = await withTestTimeoutValue(10, "orphaned generation to unwind") {
+            await consumer.value
+        } ?? mockTokenCount
+
+        XCTAssertLessThan(
+            producedTokens, mockTokenCount,
+            """
+            A generation orphaned by a stop in the launch window must be cancelled \
+            at install, not left running unreachable. Producing all \(mockTokenCount) \
+            mock tokens means it ran to completion with no owner — and no later \
+            stopGeneration() could ever have reached it.
+            """
+        )
+
+        XCTAssertFalse(
+            backend.isGenerating,
+            "A cancelled-at-install generation must not leave the backend marked as generating"
+        )
+        XCTAssertNoThrow(
+            try backend.generate(
+                prompt: "after",
+                systemPrompt: nil,
+                config: stallingConfig(),
+                hints: GenerationRuntimeHints()
+            ),
+            "The backend must remain usable after a stop that raced the launch window"
+        )
     }
 
     /// Contract points 2 and 3: cancel mid-stream, then resend immediately.
@@ -96,7 +252,9 @@ final class MLXStopGenerationContractTests: XCTestCase {
         )
         let firstConsumer = Task { await drain(firstStream) }
 
-        await gate.waitUntilArrived()
+        await withTestTimeout(10, "first generation to reach the yield hook") {
+            await gate.waitUntilArrived()
+        }
         XCTAssertTrue(backend.isGenerating,
                       "Precondition: the first generation must be genuinely in flight, or this test is vacuous")
 
@@ -114,8 +272,13 @@ final class MLXStopGenerationContractTests: XCTestCase {
             "Contract point 2: the backend must accept a new generate() immediately after stopGeneration(), with no backoff"
         )
 
+        // Load-bearing: the resend above is parked on this same gate, so
+        // opening it is what lets that task unwind before the test returns.
+        // Do not "tidy" it away.
         await gate.open()
-        _ = await firstConsumer.value
+        await withTestTimeout(10, "cancelled generation to unwind") {
+            _ = await firstConsumer.value
+        }
     }
 
     /// The trap the naive fix walks into: clearing `_isGenerating` inside
@@ -142,7 +305,9 @@ final class MLXStopGenerationContractTests: XCTestCase {
             hints: GenerationRuntimeHints()
         )
         let firstConsumer = Task { await drain(firstStream) }
-        await firstGate.waitUntilArrived()
+        await withTestTimeout(10, "first generation to reach its gate") {
+            await firstGate.waitUntilArrived()
+        }
 
         backend.stopGeneration()
 
@@ -156,13 +321,17 @@ final class MLXStopGenerationContractTests: XCTestCase {
             hints: GenerationRuntimeHints()
         )
         let secondConsumer = Task { await drain(secondStream) }
-        await secondGate.waitUntilArrived()
+        await withTestTimeout(10, "successor generation to reach its gate") {
+            await secondGate.waitUntilArrived()
+        }
         XCTAssertTrue(backend.isGenerating, "Precondition: the successor must be in flight")
 
         // Release the superseded generation and wait for it to fully unwind —
         // this is the moment its teardown would clobber the successor's flag.
         await firstGate.open()
-        _ = await firstConsumer.value
+        await withTestTimeout(10, "superseded generation to fully unwind") {
+            _ = await firstConsumer.value
+        }
 
         XCTAssertTrue(
             backend.isGenerating,
@@ -170,6 +339,8 @@ final class MLXStopGenerationContractTests: XCTestCase {
         )
 
         await secondGate.open()
-        _ = await secondConsumer.value
+        await withTestTimeout(10, "successor generation to unwind") {
+            _ = await secondConsumer.value
+        }
     }
 }
