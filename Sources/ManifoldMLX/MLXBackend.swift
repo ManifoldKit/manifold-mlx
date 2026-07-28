@@ -347,8 +347,24 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// the same reason: make a timing-dependent window addressable without
     /// timing assertions.
     ///
-    /// `nil` in production, where this costs one nil check per `generate()`.
-    @_spi(Testing) public nonisolated(unsafe) static var _preTaskInstallHookForTesting: (@Sendable () -> Void)?
+    /// Lock-guarded rather than a bare `nonisolated(unsafe) static var` for the
+    /// reason MLX-3 gives above: this is read on the live generation path and
+    /// written by test setup/teardown. `_yieldHookForTesting` is the unlocked
+    /// shape only because it predates that finding — it is not the precedent to
+    /// copy. The exposure is not hypothetical here: this is `@_spi(Testing)`, so
+    /// other packages' test targets can install it, and they are not bound by
+    /// this repo's no-`--parallel` rule.
+    ///
+    /// `nil` in production, where this costs one lock-guarded read per
+    /// `generate()` — against a path that already takes `stateLock`, parses a
+    /// grammar, and spawns a Task.
+    private static let _preTaskInstallHook =
+        OSAllocatedUnfairLock<(@Sendable () -> Void)?>(initialState: nil)
+
+    /// Installs (or clears, with `nil`) the launch-window test hook race-free.
+    @_spi(Testing) public static func setPreTaskInstallHookForTesting(_ hook: (@Sendable () -> Void)?) {
+        _preTaskInstallHook.withLock { $0 = hook }
+    }
 
     /// Test-injection hook for the primary trained-context-exceeded warning
     /// (#2348) — invoked with `(runningContext, trainedContextMax)` the first
@@ -750,7 +766,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
             }
         }
 
-        Self._preTaskInstallHookForTesting?()
+        Self._preTaskInstallHook.withLock { $0 }?()
 
         // Install only if this generation is still current (#171).
         //
@@ -1058,8 +1074,18 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// task so neither its install nor its teardown can touch a *successor's*
     /// state.
     ///
+    /// One nuance in the launch-window case (a stop arriving while a
+    /// `generate()` is between claiming its epoch and installing its task):
+    /// contract point 1 — the stream's `onTermination` firing — is satisfied a
+    /// moment *after* this returns, because the cancel happens at install.
+    /// Making it synchronous would mean holding `stateLock` across task
+    /// construction, which is worse. Points 2 and 3, the ones callers actually
+    /// poll, are synchronous either way.
+    ///
     /// **Note for anyone debugging #157** (Metal command-buffer/encoder crashes
-    /// under rapid successive generations): the contract obliges this backend
+    /// under rapid successive generations): that issue names **"cancel → resend
+    /// → replay"** as its repro pattern, and this method *is* that seam — so the
+    /// connection is direct, not incidental. The contract obliges this backend
     /// to accept a resend while the outgoing generation's MLX work may still be
     /// unwinding on the GPU. `MLXGenerationDriver` breaks its token loop only at
     /// the top of the next chunk, so one more forward pass is typically already
