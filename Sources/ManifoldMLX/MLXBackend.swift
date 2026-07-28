@@ -126,11 +126,28 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 // Pre-load there is no model to be eligible *for*, so this
                 // reports the configured flag: a bare `MLXBackend()` advertises
                 // what it is configured to do, which is the surface the
-                // conformance meta-contract and `MLXLocalBackendContractTests`
-                // pin. Reporting `false` pre-load would instead assert "this
-                // backend cannot persist KV" — untrue of a default-configured
-                // backend that simply has not loaded yet.
-                supportsKVCachePersistence: _isModelLoaded ? _kvCacheReuseEligible : enableKVCacheReuse,
+                // conformance meta-contract pins
+                // (`MLXBackendConformanceTests` asserts on
+                // `MLXBackend().capabilities`). Reporting `false` pre-load
+                // would instead assert "this backend cannot persist KV" —
+                // untrue of a default-configured backend that simply has not
+                // loaded yet.
+                //
+                // The loaded-ness predicate is `_modelContainer`, NOT
+                // `_isModelLoaded`. Both mean "a model is loaded", but only
+                // `_modelContainer` is written in the *same* `withStateLock`
+                // block as `_kvCacheReuseEligible` (in `loadModel` and in
+                // `_inject`) and cleared alongside it in `unloadModel`.
+                // `isModelLoaded` is a separate lock acquisition at the tail of
+                // `loadModel`, two awaits later (cleanup barrier + arbiter
+                // claim); keying off it would leave a window where eligibility
+                // is already known to be `false` for a VLM/MoE model while this
+                // still reported the configured `true` — the exact over-claim
+                // #154 is about, just narrowed rather than removed. Every
+                // neighbouring model-derived field (`supportsVision`,
+                // `_dialect`, `_manifest`) flips in that same block, so this
+                // keeps the struct internally consistent.
+                supportsKVCachePersistence: _modelContainer != nil ? _kvCacheReuseEligible : enableKVCacheReuse,
                 supportsGrammarConstrainedSampling: true,
                 supportsThinking: true,
                 supportsVision: _supportsVision,
