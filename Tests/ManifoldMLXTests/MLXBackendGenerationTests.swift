@@ -320,6 +320,60 @@ final class MLXBackendGenerationTests: XCTestCase {
         // before the second turn makes reuseCounts empty and the cache offset 0.
     }
 
+    /// #154: a VLM/MoE model routed through `VLMModelFactory` full-prefills
+    /// every turn, and `capabilities.supportsKVCachePersistence` must agree
+    /// rather than inheriting the default-on constructor flag.
+    ///
+    /// This is the same setup as
+    /// `test_generate_reusesPromptCachePrefixOnMatchingTurn` above — identical
+    /// mock, identical prompts, identical `enableKVCacheReuse: true` — with
+    /// only the VLM routing flipped, so the contrast between the two isolates
+    /// exactly the routing decision.
+    func test_capabilities_kvCachePersistence_vlmRoutedModel_agreesWithNoReuse() async throws {
+        let mock = MockMLXModelContainer()
+        mock.tokensToYield = ["ok"]
+        mock.preparedTokenBatches = [
+            [11, 12, 13, 14],
+            [11, 12, 13, 14, 15],
+        ]
+
+        let backend = MLXBackend(enableKVCacheReuse: true)
+        backend._inject(mock, routesThroughVLMFactory: true)
+
+        XCTAssertFalse(
+            backend.capabilities.supportsKVCachePersistence,
+            "A VLM/MoE-routed model is not reuse-eligible, so the capability must not claim persistence"
+        )
+
+        _ = try await collectAllEvents(from: try backend.generate(
+            prompt: "first",
+            systemPrompt: nil,
+            config: GenerationConfig()
+        ))
+
+        let secondEvents = try await collectAllEvents(from: try backend.generate(
+            prompt: "second",
+            systemPrompt: nil,
+            config: GenerationConfig()
+        ))
+        let reuseCounts = secondEvents.compactMap { event -> Int? in
+            if case .kvCacheReuse(let count) = event { return count }
+            return nil
+        }
+
+        XCTAssertEqual(reuseCounts, [],
+            "VLM-routed generation must full-prefill every turn — no kvCacheReuse events")
+        XCTAssertEqual(mock.lastInitialCacheOffsets, [0],
+            "The second turn must start from a cold cache, not a restored prefix")
+
+        // Sabotage check: reverting `supportsKVCachePersistence` to read
+        // `enableKVCacheReuse` fails the capability assertion; reverting
+        // `_inject`'s eligibility to ignore `routesThroughVLMFactory` fails the
+        // reuse-count and cache-offset assertions. Neither can pass vacuously —
+        // the twin test above proves this same mock *does* emit reuse when the
+        // model is LLM-routed.
+    }
+
     func test_generate_withReuseDisabled_doesNotPersistPromptSnapshot() async throws {
         let mock = MockMLXModelContainer()
         mock.tokensToYield = ["ok"]

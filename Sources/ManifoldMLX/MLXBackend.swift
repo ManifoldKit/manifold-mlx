@@ -113,16 +113,61 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 maxOutputTokens: 4096,
                 supportsStreaming: true,
                 isRemote: false,
-                // Reports the *configured* reuse flag, not per-model eligibility.
-                // A default backend loading a VLM/MoE model (routed through
-                // `VLMModelFactory`) sets `_kvCacheReuseEligible = false` and will
-                // full-prefill every turn even though this reads `true`. Kept as
-                // the config flag rather than `_kvCacheReuseEligible` so a bare
-                // pre-load `MLXBackend()` advertises the capability it is
-                // configured for — the conformance meta-contract asserts against
-                // exactly that pre-load surface. Treat this as "configured to
-                // persist", not "will persist for the loaded model".
-                supportsKVCachePersistence: enableKVCacheReuse,
+                // Per-model once a model is loaded; configuration intent before
+                // that (#154).
+                //
+                // Post-load this reports `_kvCacheReuseEligible`
+                // (`enableKVCacheReuse && !routeThroughVLMFactory`) — the same
+                // value the generate path actually gates reuse on. A VLM/MoE
+                // model routed through `VLMModelFactory` full-prefills every
+                // turn, and now says so rather than inheriting the constructor
+                // flag's `true`.
+                //
+                // Pre-load there is no model to be eligible *for*, so this
+                // reports the configured flag: a bare `MLXBackend()` advertises
+                // what it is configured to do, which is the surface the
+                // conformance meta-contract pins
+                // (`MLXBackendConformanceTests` asserts on
+                // `MLXBackend().capabilities`). Reporting `false` pre-load
+                // would instead assert "this backend cannot persist KV" —
+                // untrue of a default-configured backend that simply has not
+                // loaded yet.
+                //
+                // The loaded-ness predicate is `_modelContainer`, NOT
+                // `_isModelLoaded`. Both mean "a model is loaded", but only
+                // `_modelContainer` is written in the *same* `withStateLock`
+                // block as `_kvCacheReuseEligible` (in `loadModel` and in
+                // `_inject`) and cleared alongside it in `unloadModel`.
+                // `isModelLoaded` is a separate lock acquisition at the tail of
+                // `loadModel`, two awaits later (cleanup barrier + arbiter
+                // claim); keying off it would leave a window where eligibility
+                // is already known to be `false` for a VLM/MoE model while this
+                // still reported the configured `true` — the exact over-claim
+                // #154 is about, just narrowed rather than removed. Every
+                // neighbouring model-derived field (`supportsVision`,
+                // `_dialect`, `_manifest`) flips in that same block, so this
+                // keeps the struct internally consistent.
+                //
+                // NOTE for anyone adding a `_modelContainer` writer: this class
+                // now carries two distinct loaded-ness predicates, and they are
+                // not interchangeable.
+                //   • `_modelContainer != nil` — model state is installed.
+                //     The superset; what capability reporting keys off.
+                //   • `_isModelLoaded` — the load is *committed* (arbiter claim
+                //     settled) and generation is permitted. `generate`'s guard.
+                // No test can currently tell them apart: the tests that reach
+                // the loaded state through `_inject` set both in one block, and
+                // the tests that call the real `loadModel` await it to
+                // completion — by which point both are `true` and agree.
+                // Distinguishing them needs an observer that reads
+                // `capabilities` *inside* the load tail, i.e. a real multi-GB
+                // load plus a mid-`await` hook.
+                //
+                // A change here therefore fails silently: assigning
+                // `_modelContainer` outside a block that also sets
+                // `_kvCacheReuseEligible` moves capability reporting with it
+                // and the suite stays green.
+                supportsKVCachePersistence: _modelContainer != nil ? _kvCacheReuseEligible : enableKVCacheReuse,
                 supportsGrammarConstrainedSampling: true,
                 supportsThinking: true,
                 supportsVision: _supportsVision,
@@ -859,11 +904,20 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     /// without loading real model weights. Call this before `generate()`.
     ///
     /// Not part of the public API — @_spi(Testing) seam for backend test targets (#1749).
+    ///
+    /// `routesThroughVLMFactory` stands in for the load-time architecture
+    /// dispatch (#154): a real `loadModel` sets `_kvCacheReuseEligible` to
+    /// `enableKVCacheReuse && !routeThroughVLMFactory`, and passing `true` here
+    /// reproduces the VLM/MoE branch — the one that full-prefills every turn —
+    /// without needing a multi-GB `vision_config`-bearing snapshot on disk.
+    /// Defaults to `false` (the LLM-factory path), preserving every existing
+    /// call site's behavior.
     @_spi(Testing) public func _inject(
         _ container: any MLXModelContainerProtocol,
         supportsVision: Bool = false,
         dialect: MLXToolDialect = .unknown,
-        configuredContextSize: Int? = nil
+        configuredContextSize: Int? = nil,
+        routesThroughVLMFactory: Bool = false
     ) {
         withStateLock {
             _modelContainer = container
@@ -871,7 +925,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
             _supportsVision = supportsVision
             _dialect = dialect
             _promptCacheState.invalidate()
-            _kvCacheReuseEligible = enableKVCacheReuse
+            _kvCacheReuseEligible = enableKVCacheReuse && !routesThroughVLMFactory
             _hasInitializedRuntime = false
             _configuredContextSize = configuredContextSize
             // Review MLX-C: unlike `unloadModel()`, this was leaving the

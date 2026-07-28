@@ -121,9 +121,45 @@ final class MLXBackendTests: XCTestCase {
         )
     }
 
+    /// Pre-load, the capability reports *configuration intent* — there is no
+    /// loaded model to be eligible for yet (#154). This is the surface the
+    /// conformance meta-contract and `MLXLocalBackendContractTests` pin.
     func test_capabilities_supportsKVCachePersistence_defaultsOnDisableToOptOut() {
         XCTAssertTrue(MLXBackend().capabilities.supportsKVCachePersistence)
         XCTAssertFalse(MLXBackend(enableKVCacheReuse: false).capabilities.supportsKVCachePersistence)
+    }
+
+    /// Post-load, the capability is per-model: an LLM-factory-routed model is
+    /// reuse-eligible and still reports `true` (#154).
+    func test_capabilities_supportsKVCachePersistence_afterLoad_llmRouted_staysTrue() {
+        let backend = MLXBackend(enableKVCacheReuse: true)
+        backend._inject(MockMLXModelContainer())
+        XCTAssertTrue(backend.capabilities.supportsKVCachePersistence)
+    }
+
+    /// …but a VLM/MoE-routed model is not eligible, and must stop claiming a
+    /// persistence it will never deliver (#154). Behavioural counterpart —
+    /// asserting the absence of `.kvCacheReuse` events — lives in
+    /// `MLXBackendGenerationTests`.
+    func test_capabilities_supportsKVCachePersistence_afterLoad_vlmRouted_reportsFalse() {
+        let backend = MLXBackend(enableKVCacheReuse: true)
+        backend._inject(MockMLXModelContainer(), routesThroughVLMFactory: true)
+        XCTAssertFalse(
+            backend.capabilities.supportsKVCachePersistence,
+            "Default-on reuse must not survive a VLM/MoE routing decision that disables it"
+        )
+    }
+
+    /// Unloading returns the backend to its pre-load surface rather than
+    /// stranding it on the last model's eligibility — `unloadModel()` clears
+    /// `_kvCacheReuseEligible`, so reading it post-unload would report a
+    /// permanent `false` for a backend that is still configured for reuse (#154).
+    func test_capabilities_supportsKVCachePersistence_afterUnload_returnsToConfiguredValue() {
+        let backend = MLXBackend(enableKVCacheReuse: true)
+        backend._inject(MockMLXModelContainer(), routesThroughVLMFactory: true)
+        XCTAssertFalse(backend.capabilities.supportsKVCachePersistence)
+        backend.unloadModel()
+        XCTAssertTrue(backend.capabilities.supportsKVCachePersistence)
     }
 
     func test_capabilities_supportsVision_falseBeforeLoad() {
