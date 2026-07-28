@@ -217,15 +217,16 @@ final class MLXStopGenerationContractTests: XCTestCase {
             backend.isGenerating,
             "A cancelled-at-install generation must not leave the backend marked as generating"
         )
-        XCTAssertNoThrow(
-            try backend.generate(
-                prompt: "after",
-                systemPrompt: nil,
-                config: stallingConfig(),
-                hints: GenerationRuntimeHints()
-            ),
-            "The backend must remain usable after a stop that raced the launch window"
+        // The backend must remain usable after a stop that raced the launch
+        // window — a throw here fails the test. Drained rather than discarded
+        // so no generation outlives the test method (review F10).
+        let resend = try backend.generate(
+            prompt: "after",
+            systemPrompt: nil,
+            config: stallingConfig(),
+            hints: GenerationRuntimeHints()
         )
+        await awaitOrFail("post-race resend to unwind") { await drain(resend) }
     }
 
     /// Contract points 2 and 3: cancel mid-stream, then resend immediately.
@@ -258,23 +259,28 @@ final class MLXStopGenerationContractTests: XCTestCase {
 
         XCTAssertFalse(backend.isGenerating,
                        "Contract point 3: isGenerating must be false synchronously after stopGeneration() returns")
-        XCTAssertNoThrow(
-            try backend.generate(
-                prompt: "second",
-                systemPrompt: nil,
-                config: stallingConfig(),
-                hints: GenerationRuntimeHints()
-            ),
-            "Contract point 2: the backend must accept a new generate() immediately after stopGeneration(), with no backoff"
+        // Contract point 2: the backend must accept a new generate()
+        // immediately after stopGeneration(), with no backoff. Binding the
+        // stream (rather than discarding it inside XCTAssertNoThrow) is what
+        // lets us drain it below — a throw here still fails the test.
+        let resend = try backend.generate(
+            prompt: "second",
+            systemPrompt: nil,
+            config: stallingConfig(),
+            hints: GenerationRuntimeHints()
         )
 
-        // Load-bearing: the resend above is parked on this same gate, so
-        // opening it is what lets that task unwind before the test returns.
-        // Do not "tidy" it away.
+        // Drain both generations before returning (review F10). Leaving a
+        // generation in flight past the test method means a `@MainActor` task
+        // can be reading `_yieldHookForTesting` at the same instant `tearDown`
+        // stores nil to it from a cooperative-pool thread — that hook is still
+        // the bare unlocked shape MLX-3 warns about, so an in-flight straggler
+        // turns a dormant pattern into a genuine cross-thread race.
         await gate.open()
         await awaitOrFail("cancelled generation to unwind") {
             _ = await firstConsumer.value
         }
+        await awaitOrFail("resend to unwind") { await drain(resend) }
     }
 
     /// The trap the naive fix walks into: clearing `_isGenerating` inside
