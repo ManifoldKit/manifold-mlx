@@ -80,6 +80,47 @@ final class MLXBackendTests: XCTestCase {
         XCTAssertEqual(MLXBackend().capabilities.maxContextTokens, 8192)
     }
 
+    /// The *measured* branch of `maxContextTokens`. Without this, the whole
+    /// expression could collapse to `Self.unknownModelContextWindow` and the
+    /// suite would stay green while a 128k model was silently budgeted at 8k —
+    /// core's `PromptAssembler` trims every prompt against this value, so that
+    /// is a user-visible truncation, not a cosmetic one.
+    func test_capabilities_maxContextTokens_reportsMeasuredManifestValue() {
+        let backend = MLXBackend()
+        backend._injectManifest(Self.manifest(contextWindow: 131_072))
+        XCTAssertEqual(backend.capabilities.maxContextTokens, 131_072)
+    }
+
+    /// The surviving-guess branch: a load completed, but `config.json` carried
+    /// no recognised context-length key, so the manifest says `nil`. This is
+    /// the case `unknownModelContextWindow`'s doc calls "the one worth naming
+    /// plainly" — pinned here so the named constant can't drift back into an
+    /// anonymous literal, and so the guess stays visible as a guess.
+    func test_capabilities_maxContextTokens_nilManifestFallsBackToNamedConstant() {
+        let backend = MLXBackend()
+        backend._injectManifest(Self.manifest(contextWindow: nil))
+        // Asserts the value rather than `MLXBackend.unknownModelContextWindow`
+        // itself, which is internal: widening it to `public` (or adding an SPI
+        // seam) purely to be namechecked here would grow the published surface
+        // for a test's convenience. The value is the contract — 8192, unchanged
+        // from before #2404, since this fallback is a rename plus audit trail
+        // and not a behaviour change. A rename cannot silently move it.
+        XCTAssertEqual(backend.capabilities.maxContextTokens, 8192)
+    }
+
+    private static func manifest(contextWindow: Int?) -> ModelManifest {
+        ModelManifest(
+            contextWindow: contextWindow,
+            supportsTools: true,
+            supportsThinking: false,
+            thinkingMarkers: nil,
+            supportsSeed: true,
+            supportedSamplingParameters: [.temperature, .topP],
+            modelIdentifier: "capabilities-context-fixture",
+            producerKind: .local
+        )
+    }
+
     func test_capabilities_supportsKVCachePersistence_defaultsOnDisableToOptOut() {
         XCTAssertTrue(MLXBackend().capabilities.supportsKVCachePersistence)
         XCTAssertFalse(MLXBackend(enableKVCacheReuse: false).capabilities.supportsKVCachePersistence)
