@@ -33,6 +33,24 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     private var _isModelLoaded = false
     private var _isGenerating = false
 
+    /// Identity of the current generation, bumped on every `generate()` and on
+    /// every `stopGeneration()` (#171).
+    ///
+    /// `stopGeneration()` must leave `isGenerating == false` synchronously and
+    /// the backend ready for an immediate `generate()` — core's
+    /// `InferenceBackend` contract, points 2 and 3. But `Task.cancel()` is
+    /// cooperative: the cancelled generation keeps unwinding after
+    /// `stopGeneration()` returns, and its teardown ends in
+    /// `_isGenerating = false`. Without an identity check that late write lands
+    /// on whatever generation is running *by then* — clearing a live
+    /// generation's flag from a task nobody owns any more, and admitting a
+    /// third concurrent `generate()`.
+    ///
+    /// So teardown is conditional: it clears the flag only if the epoch it
+    /// captured at launch is still current. A superseded task compares unequal
+    /// and leaves the flag alone. Read and written only under `stateLock`.
+    private var _generationEpoch: UInt64 = 0
+
     public private(set) var isModelLoaded: Bool {
         get { withStateLock { _isModelLoaded } }
         set { withStateLock { _isModelLoaded = newValue } }
@@ -317,6 +335,36 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     ///
     /// `nil` in production — the real cooperative yield runs instead.
     @_spi(Testing) public nonisolated(unsafe) static var _yieldHookForTesting: (@Sendable () async -> Void)?
+
+    /// Test-injection hook fired inside `generate()` in the window between the
+    /// state critical section (which claims the generation epoch) and the
+    /// install of `_generationTask` — the window in which a concurrent
+    /// `stopGeneration()` cannot yet see the task being launched (#171).
+    ///
+    /// That race is sub-microsecond and cannot be hit reliably by racing real
+    /// threads, so the guard protecting it would otherwise be untestable and
+    /// could regress silently. Mirrors `_yieldHookForTesting`, which exists for
+    /// the same reason: make a timing-dependent window addressable without
+    /// timing assertions.
+    ///
+    /// Lock-guarded rather than a bare `nonisolated(unsafe) static var` for the
+    /// reason MLX-3 gives above: this is read on the live generation path and
+    /// written by test setup/teardown. `_yieldHookForTesting` is the unlocked
+    /// shape only because it predates that finding — it is not the precedent to
+    /// copy. The exposure is not hypothetical here: this is `@_spi(Testing)`, so
+    /// other packages' test targets can install it, and they are not bound by
+    /// this repo's no-`--parallel` rule.
+    ///
+    /// `nil` in production, where this costs one lock-guarded read per
+    /// `generate()` — against a path that already takes `stateLock`, parses a
+    /// grammar, and spawns a Task.
+    private static let _preTaskInstallHook =
+        OSAllocatedUnfairLock<(@Sendable () -> Void)?>(initialState: nil)
+
+    /// Installs (or clears, with `nil`) the launch-window test hook race-free.
+    @_spi(Testing) public static func setPreTaskInstallHookForTesting(_ hook: (@Sendable () -> Void)?) {
+        _preTaskInstallHook.withLock { $0 = hook }
+    }
 
     /// Test-injection hook for the primary trained-context-exceeded warning
     /// (#2348) — invoked with `(runningContext, trainedContextMax)` the first
@@ -609,7 +657,14 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         let derivedToolAwareHistory = historyMessages.containsToolParts ? historyMessages.toolAwareHistory : nil
         let derivedStructuredHistory = historyMessages.isEmpty ? nil : historyMessages
 
-        let snapshot: GenerationCallSnapshot = try withStateLock {
+        /// This call's generation identity, claimed under `stateLock` below and
+        /// captured by the generation task so both its install and its teardown
+        /// can tell whether it is still the current generation (#171).
+        /// Immutable by construction — it must not be reassignable once the
+        /// escaping task closure has captured it.
+        let generationEpoch: UInt64
+        let snapshot: GenerationCallSnapshot
+        (snapshot, generationEpoch) = try withStateLock {
             guard _isModelLoaded, let container = _modelContainer else {
                 throw InferenceError.inferenceFailure("No model loaded")
             }
@@ -617,6 +672,11 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 throw InferenceError.alreadyGenerating
             }
             _isGenerating = true
+            // Claim a fresh generation identity; the task launched below
+            // captures it, and both installs and tears itself down only while
+            // it is still the current generation (#171).
+            _generationEpoch &+= 1
+            let claimedEpoch = _generationEpoch
             let snapshot = GenerationCallSnapshot(
                 container: container,
                 loadOptions: _loadOptions,
@@ -633,7 +693,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 ),
                 hints: hints
             )
-            return snapshot
+            return (snapshot, claimedEpoch)
         }
         Self.logger.debug("MLX generate started")
 
@@ -681,7 +741,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 )
 
                 if let self {
-                    self.withStateLock { self._isGenerating = false }
+                    self.clearIsGeneratingIfCurrent(epoch: generationEpoch)
                 }
                 generationStream.setPhase(.done)
                 if let self, let snapshotInputs = result.snapshotInputs {
@@ -693,7 +753,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 continuation.finish()
             } catch {
                 if let self {
-                    self.withStateLock { self._isGenerating = false }
+                    self.clearIsGeneratingIfCurrent(epoch: generationEpoch)
                 }
                 if !Task.isCancelled {
                     Self.logger.error("MLX generation error: \(error)")
@@ -706,7 +766,31 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
             }
         }
 
-        withStateLock { self._generationTask = task }
+        Self._preTaskInstallHook.withLock { $0 }?()
+
+        // Install only if this generation is still current (#171).
+        //
+        // The critical section above released the lock before this task could
+        // be built, so a `stopGeneration()` can land in between — and it would
+        // find `_generationTask` still holding the *previous* task (or nil),
+        // cancel that, and never see this one. Storing unconditionally would
+        // then leave an uncancelled task that no future `stopGeneration()` can
+        // reach, while `_isGenerating` reads `false` — so the next `generate()`
+        // is admitted and two generations run concurrently against one
+        // `ModelContainer`.
+        //
+        // That window predates this fix, but it was previously benign: a missed
+        // cancel left `_isGenerating == true`, so the next `generate()` bounced
+        // with `alreadyGenerating` and no overlap was possible. Clearing the
+        // flag synchronously is what turns it into real concurrency, so the
+        // epoch has to be honoured here too, not just at teardown.
+        withStateLock {
+            guard _generationEpoch == generationEpoch else {
+                task.cancel()
+                return
+            }
+            self._generationTask = task
+        }
 
         // Cancel on ANY termination, not just `.cancelled`. A consumer that
         // abandons the stream early (stops iterating, or the `GenerationStream`
@@ -978,10 +1062,61 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
 
     // MARK: - Control
 
+    /// Cancels the in-flight generation and leaves the backend immediately
+    /// reusable, per core's `InferenceBackend` contract: after this returns,
+    /// `isGenerating` is `false` and a fresh `generate()` must succeed without
+    /// a reload, a reset, or a backoff (#171).
+    ///
+    /// `Task.cancel()` alone cannot deliver that — it is cooperative, so the
+    /// cancelled task is still unwinding when this method returns. Clearing
+    /// `_isGenerating` here is what makes the contract true synchronously;
+    /// bumping the epoch is what keeps that safe, by orphaning the outgoing
+    /// task so neither its install nor its teardown can touch a *successor's*
+    /// state.
+    ///
+    /// One nuance in the launch-window case (a stop arriving while a
+    /// `generate()` is between claiming its epoch and installing its task):
+    /// contract point 1 — the stream's `onTermination` firing — is satisfied a
+    /// moment *after* this returns, because the cancel happens at install.
+    /// Making it synchronous would mean holding `stateLock` across task
+    /// construction, which is worse. Points 2 and 3, the ones callers actually
+    /// poll, are synchronous either way.
+    ///
+    /// **Note for anyone debugging #157** (Metal command-buffer/encoder crashes
+    /// under rapid successive generations): that issue names **"cancel → resend
+    /// → replay"** as its repro pattern, and this method *is* that seam — so the
+    /// connection is direct, not incidental. The contract obliges this backend
+    /// to accept a resend while the outgoing generation's MLX work may still be
+    /// unwinding on the GPU. `MLXGenerationDriver` breaks its token loop only at
+    /// the top of the next chunk, so one more forward pass is typically already
+    /// dispatched, and the abandoned mlx-swift-lm producer task cancels
+    /// cooperatively too. Successor and predecessor can therefore overlap
+    /// briefly by design. The prompt-cache capture — the path that mutates KV
+    /// state off the driver's own timeline — is excluded on the cancel path
+    /// (`snapshotInputs` is gated on `completedNormally`), so it cannot race a
+    /// successor's cache. If #157 is ever root-caused to overlapping GPU work,
+    /// this is the seam to look at first.
     public func stopGeneration() {
         withStateLock {
             _generationTask?.cancel()
             _generationTask = nil
+            // Order matters only in that both happen under one lock: the
+            // outgoing task can never observe a half-updated state.
+            _generationEpoch &+= 1
+            _isGenerating = false
+        }
+    }
+
+    /// Teardown hook for a generation task: clears `_isGenerating` only if
+    /// `epoch` is still the current generation (#171).
+    ///
+    /// A task cancelled by `stopGeneration()`, or otherwise superseded, has a
+    /// stale epoch and must leave the flag alone — the generation that owns it
+    /// now is someone else's.
+    private func clearIsGeneratingIfCurrent(epoch: UInt64) {
+        withStateLock {
+            guard _generationEpoch == epoch else { return }
+            _isGenerating = false
         }
     }
 
