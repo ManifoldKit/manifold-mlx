@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/ManifoldKit/manifold-mlx/compare/v0.4.1...v0.5.0) (2026-07-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* MLXModelProbe.contextWindowWasDetected(at:) is removed. It existed only to tell MLXBackend whether a manifest's contextWindow was a real config.json measurement versus a fabricated 8192 default; now that ModelManifest.contextWindow is Int? (core PR #2404) and MLXModelProbe.produceManifest no longer fabricates that default, contextWindow == nil carries the same information directly. Callers checking for "was context detected" should check manifest.contextWindow != nil instead.
+
+### Bug Fixes
+
+* **mlx:** honor the stopGeneration() contract so cancel → resend works ([#172](https://github.com/ManifoldKit/manifold-mlx/issues/172)) ([dad1dea](https://github.com/ManifoldKit/manifold-mlx/commit/dad1dea585ae8175797e5e144d15baf7bffcc4cd))
+* **mlx:** report supportsKVCachePersistence per-model once a model is loaded ([#168](https://github.com/ManifoldKit/manifold-mlx/issues/168)) ([f1417ca](https://github.com/ManifoldKit/manifold-mlx/commit/f1417ca9f2c8d30a9ffebe75ebd3bc1516d17d99))
+* stop fabricating a context window now that nil is expressible ([#167](https://github.com/ManifoldKit/manifold-mlx/issues/167)) ([cf6e6de](https://github.com/ManifoldKit/manifold-mlx/commit/cf6e6de69f8e96d350321ee2722abbc81933b0e5))
+
 ## [0.4.1](https://github.com/ManifoldKit/manifold-mlx/compare/v0.4.0...v0.4.1) (2026-07-25)
 
 
