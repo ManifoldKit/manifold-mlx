@@ -147,6 +147,22 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 // neighbouring model-derived field (`supportsVision`,
                 // `_dialect`, `_manifest`) flips in that same block, so this
                 // keeps the struct internally consistent.
+                //
+                // NOTE for anyone adding a `_modelContainer` writer: this class
+                // now carries two distinct loaded-ness predicates, and they are
+                // not interchangeable.
+                //   • `_modelContainer != nil` — model state is installed.
+                //     The superset; what capability reporting keys off.
+                //   • `_isModelLoaded` — the load is *committed* (arbiter claim
+                //     settled) and generation is permitted. `generate`'s guard.
+                // No test can currently tell them apart, because every test
+                // reaches the loaded state through `_inject`, which sets both
+                // in one block. The two only diverge inside `loadModel`'s tail,
+                // which needs a real multi-GB load plus a mid-`await` observer
+                // to exercise. So a change here fails silently: assigning
+                // `_modelContainer` outside a block that also sets
+                // `_kvCacheReuseEligible` moves capability reporting with it
+                // and the suite stays green.
                 supportsKVCachePersistence: _modelContainer != nil ? _kvCacheReuseEligible : enableKVCacheReuse,
                 supportsGrammarConstrainedSampling: true,
                 supportsThinking: true,
