@@ -19,7 +19,9 @@ import ManifoldMLX
 /// guard for #171** — the unit tests in `MLXStopGenerationContractTests` prove
 /// the state machine against a mock, and this proves it against actual MLX
 /// inference — and it is a ready-made harness for re-hunting #157 without
-/// rebuilding a driver from scratch.
+/// rebuilding a driver from scratch, covering both the reuse-on and reuse-off
+/// configurations the issue implicates (its two crashes were observed under
+/// different settings of that flag).
 ///
 /// Hardware-gated like the rest of this target: Apple Silicon + Metal + a local
 /// MLX snapshot. Run via `scripts/test-mlx-integration.sh`.
@@ -35,6 +37,10 @@ final class MLXCancelResendSoakTests: XCTestCase {
     /// found nothing, so 8 turns is a **regression guard, not a crash hunt**.
     /// Raise it locally when actually hunting #157.
     private let turnCount = 8
+
+    /// Matches the `--cancel-after 5` the driver used when #171 reproduced
+    /// 20/20, so the cancel lands at the same point in the stream.
+    private let cancelAfterTokens = 5
 
     override func setUp() async throws {
         try await super.setUp()
@@ -56,7 +62,21 @@ final class MLXCancelResendSoakTests: XCTestCase {
 
     override func tearDown() async throws {
         for backend in loadedBackends.reversed() {
-            backend.unloadModel()
+            // `unloadAndWait()`, not fire-and-forget `unloadModel()` (review
+            // finding 1). This is the only file in the target that reaches
+            // teardown with a *deliberately cancelled* generation still
+            // unwinding on the GPU, and `unloadModel()` spawns an un-awaited
+            // arbiter release that can end in `Memory.clearCache()`. The
+            // arbiter's cleanup chaining is per-instance, so nothing otherwise
+            // orders one test's release against the next test's claim.
+            //
+            // The driver this file replaces slept 2s at exactly this point for
+            // the same reason: tearing down mid-flight "produces its own
+            // (driver-artefact) crash and confounds the reproduction we are
+            // actually hunting". For a #157 harness specifically, a teardown
+            // crash is the worst possible false positive — it would read as
+            // "#157 reproduced".
+            await backend.unloadAndWait()
         }
         loadedBackends.removeAll()
         modelURL = nil
@@ -108,8 +128,8 @@ final class MLXCancelResendSoakTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func loadBackend() async throws -> MLXBackend {
-        let backend = MLXBackend(enableKVCacheReuse: true)
+    private func loadBackend(enableReuse: Bool = true) async throws -> MLXBackend {
+        let backend = MLXBackend(enableKVCacheReuse: enableReuse)
         try await backend.loadModel(from: modelURL, plan: .testStub(effectiveContextSize: 8192))
         loadedBackends.append(backend)
         return backend
@@ -165,6 +185,36 @@ final class MLXCancelResendSoakTests: XCTestCase {
         }
     }
 
+    /// The same sequential soak with KV reuse **off**.
+    ///
+    /// Review finding 2: #157 reports two crashes, and the second — the
+    /// `addCompletedHandler`-after-commit SIGABRT — was seen **2/3 on the
+    /// `--kv-reuse off` runs**, on ordinary generation/teardown rather than the
+    /// cancel path. A harness that only ever ran reuse-on would have been
+    /// blind to the configuration in which that crash was most often observed,
+    /// while describing itself as ready for re-hunting #157.
+    ///
+    /// Asserts the mirror image of the reuse-on test: real work every turn, and
+    /// no `.kvCacheReuse` events at all. That second assertion is also a
+    /// sabotage check on the reuse gate itself — if `enableKVCacheReuse: false`
+    /// ever stopped suppressing reuse, this goes red.
+    func test_sequentialTurns_withReuseDisabled_produceRealWorkAndDoNotCrash() async throws {
+        let backend = try await loadBackend(enableReuse: false)
+
+        for turn in 1...turnCount {
+            let (tokens, reuseEvents) = try await runTurn(on: backend)
+
+            XCTAssertGreaterThan(
+                tokens, 0,
+                "Turn \(turn) produced no tokens — the harness is inert and this run is not evidence (cf. ManifoldKit#2344)"
+            )
+            XCTAssertTrue(
+                reuseEvents.isEmpty,
+                "Turn \(turn) emitted .kvCacheReuse with reuse disabled — the opt-out gate is not holding"
+            )
+        }
+    }
+
     /// Cancel → immediate resend, repeated. This is #157's named repro shape and
     /// the real-model regression guard for #171.
     ///
@@ -190,7 +240,7 @@ final class MLXCancelResendSoakTests: XCTestCase {
             for try await event in stream.events {
                 if case .token = event {
                     tokens += 1
-                    if tokens >= 3 { break }
+                    if tokens >= cancelAfterTokens { break }
                 }
             }
             XCTAssertGreaterThan(
@@ -219,10 +269,29 @@ final class MLXCancelResendSoakTests: XCTestCase {
                 "Turn \(turn): resend immediately after stopGeneration() must not throw alreadyGenerating (#171)"
             )
 
+            // Prove the resend is *usable*, not merely admitted (review
+            // finding 3). Without this, contract point 2 is only asserted as
+            // "generate() did not throw" — a backend that admitted the call and
+            // then produced nothing would pass. It also restores the replay leg
+            // of #157's named "cancel -> resend -> replay" shape, which the
+            // driver had and the first version of this test dropped.
+            var resendTokens = 0
+            if let resend {
+                for try await event in resend.events {
+                    if case .token = event {
+                        resendTokens += 1
+                        break
+                    }
+                }
+            }
+            XCTAssertGreaterThan(
+                resendTokens, 0,
+                "Turn \(turn): the post-cancel resend was admitted but generated nothing — accepted is not the same as usable (#171)"
+            )
+
             // Tear the resend down before the next iteration so each turn
             // starts from a known-idle backend rather than inheriting the
             // previous one's in-flight generation.
-            _ = resend
             backend.stopGeneration()
         }
     }
