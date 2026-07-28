@@ -155,11 +155,15 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 //     The superset; what capability reporting keys off.
                 //   • `_isModelLoaded` — the load is *committed* (arbiter claim
                 //     settled) and generation is permitted. `generate`'s guard.
-                // No test can currently tell them apart, because every test
-                // reaches the loaded state through `_inject`, which sets both
-                // in one block. The two only diverge inside `loadModel`'s tail,
-                // which needs a real multi-GB load plus a mid-`await` observer
-                // to exercise. So a change here fails silently: assigning
+                // No test can currently tell them apart: the tests that reach
+                // the loaded state through `_inject` set both in one block, and
+                // the tests that call the real `loadModel` await it to
+                // completion — by which point both are `true` and agree.
+                // Distinguishing them needs an observer that reads
+                // `capabilities` *inside* the load tail, i.e. a real multi-GB
+                // load plus a mid-`await` hook.
+                //
+                // A change here therefore fails silently: assigning
                 // `_modelContainer` outside a block that also sets
                 // `_kvCacheReuseEligible` moves capability reporting with it
                 // and the suite stays green.
