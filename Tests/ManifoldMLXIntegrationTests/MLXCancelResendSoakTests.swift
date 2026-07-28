@@ -20,8 +20,8 @@ import ManifoldMLX
 /// the state machine against a mock, and this proves it against actual MLX
 /// inference — and it is a ready-made harness for re-hunting #157 without
 /// rebuilding a driver from scratch, covering both the reuse-on and reuse-off
-/// configurations the issue implicates (its two crashes were observed under
-/// different settings of that flag).
+/// configurations the issue implicates — its SIGSEGV was seen under both
+/// settings (3/3 on, 1/3 off) and its SIGABRT only with the flag off.
 ///
 /// Hardware-gated like the rest of this target: Apple Silicon + Metal + a local
 /// MLX snapshot. Run via `scripts/test-mlx-integration.sh`.
@@ -70,12 +70,16 @@ final class MLXCancelResendSoakTests: XCTestCase {
             // arbiter's cleanup chaining is per-instance, so nothing otherwise
             // orders one test's release against the next test's claim.
             //
-            // The driver this file replaces slept 2s at exactly this point for
-            // the same reason: tearing down mid-flight "produces its own
-            // (driver-artefact) crash and confounds the reproduction we are
-            // actually hunting". For a #157 harness specifically, a teardown
-            // crash is the worst possible false positive — it would read as
-            // "#157 reproduced".
+            // Scope, stated precisely (review finding D): this awaits the
+            // *arbiter cleanup task*, not the generation task, so it closes the
+            // cross-instance ordering hole and nothing more. It does **not**
+            // restore the 2s settle the driver this file replaces used at the
+            // same point ("tearing down mid-flight produces its own
+            // driver-artefact crash and confounds the reproduction we are
+            // actually hunting"). Ordering a cancelled generation's unwinding
+            // against `Memory.clearCache()` would need a settle-sleep or a full
+            // drain, costing wall clock or #157 fidelity; the residual risk
+            // here is identical to every sibling in this target.
             await backend.unloadAndWait()
         }
         loadedBackends.removeAll()
@@ -195,9 +199,13 @@ final class MLXCancelResendSoakTests: XCTestCase {
     /// while describing itself as ready for re-hunting #157.
     ///
     /// Asserts the mirror image of the reuse-on test: real work every turn, and
-    /// no `.kvCacheReuse` events at all. That second assertion is also a
-    /// sabotage check on the reuse gate itself — if `enableKVCacheReuse: false`
-    /// ever stopped suppressing reuse, this goes red.
+    /// no `.kvCacheReuse` events at all. To be clear about what is new here:
+    /// the opt-out gate itself is already guarded by
+    /// `MLXKVReuseIntegrationTests.test_kvReuseDisabledExplicitly` over two
+    /// turns, so that assertion is a stronger instance of an existing check,
+    /// not a new one. The novel contribution is the reuse-off **crash
+    /// surface** — eight consecutive full-prefill turns against one resident
+    /// backend, which is the configuration the SIGABRT was observed in.
     func test_sequentialTurns_withReuseDisabled_produceRealWorkAndDoNotCrash() async throws {
         let backend = try await loadBackend(enableReuse: false)
 
@@ -243,9 +251,19 @@ final class MLXCancelResendSoakTests: XCTestCase {
                     if tokens >= cancelAfterTokens { break }
                 }
             }
-            XCTAssertGreaterThan(
-                tokens, 0,
-                "Turn \(turn) produced no tokens before cancelling — nothing was in flight, so this iteration proves nothing"
+            // Not `> 0` (review finding A): the inner loop exits either by
+            // hitting `cancelAfterTokens` or by the stream finishing on its
+            // own. If a turn ran out early, `stopGeneration()` lands on an
+            // already-finished generation and the resend succeeds for reasons
+            // unrelated to the contract — exactly the degenerate case this
+            // precondition exists to exclude. Equality is what distinguishes
+            // "broke out mid-flight" from "ran out". Safe for the models this
+            // targets (#157's runs recorded 21–87 tokens/turn), and a red here
+            // means the discovered model is too terse for this harness rather
+            // than that the contract regressed.
+            XCTAssertEqual(
+                tokens, cancelAfterTokens,
+                "Turn \(turn) ended after \(tokens) tokens instead of being cancelled at \(cancelAfterTokens) — nothing was in flight, so this iteration proves nothing"
             )
 
             backend.stopGeneration()
