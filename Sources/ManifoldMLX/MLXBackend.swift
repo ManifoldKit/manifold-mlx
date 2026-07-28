@@ -33,6 +33,24 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     private var _isModelLoaded = false
     private var _isGenerating = false
 
+    /// Identity of the current generation, bumped on every `generate()` and on
+    /// every `stopGeneration()` (#171).
+    ///
+    /// `stopGeneration()` must leave `isGenerating == false` synchronously and
+    /// the backend ready for an immediate `generate()` — core's
+    /// `InferenceBackend` contract, points 2 and 3. But `Task.cancel()` is
+    /// cooperative: the cancelled generation keeps unwinding after
+    /// `stopGeneration()` returns, and its teardown ends in
+    /// `_isGenerating = false`. Without an identity check that late write lands
+    /// on whatever generation is running *by then* — clearing a live
+    /// generation's flag from a task nobody owns any more, and admitting a
+    /// third concurrent `generate()`.
+    ///
+    /// So teardown is conditional: it clears the flag only if the epoch it
+    /// captured at launch is still current. A superseded task compares unequal
+    /// and leaves the flag alone. Read and written only under `stateLock`.
+    private var _generationEpoch: UInt64 = 0
+
     public private(set) var isModelLoaded: Bool {
         get { withStateLock { _isModelLoaded } }
         set { withStateLock { _isModelLoaded = newValue } }
@@ -609,6 +627,10 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
         let derivedToolAwareHistory = historyMessages.containsToolParts ? historyMessages.toolAwareHistory : nil
         let derivedStructuredHistory = historyMessages.isEmpty ? nil : historyMessages
 
+        /// This call's generation identity, assigned under `stateLock` below
+        /// and captured by the generation task so its teardown can tell whether
+        /// it is still the current generation (#171).
+        var generationEpoch: UInt64 = 0
         let snapshot: GenerationCallSnapshot = try withStateLock {
             guard _isModelLoaded, let container = _modelContainer else {
                 throw InferenceError.inferenceFailure("No model loaded")
@@ -617,6 +639,11 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 throw InferenceError.alreadyGenerating
             }
             _isGenerating = true
+            // Claim a fresh generation identity; the task launched below
+            // captures it and only tears down `_isGenerating` if it is still
+            // the current one (#171).
+            _generationEpoch &+= 1
+            generationEpoch = _generationEpoch
             let snapshot = GenerationCallSnapshot(
                 container: container,
                 loadOptions: _loadOptions,
@@ -681,7 +708,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 )
 
                 if let self {
-                    self.withStateLock { self._isGenerating = false }
+                    self.clearIsGeneratingIfCurrent(epoch: generationEpoch)
                 }
                 generationStream.setPhase(.done)
                 if let self, let snapshotInputs = result.snapshotInputs {
@@ -693,7 +720,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
                 continuation.finish()
             } catch {
                 if let self {
-                    self.withStateLock { self._isGenerating = false }
+                    self.clearIsGeneratingIfCurrent(epoch: generationEpoch)
                 }
                 if !Task.isCancelled {
                     Self.logger.error("MLX generation error: \(error)")
@@ -978,10 +1005,37 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
 
     // MARK: - Control
 
+    /// Cancels the in-flight generation and leaves the backend immediately
+    /// reusable, per core's `InferenceBackend` contract: after this returns,
+    /// `isGenerating` is `false` and a fresh `generate()` must succeed without
+    /// a reload, a reset, or a backoff (#171).
+    ///
+    /// `Task.cancel()` alone cannot deliver that — it is cooperative, so the
+    /// cancelled task is still unwinding when this method returns. Clearing
+    /// `_isGenerating` here is what makes the contract true synchronously;
+    /// bumping the epoch is what keeps that safe, by orphaning the outgoing
+    /// task so its eventual teardown cannot clear a *successor's* flag.
     public func stopGeneration() {
         withStateLock {
             _generationTask?.cancel()
             _generationTask = nil
+            // Order matters only in that both happen under one lock: the
+            // outgoing task can never observe a half-updated state.
+            _generationEpoch &+= 1
+            _isGenerating = false
+        }
+    }
+
+    /// Teardown hook for a generation task: clears `_isGenerating` only if
+    /// `epoch` is still the current generation (#171).
+    ///
+    /// A task cancelled by `stopGeneration()`, or otherwise superseded, has a
+    /// stale epoch and must leave the flag alone — the generation that owns it
+    /// now is someone else's.
+    private func clearIsGeneratingIfCurrent(epoch: UInt64) {
+        withStateLock {
+            guard _generationEpoch == epoch else { return }
+            _isGenerating = false
         }
     }
 
