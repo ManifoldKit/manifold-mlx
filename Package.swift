@@ -189,5 +189,14 @@ let package = Package(
             ],
             path: "Sources/fuzz-mlx"
         ),
+        // repro-157: minimal non-replay reproduction for issue #157's Metal
+        // command-buffer/encoder lifecycle crashes. Deliberately depends on
+        // ManifoldMLX ONLY — no ManifoldFuzz — because the issue's top
+        // acceptance criterion is a repro that does not need the fuzz harness.
+        .executableTarget(
+            name: "repro-157",
+            dependencies: ["ManifoldMLX"],
+            path: "Sources/repro-157"
+        ),
     ]
 )
