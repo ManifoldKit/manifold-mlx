@@ -7,6 +7,25 @@ on:
   # release PR stays BLOCKED and must be admin-merged (gh api PUT .../merge) —
   # which is already the release flow (Highlights rewrite is hand-merged). Any
   # PR touching Sources/Package/etc. is unaffected and still runs the gate.
+  #
+  # DELIBERATE DIVERGENCE FROM manifold-eval (2026-07-29). eval removed this
+  # filter from its `pull_request` trigger (eval#63) and then found the filter
+  # was only HALF the reason its release PRs had no checks. With the filter
+  # gone a run IS created, but it lands `action_required` — held pending
+  # approval, because release-please posts as `app/github-actions` — and a held
+  # run produces no check runs, so the PR still reads as unchecked. eval's
+  # release flow is now: approve the held run via
+  #   gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/approve
+  # then merge normally. That is a different manual step, not the absence of
+  # one, and it costs a macOS run per release PR.
+  #
+  # This repo KEEPS the filter on purpose: Highlights are hand-edited, so a
+  # human is merging the release either way, and the swap buys nothing here.
+  # Do not "fix" this to match eval without re-deciding that trade. Removing
+  # the manual step entirely would need release-please to post under an
+  # App/PAT identity — that lives in ManifoldKit/.github's
+  # companion-release-please.yml and is shared by all three repos, so it is
+  # not a per-repo change. See eval's docs/AUTOMATION-STATUS.md.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
