@@ -116,4 +116,92 @@ final class CLIParseTests: XCTestCase {
         XCTAssertTrue(result.stdout.contains("Available scenarios:"),
             "--list should print 'Available scenarios:'; got stdout: \(result.stdout)")
     }
+
+    // MARK: - decoy-names (migration off manifold-mlx's stale local DecoyTools
+    // copy onto core's published `ManifoldTools.DecoyTools`, tools/local matrix
+    // night 2026-08-07). A count or set-membership assertion would pass on a
+    // truncated OR reordered pool — those are the exact two failure modes that
+    // let the stale copy drift undetected. These pin the exact ordered prefix.
+    //
+    // The expected values below are the pool as resolved through THIS repo's
+    // pinned ManifoldKit dependency (Package.resolved, currently v0.75.0 /
+    // 3b4d1d2a) — NOT core's live main, which has since renamed positions 1/3
+    // (`get_weather`->`get_air_quality`, `search_web`->`get_movie_showtimes`,
+    // ManifoldKit#2413). That rename lands here automatically the next time the
+    // pin advances; when it does, this test's expected values must be updated
+    // in the same PR that bumps the pin — a failure here after a pin bump is
+    // the intended signal, not a false alarm.
+
+    /// The pool must now be core's real 46 entries (was a stale local copy of
+    /// 24) — `maxCount` is the first, cheapest signal a truncated pool is back.
+    func test_decoyNames_maxCountIs46() throws {
+        let result = try runBinary(args: ["decoy-names", "9999"])
+        // Out-of-range must still name the CURRENT pool size in its error, not
+        // a stale one.
+        XCTAssertEqual(result.exitCode, 2)
+        XCTAssertTrue(result.stderr.contains("(46)"),
+            "expected pool size 46 in the error; got: \(result.stderr)")
+    }
+
+    /// N=3 pinned to the exact ordered names — catches both truncation
+    /// (wrong count) and reordering (right set, wrong sequence).
+    func test_decoyNames_first3_exactOrderedList() throws {
+        let result = try runBinary(args: ["decoy-names", "3"])
+        XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
+        XCTAssertEqual(
+            result.stdout.trimmingCharacters(in: .whitespacesAndNewlines),
+            "get_weather\nsend_email\nsearch_web"
+        )
+    }
+
+    /// N=20 (tonight's planned maximum decoy level) pinned to the exact
+    /// ordered list, so a matched-decoy-level cross-runtime comparison is
+    /// verifiably advertising the same distractors this repo resolves today.
+    func test_decoyNames_first20_exactOrderedList() throws {
+        let result = try runBinary(args: ["decoy-names", "20"])
+        XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
+        let expected = """
+        get_weather
+        send_email
+        search_web
+        translate_text
+        set_timer
+        convert_currency
+        create_calendar_event
+        get_stock_price
+        roll_dice
+        convert_units
+        send_sms
+        get_directions
+        play_music
+        set_reminder
+        get_news_headlines
+        book_flight
+        get_definition
+        create_note
+        get_traffic
+        shorten_url
+        """
+        XCTAssertEqual(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), expected)
+    }
+
+    /// N=0 must be empty, not a stray newline or an error — the boundary case.
+    func test_decoyNames_zero_isEmpty() throws {
+        let result = try runBinary(args: ["decoy-names", "0"])
+        XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
+        XCTAssertEqual(result.stdout, "")
+    }
+
+    /// `--extra-tools` must accept up to the real pool size (46) — this failed
+    /// at 24 before the migration, silently capping every decoy sweep below
+    /// the ceiling the other two runtimes could reach.
+    func test_extraTools46_isAccepted_47IsRejected() throws {
+        let ok = try runBinary(args: ["--list", "--extra-tools", "46"])
+        XCTAssertEqual(ok.exitCode, 0, "stderr: \(ok.stderr)")
+
+        let over = try runBinary(args: ["--list", "--extra-tools", "47"])
+        XCTAssertEqual(over.exitCode, 2)
+        XCTAssertTrue(over.stderr.contains("(46)"),
+            "expected the current pool size 46 in the rejection message; got: \(over.stderr)")
+    }
 }

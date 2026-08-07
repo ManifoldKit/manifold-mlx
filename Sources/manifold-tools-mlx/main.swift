@@ -100,7 +100,10 @@ struct CLI {
         manifold-tools-mlx — tool-calling validation against a real MLX model
 
         SUBCOMMANDS
-          bfcl      BFCL argument-level eval (run `bfcl --help` for flags)
+          bfcl          BFCL argument-level eval (run `bfcl --help` for flags)
+          decoy-names   Prints the resolved DecoyTools pool names for a given
+                        --extra-tools N, one per line, in selection order —
+                        no model load, no GPU. Usage: decoy-names <N>
 
         USAGE
           manifold-tools-mlx --model <path> [--scenario <id|all>]
@@ -186,6 +189,30 @@ func makeRegistry(for scenario: Scenario, fixturesRoot: URL, extraTools: Int = 0
 /// `SUMMARY` line is stable and greppable (e.g. `f1=0.900`, never `f1=0.9`).
 func fmt3(_ value: Double) -> String { String(format: "%.3f", value) }
 
+/// `decoy-names <N>` — prints the resolved `DecoyTools.names(_:)` prefix, one
+/// name per line, in selection order. Exists so the migration from this
+/// repo's stale local pool to core's published `ManifoldTools.DecoyTools`
+/// (ManifoldKit#178 companion task, tools/local matrix night 2026-08-07) is a
+/// subprocess-testable seam from `CLIParseTests` — the whole point of the
+/// migration is that membership AND order both match core's live pool, and a
+/// count or set-membership assertion can't distinguish that from a truncated
+/// or reordered pool.
+func decoyNamesCLI(_ argv: [String]) -> Int32 {
+    guard let first = argv.first, let n = Int(first), n >= 0 else {
+        FileHandle.standardError.write(Data("usage: manifold-tools-mlx decoy-names <N>\n".utf8))
+        return 2
+    }
+    guard n <= DecoyTools.maxCount else {
+        FileHandle.standardError.write(Data(
+            "decoy-names: \(n) exceeds the decoy pool size (\(DecoyTools.maxCount))\n".utf8))
+        return 2
+    }
+    for name in DecoyTools.names(n) {
+        print(name)
+    }
+    return 0
+}
+
 @MainActor
 func runCLI() async -> Int32 {
     let argv = Array(CommandLine.arguments.dropFirst())
@@ -193,6 +220,9 @@ func runCLI() async -> Int32 {
     // BFCLRunner against this package's MLXBackend (mirrors core manifold-tools).
     if argv.first == "bfcl" {
         return await BFCLMLXCLI.run(Array(argv.dropFirst()))
+    }
+    if argv.first == "decoy-names" {
+        return decoyNamesCLI(Array(argv.dropFirst()))
     }
     let cli = CLI.parse(argv)
 
