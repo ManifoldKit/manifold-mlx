@@ -253,20 +253,82 @@ func modelIdentity(from directoryName: String) -> (model: String, quant: String?
     return (modelPart, quant)
 }
 
-/// Resolves the `coreCommit` provenance field: an explicit `--core-commit`
-/// override wins, then `$MANIFOLD_CORE_COMMIT` (set by
-/// `scripts/local-integration-sweep.sh`-style drivers to `git rev-parse
-/// --short HEAD` in the core checkout — the same convention core
-/// `manifold-tools score --core-commit` uses), else the documented
-/// `"unknown"` placeholder `ConformanceScorer.RecordContext` names as the
-/// fallback for "can't be resolved". `environment` is injectable so
-/// `record-identity` (and its tests) can pin resolution without mutating
-/// the real process environment.
+/// Resolves the `coreCommit` provenance field, in priority order:
+/// 1. An explicit `--core-commit` override.
+/// 2. `$MANIFOLD_CORE_COMMIT` (set by `scripts/local-integration-sweep.sh`-style
+///    drivers to `git rev-parse --short HEAD` in the core checkout — the same
+///    convention core `manifold-tools score --core-commit` uses).
+/// 3. **The default source**: the `manifoldkit` pin's resolved revision in
+///    `Package.resolved` (see `coreCommitFromPackageResolved(cwd:)`) — this
+///    repo genuinely depends on ManifoldKit via SwiftPM, so a normal
+///    `swift build && manifold-tools-mlx --emit-records ...` run from the
+///    package root now resolves a REAL SHA with no flag or env var required,
+///    closing the gap `--core-commit`/`$MANIFOLD_CORE_COMMIT` alone left: both
+///    depend on external cooperation this CLI cannot itself guarantee, so a
+///    default run without either would otherwise still emit "unknown" (the
+///    original ManifoldKit#178 symptom) even after those two were added.
+/// 4. The documented `"unknown"` placeholder `ConformanceScorer.RecordContext`
+///    names as the fallback for "can't be resolved" — reached only when
+///    `Package.resolved` is missing/unreadable/unparseable, which
+///    `coreCommitFromPackageResolved` reports to stderr rather than failing
+///    silently.
+///
+/// `environment` and `packageResolved` are injectable so `record-identity`
+/// (and its tests) can pin resolution — including the "no Package.resolved on
+/// this CWD" case — without mutating the real process environment or working
+/// directory.
 func resolveCoreCommit(
     cliOverride: String?,
-    environment: [String: String] = ProcessInfo.processInfo.environment
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    packageResolved: () -> String? = { coreCommitFromPackageResolved() }
 ) -> String {
-    cliOverride ?? environment["MANIFOLD_CORE_COMMIT"] ?? "unknown"
+    if let cliOverride { return cliOverride }
+    if let fromEnv = environment["MANIFOLD_CORE_COMMIT"] { return fromEnv }
+    if let fromPackageResolved = packageResolved() { return fromPackageResolved }
+    return "unknown"
+}
+
+/// Reads the pinned `manifoldkit` revision out of `Package.resolved` next to
+/// `cwd` — the default `coreCommit` source (see `resolveCoreCommit`). This
+/// repo's other CWD-relative default (`CLI.defaultOutputURL()`) makes the
+/// same "run from the package root" assumption, so this isn't a new one.
+///
+/// Returns `nil` — never a fabricated value — when the file is missing,
+/// unreadable, or doesn't match SwiftPM's `Package.resolved` shape; the
+/// caller substitutes the documented `"unknown"` placeholder in that case.
+/// Every failure path writes a stderr note explaining why, so a degraded
+/// value is never silently indistinguishable from a real measurement.
+func coreCommitFromPackageResolved(
+    cwd: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+) -> String? {
+    let url = cwd.appendingPathComponent("Package.resolved")
+    let data: Data
+    do {
+        data = try Data(contentsOf: url)
+    } catch {
+        FileHandle.standardError.write(Data(
+            "manifold-tools-mlx: no Package.resolved at \(url.path) (\(error)) — coreCommit falls back to 'unknown' (pass --core-commit or set $MANIFOLD_CORE_COMMIT to override)\n".utf8))
+        return nil
+    }
+    do {
+        guard
+            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let pins = root["pins"] as? [[String: Any]],
+            let manifoldKitPin = pins.first(where: { ($0["identity"] as? String) == "manifoldkit" }),
+            let state = manifoldKitPin["state"] as? [String: Any],
+            let revision = state["revision"] as? String,
+            !revision.isEmpty
+        else {
+            FileHandle.standardError.write(Data(
+                "manifold-tools-mlx: \(url.path) has no 'manifoldkit' pin with a revision — coreCommit falls back to 'unknown'\n".utf8))
+            return nil
+        }
+        return revision
+    } catch {
+        FileHandle.standardError.write(Data(
+            "manifold-tools-mlx: failed to parse \(url.path) (\(error)) — coreCommit falls back to 'unknown'\n".utf8))
+        return nil
+    }
 }
 
 /// `record-identity <path> [--core-commit <sha>]` — prints the

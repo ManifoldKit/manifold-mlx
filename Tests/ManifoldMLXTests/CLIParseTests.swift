@@ -125,43 +125,87 @@ final class CLIParseTests: XCTestCase {
     // REAL derived values, not merely "non-empty" / "not nil", so a
     // regression back to the placeholder fails loudly.
 
+    /// Runs `record-identity` with a caller-chosen CWD and environment, so
+    /// coreCommit-resolution tests can be hermetic: the default CWD inherited
+    /// from the test process is the package root, which has a real
+    /// `Package.resolved` — the two tests below that need "no
+    /// `Package.resolved` present" or "no `$MANIFOLD_CORE_COMMIT` set"
+    /// override one or both explicitly rather than assuming the ambient
+    /// environment/CWD, per rev-182's MODERATE 3 finding: `runBinary`
+    /// inherits the parent environment, so a hard-coded `coreCommit=unknown`
+    /// expectation silently breaks the moment an operator (or tonight's
+    /// sweep script) exports `$MANIFOLD_CORE_COMMIT` — exactly the operator
+    /// this feature targets.
+    private func runBinaryHermetic(
+        args: [String],
+        cwd: URL? = nil,
+        environment: [String: String] = [:]
+    ) throws -> RunResult {
+        guard let bin = CLIParseTests.cachedBinaryPath else {
+            throw XCTSkip("manifold-tools-mlx binary not found — run `swift build` first")
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: bin)
+        process.arguments = args
+        process.environment = environment
+        if let cwd { process.currentDirectoryURL = cwd }
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        try process.run()
+        process.waitUntilExit()
+        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return RunResult(exitCode: process.terminationStatus, stdout: stdout, stderr: stderr)
+    }
+
     /// A 4bit MLX-community-style directory name must decompose into a real
     /// model id (quant suffix stripped) and the real quant label — never the
     /// "unknown" placeholder that used to collapse every MLX cell into one
-    /// unidentifiable row for collate's comparability guard.
+    /// unidentifiable row for collate's comparability guard. Scoped to
+    /// backend/model/quant only — coreCommit resolution has its own tests
+    /// below, since it now depends on CWD/environment and asserting it here
+    /// too would make this test non-hermetic.
     func test_recordIdentity_4bitSnapshot_decomposesModelAndQuant() throws {
         let result = try runBinary(args: [
             "record-identity", "/models/Mistral-7B-Instruct-v0.3-4bit",
         ])
         XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
-        XCTAssertEqual(
-            result.stdout.trimmingCharacters(in: .whitespacesAndNewlines),
-            "backend=mlx model=Mistral-7B-Instruct-v0.3 quant=4bit coreCommit=unknown"
+        XCTAssertTrue(
+            result.stdout.hasPrefix("backend=mlx model=Mistral-7B-Instruct-v0.3 quant=4bit "),
+            "got: \(result.stdout)"
         )
     }
 
     /// A directory name with no recognizable quant suffix keeps the full
-    /// name as `model` (never silently dropped) and reports no quant —
-    /// distinct from, and not confusable with, the "unknown" placeholder.
+    /// name as `model` (never silently dropped) and reports no quant.
+    /// `quant=(none)` is this seam's own display for "no marker recognized"
+    /// — but downstream in core, `ConformanceScorer+Records.swift` maps a
+    /// nil quant to the same `"unknown"` string via `row.quant ?? "unknown"`,
+    /// so the persisted record's `quant` field is NOT distinguishable from
+    /// the placeholder once it reaches a real `ConformanceRecord` (rev-182's
+    /// MODERATE 4 finding — verified by reading that mapping directly, not
+    /// assumed). That is core's own documented contract for "genuinely
+    /// unresolvable", not a defect this PR introduces or can fix locally.
     func test_recordIdentity_noQuantSuffix_keepsFullNameAsModel() throws {
         let result = try runBinary(args: ["record-identity", "gemma-3-27b-it"])
         XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
-        XCTAssertEqual(
-            result.stdout.trimmingCharacters(in: .whitespacesAndNewlines),
-            "backend=mlx model=gemma-3-27b-it quant=(none) coreCommit=unknown"
+        XCTAssertTrue(
+            result.stdout.hasPrefix("backend=mlx model=gemma-3-27b-it quant=(none) "),
+            "got: \(result.stdout)"
         )
     }
 
     /// `--core-commit` must be threaded through into the record's coreCommit
-    /// field verbatim — this is the field the issue reports as permanently
-    /// hardcoded to "unknown", breaking collate's cross-leg comparability
-    /// guard (`ConformanceScorer.RecordContext`'s doc comment: "runs are
-    /// only comparable across the same core binary").
-    func test_recordIdentity_coreCommitFlag_isThreadedThrough() throws {
-        let result = try runBinary(args: [
-            "record-identity", "Mistral-7B-Instruct-v0.3-4bit",
-            "--core-commit", "deadbeef1",
-        ])
+    /// field verbatim, and must win even when a real `Package.resolved` is
+    /// present (default CWD here IS the package root) — this is priority 1
+    /// of `resolveCoreCommit`'s 4-source order.
+    func test_recordIdentity_coreCommitFlag_winsOverPackageResolved() throws {
+        let result = try runBinaryHermetic(
+            args: ["record-identity", "Mistral-7B-Instruct-v0.3-4bit", "--core-commit", "deadbeef1"],
+            environment: [:]
+        )
         XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
         XCTAssertTrue(
             result.stdout.contains("coreCommit=deadbeef1"),
@@ -173,28 +217,72 @@ final class CLIParseTests: XCTestCase {
         )
     }
 
-    /// `$MANIFOLD_CORE_COMMIT` must resolve when no `--core-commit` override
-    /// is given — the mechanism `scripts/local-integration-sweep.sh`-style
-    /// drivers use (matching core `manifold-tools score --core-commit`'s own
-    /// `$MANIFOLD_CORE_COMMIT` fallback convention).
-    func test_recordIdentity_coreCommitEnvVar_resolvesWithoutFlag() throws {
-        guard let bin = CLIParseTests.cachedBinaryPath else {
-            throw XCTSkip("manifold-tools-mlx binary not found — run `swift build` first")
-        }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: bin)
-        process.arguments = ["record-identity", "Mistral-7B-Instruct-v0.3-4bit"]
-        process.environment = ["MANIFOLD_CORE_COMMIT": "envcommit9"]
-        let stdoutPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = Pipe()
-        try process.run()
-        process.waitUntilExit()
-        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        XCTAssertEqual(process.terminationStatus, 0)
+    /// `$MANIFOLD_CORE_COMMIT` must win over the `Package.resolved` default
+    /// when no `--core-commit` override is given (priority 2 of 4) — the
+    /// mechanism `scripts/local-integration-sweep.sh`-style drivers use,
+    /// matching core `manifold-tools score --core-commit`'s own
+    /// `$MANIFOLD_CORE_COMMIT` fallback convention. Default CWD here IS the
+    /// package root (a real `Package.resolved` is present, per the next
+    /// test), so this specifically proves the env var outranks it.
+    func test_recordIdentity_coreCommitEnvVar_winsOverPackageResolved() throws {
+        let result = try runBinaryHermetic(
+            args: ["record-identity", "Mistral-7B-Instruct-v0.3-4bit"],
+            environment: ["MANIFOLD_CORE_COMMIT": "envcommit9"]
+        )
+        XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
         XCTAssertTrue(
-            stdout.contains("coreCommit=envcommit9"),
-            "expected $MANIFOLD_CORE_COMMIT to resolve into coreCommit; got: \(stdout)"
+            result.stdout.contains("coreCommit=envcommit9"),
+            "expected $MANIFOLD_CORE_COMMIT to resolve into coreCommit; got: \(result.stdout)"
+        )
+    }
+
+    /// With neither override set, `coreCommit` resolves from THIS repo's own
+    /// `Package.resolved` (priority 3 of 4) — the default source, and the
+    /// fix for rev-182's SEVERE 1 finding: a default run (no flag, no env)
+    /// used to emit the literal string `"unknown"` in every record, which
+    /// structurally could not satisfy ManifoldKit#178's acceptance criteria
+    /// from inside this repo. The expected value is this branch's actual
+    /// pinned `manifoldkit` revision — if `Package.swift`'s pin is bumped,
+    /// update this alongside it (the same "test tracks the pin" convention
+    /// as the decoy-pool migration's ordered-prefix tests).
+    func test_recordIdentity_defaultResolvesFromPackageResolved() throws {
+        let result = try runBinaryHermetic(
+            args: ["record-identity", "Mistral-7B-Instruct-v0.3-4bit"],
+            environment: [:]
+        )
+        XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
+        XCTAssertTrue(
+            result.stdout.contains("coreCommit=3b4d1d2a07c21c785af711bb84430fbdbda4f0d9"),
+            "expected the pinned ManifoldKit revision to resolve from Package.resolved by default; got: \(result.stdout)"
+        )
+    }
+
+    /// When no override is set AND there is no `Package.resolved` to read
+    /// (CWD pointed at an empty directory), resolution falls all the way
+    /// through to the documented `"unknown"` placeholder (priority 4 of 4) —
+    /// proves the fallback chain terminates instead of crashing or fabricating
+    /// a value, and that a real ordinary run (which always has a
+    /// `Package.resolved` once built via SwiftPM) is the only path that
+    /// reaches the earlier, real-value priorities.
+    func test_recordIdentity_noPackageResolved_fallsBackToUnknown() throws {
+        let emptyDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("record-identity-no-resolved-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: emptyDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: emptyDir) }
+
+        let result = try runBinaryHermetic(
+            args: ["record-identity", "Mistral-7B-Instruct-v0.3-4bit"],
+            cwd: emptyDir,
+            environment: [:]
+        )
+        XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
+        XCTAssertTrue(
+            result.stdout.contains("coreCommit=unknown"),
+            "expected the 'unknown' placeholder with no Package.resolved reachable; got: \(result.stdout)"
+        )
+        XCTAssertTrue(
+            result.stderr.contains("Package.resolved"),
+            "a degraded fallback must explain itself on stderr, not fail silently; got: \(result.stderr)"
         )
     }
 }
