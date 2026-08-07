@@ -29,6 +29,14 @@ struct CLI {
     var common: ScenarioCLIHarness.Options
     var modelPath: String?
     var emitRecords: URL? = nil
+    /// The ManifoldKit core commit the run was built from, stamped onto every
+    /// emitted `ConformanceRecord`. Resolved from `--core-commit`, else
+    /// `$MANIFOLD_CORE_COMMIT`, else the documented `"unknown"` placeholder —
+    /// see `resolveCoreCommit(cliOverride:environment:)`. Records are only
+    /// comparable across the same core binary (`ConformanceScorer.RecordContext`
+    /// doc comment), so leaving this unresolved silently made every MLX leg
+    /// incomparable to every other leg (the defect this field exists to fix).
+    var coreCommit: String = resolveCoreCommit(cliOverride: nil)
 
     var scenarioFilter: String { common.scenarioFilter }
     var output: URL { common.output }
@@ -87,6 +95,10 @@ struct CLI {
                 i += 1
                 guard i < remainder.count else { fail("--emit-records requires a value") }
                 cli.emitRecords = URL(fileURLWithPath: remainder[i])
+            case "--core-commit":
+                i += 1
+                guard i < remainder.count else { fail("--core-commit requires a value") }
+                cli.coreCommit = remainder[i]
             default:
                 fail("unknown argument: \(arg)")
             }
@@ -100,7 +112,11 @@ struct CLI {
         manifold-tools-mlx — tool-calling validation against a real MLX model
 
         SUBCOMMANDS
-          bfcl      BFCL argument-level eval (run `bfcl --help` for flags)
+          bfcl              BFCL argument-level eval (run `bfcl --help` for flags)
+          record-identity   Prints the (backend, model, quant, coreCommit) tuple
+                            that would be stamped onto ConformanceRecords for a
+                            given model path — no model load, no GPU needed.
+                            Usage: record-identity <path> [--core-commit <sha>]
 
         USAGE
           manifold-tools-mlx --model <path> [--scenario <id|all>]
@@ -120,6 +136,9 @@ struct CLI {
           --extra-tools <N>     Advertise N decoy tools alongside each scenario's
                                 required tools to probe correct-tool selection
                                 under distractor pressure. Default: 0 (no decoys).
+          --core-commit <sha>   ManifoldKit core commit the run was built from,
+                                stamped on every emitted ConformanceRecord.
+                                Default: $MANIFOLD_CORE_COMMIT, else 'unknown'.
           --list                Print available scenarios and exit (no model needed).
           --help                Show this text.
 
@@ -186,6 +205,106 @@ func makeRegistry(for scenario: Scenario, fixturesRoot: URL, extraTools: Int = 0
 /// `SUMMARY` line is stable and greppable (e.g. `f1=0.900`, never `f1=0.9`).
 func fmt3(_ value: Double) -> String { String(format: "%.3f", value) }
 
+/// Best-effort quantization label for an MLX snapshot directory basename.
+/// MLX weights are conventionally suffixed with a bit-width marker
+/// (`-4bit`, `-8bit`, `-3bit`, `-6bit`, `-2bit`) — the mlx-community naming
+/// convention — or occasionally a raw precision suffix (`-fp16`, `-bf16`).
+/// Mirrors core `manifold-tools`'s `quantLabel(from:)` in spirit (same
+/// "best-effort, nil when nothing matches" contract) but recognizes MLX's
+/// own suffix vocabulary instead of the GGUF/Ollama one (`q4_K_M`, `int4`),
+/// which does not appear in MLX directory names.
+func quantLabel(from directoryName: String) -> String? {
+    let tokens = directoryName.split(separator: "-").map(String.init)
+    for token in tokens.reversed() {
+        let lower = token.lowercased()
+        if lower.hasSuffix("bit") {
+            let digits = lower.dropLast(3)
+            if !digits.isEmpty, digits.allSatisfy(\.isNumber) {
+                return lower
+            }
+        }
+        if ["fp16", "fp32", "bf16", "f16", "f32"].contains(lower) {
+            return lower
+        }
+        if lower.hasPrefix("q"), let second = lower.dropFirst().first, second.isNumber {
+            return lower
+        }
+    }
+    return nil
+}
+
+/// Derives the `(model, quant)` identity pair a `ConformanceRecord` should
+/// carry from an MLX snapshot directory's basename, e.g.
+/// `"Mistral-7B-Instruct-v0.3-4bit"` -> `(model: "Mistral-7B-Instruct-v0.3",
+/// quant: "4bit")`. Falls back to the full basename as `model` with
+/// `quant: nil` when no quant marker is recognized — an unrecognized suffix
+/// is kept in `model` rather than silently dropped, so the identity is
+/// always a real, distinguishing value, never the placeholder `"unknown"`
+/// that made every MLX cell collapse into one unidentifiable row.
+func modelIdentity(from directoryName: String) -> (model: String, quant: String?) {
+    guard let quant = quantLabel(from: directoryName) else {
+        return (directoryName, nil)
+    }
+    let suffix = "-\(quant)"
+    guard directoryName.lowercased().hasSuffix(suffix), directoryName.count > suffix.count else {
+        return (directoryName, quant)
+    }
+    let modelPart = String(directoryName.dropLast(suffix.count))
+    return (modelPart, quant)
+}
+
+/// Resolves the `coreCommit` provenance field: an explicit `--core-commit`
+/// override wins, then `$MANIFOLD_CORE_COMMIT` (set by
+/// `scripts/local-integration-sweep.sh`-style drivers to `git rev-parse
+/// --short HEAD` in the core checkout — the same convention core
+/// `manifold-tools score --core-commit` uses), else the documented
+/// `"unknown"` placeholder `ConformanceScorer.RecordContext` names as the
+/// fallback for "can't be resolved". `environment` is injectable so
+/// `record-identity` (and its tests) can pin resolution without mutating
+/// the real process environment.
+func resolveCoreCommit(
+    cliOverride: String?,
+    environment: [String: String] = ProcessInfo.processInfo.environment
+) -> String {
+    cliOverride ?? environment["MANIFOLD_CORE_COMMIT"] ?? "unknown"
+}
+
+/// `record-identity <path> [--core-commit <sha>]` — prints the
+/// `(backend, model, quant, coreCommit)` tuple that a full run would stamp
+/// onto every `ConformanceRecord` for the given model path, with no model
+/// load and no GPU. Exists so this provenance logic is a pure, subprocess-
+/// testable seam (`CLIParseTests`) even though `manifold-tools-mlx` is an
+/// executable target that test bundles can't `import`.
+func recordIdentityCLI(_ argv: [String]) -> Int32 {
+    guard let first = argv.first, !first.hasPrefix("--") else {
+        FileHandle.standardError.write(Data(
+            "usage: manifold-tools-mlx record-identity <model-path-or-basename> [--core-commit <sha>]\n".utf8))
+        return 2
+    }
+    var coreCommitOverride: String?
+    var i = 1
+    while i < argv.count {
+        switch argv[i] {
+        case "--core-commit":
+            i += 1
+            guard i < argv.count else {
+                FileHandle.standardError.write(Data("record-identity: --core-commit requires a value\n".utf8))
+                return 2
+            }
+            coreCommitOverride = argv[i]
+        default:
+            FileHandle.standardError.write(Data("record-identity: unknown argument: \(argv[i])\n".utf8))
+            return 2
+        }
+        i += 1
+    }
+    let basename = URL(fileURLWithPath: first).lastPathComponent
+    let (model, quant) = modelIdentity(from: basename)
+    let coreCommit = resolveCoreCommit(cliOverride: coreCommitOverride)
+    print("backend=mlx model=\(model) quant=\(quant ?? "(none)") coreCommit=\(coreCommit)")
+    return 0
+}
+
 @MainActor
 func runCLI() async -> Int32 {
     let argv = Array(CommandLine.arguments.dropFirst())
@@ -193,6 +312,9 @@ func runCLI() async -> Int32 {
     // BFCLRunner against this package's MLXBackend (mirrors core manifold-tools).
     if argv.first == "bfcl" {
         return await BFCLMLXCLI.run(Array(argv.dropFirst()))
+    }
+    if argv.first == "record-identity" {
+        return recordIdentityCLI(Array(argv.dropFirst()))
     }
     let cli = CLI.parse(argv)
 
@@ -248,17 +370,10 @@ func runCLI() async -> Int32 {
 
     let fixturesRoot = ScenarioCLIHarness.resolveFixturesRoot(cli.fixturesRoot)
 
-    let logger: TranscriptLogger
-    do {
-        logger = try TranscriptLogger(url: cli.output)
-    } catch {
-        FileHandle.standardError.write(Data("failed to open log: \(error)\n".utf8))
-        return 1
-    }
-    print("Logging to \(logger.destination.path)")
-    print("Fixtures root: \(fixturesRoot.path)")
-
-    // Load the MLX model once and reuse it across every scenario.
+    // Load the MLX model once and reuse it across every scenario. Resolved
+    // BEFORE the logger is created so `model`/`quant` are derived from the
+    // directory that actually loaded, not from the raw `--model` argument
+    // (which may be relative, symlinked, or trailing-slashed).
     let backend = MLXBackend()
     let modelURL = modelDirectory
     print("Loading MLX model from \(modelURL.path) …")
@@ -269,6 +384,27 @@ func runCLI() async -> Int32 {
         return 1
     }
     defer { backend.unloadModel() }
+
+    // Every emitted ConformanceRecord's cell identity — real `backend`/`model`/
+    // `quant` instead of the placeholder "unknown" that used to collapse every
+    // MLX cell into one unidentifiable row downstream (collate's comparability
+    // guard groups by this exact tuple).
+    let (modelID, quantID) = modelIdentity(from: modelURL.lastPathComponent)
+
+    let logger: TranscriptLogger
+    do {
+        logger = try TranscriptLogger(
+            url: cli.output,
+            backend: "mlx",
+            model: modelID,
+            quant: quantID
+        )
+    } catch {
+        FileHandle.standardError.write(Data("failed to open log: \(error)\n".utf8))
+        return 1
+    }
+    print("Logging to \(logger.destination.path)")
+    print("Fixtures root: \(fixturesRoot.path)")
 
     let decoyNames = Set(DecoyTools.names(count: cli.extraTools))
     if cli.extraTools > 0 {
@@ -349,10 +485,12 @@ func runCLI() async -> Int32 {
     // transcript is the more accurate source; see the PR description for this
     // as a flagged ambiguity against unifying onto the shared helper.
     // `renderer` is caller-declared — ManifoldMLX uses swift-transformers for
-    // chat-template application; `coreCommit` is unknown at CLI runtime.
+    // chat-template application. `coreCommit` comes from `--core-commit` /
+    // `$MANIFOLD_CORE_COMMIT` (see `resolveCoreCommit`), falling back to the
+    // documented "unknown" placeholder only when neither is set.
     let scoringCtx = ConformanceScorer.RecordContext(
         renderer: "swift-transformers",
-        coreCommit: "unknown",
+        coreCommit: cli.coreCommit,
         transcriptRef: logger.destination.path
     )
     let conformanceRecords = ConformanceScorer.records(

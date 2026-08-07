@@ -116,4 +116,85 @@ final class CLIParseTests: XCTestCase {
         XCTAssertTrue(result.stdout.contains("Available scenarios:"),
             "--list should print 'Available scenarios:'; got stdout: \(result.stdout)")
     }
+
+    // MARK: - record-identity (ManifoldKit#178: manifold-tools-mlx used to
+    // hardcode coreCommit "unknown" and never stamped backend/model/quant on
+    // the transcript logger at all, so every emitted ConformanceRecord read
+    // backend=unknown model=unknown quant=unknown coreCommit=unknown — the
+    // exact string a no-op fix would still produce. These assertions pin the
+    // REAL derived values, not merely "non-empty" / "not nil", so a
+    // regression back to the placeholder fails loudly.
+
+    /// A 4bit MLX-community-style directory name must decompose into a real
+    /// model id (quant suffix stripped) and the real quant label — never the
+    /// "unknown" placeholder that used to collapse every MLX cell into one
+    /// unidentifiable row for collate's comparability guard.
+    func test_recordIdentity_4bitSnapshot_decomposesModelAndQuant() throws {
+        let result = try runBinary(args: [
+            "record-identity", "/models/Mistral-7B-Instruct-v0.3-4bit",
+        ])
+        XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
+        XCTAssertEqual(
+            result.stdout.trimmingCharacters(in: .whitespacesAndNewlines),
+            "backend=mlx model=Mistral-7B-Instruct-v0.3 quant=4bit coreCommit=unknown"
+        )
+    }
+
+    /// A directory name with no recognizable quant suffix keeps the full
+    /// name as `model` (never silently dropped) and reports no quant —
+    /// distinct from, and not confusable with, the "unknown" placeholder.
+    func test_recordIdentity_noQuantSuffix_keepsFullNameAsModel() throws {
+        let result = try runBinary(args: ["record-identity", "gemma-3-27b-it"])
+        XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
+        XCTAssertEqual(
+            result.stdout.trimmingCharacters(in: .whitespacesAndNewlines),
+            "backend=mlx model=gemma-3-27b-it quant=(none) coreCommit=unknown"
+        )
+    }
+
+    /// `--core-commit` must be threaded through into the record's coreCommit
+    /// field verbatim — this is the field the issue reports as permanently
+    /// hardcoded to "unknown", breaking collate's cross-leg comparability
+    /// guard (`ConformanceScorer.RecordContext`'s doc comment: "runs are
+    /// only comparable across the same core binary").
+    func test_recordIdentity_coreCommitFlag_isThreadedThrough() throws {
+        let result = try runBinary(args: [
+            "record-identity", "Mistral-7B-Instruct-v0.3-4bit",
+            "--core-commit", "deadbeef1",
+        ])
+        XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
+        XCTAssertTrue(
+            result.stdout.contains("coreCommit=deadbeef1"),
+            "expected coreCommit=deadbeef1 in stdout, got: \(result.stdout)"
+        )
+        XCTAssertFalse(
+            result.stdout.contains("coreCommit=unknown"),
+            "an explicit --core-commit must never be overridden by the 'unknown' placeholder; got: \(result.stdout)"
+        )
+    }
+
+    /// `$MANIFOLD_CORE_COMMIT` must resolve when no `--core-commit` override
+    /// is given — the mechanism `scripts/local-integration-sweep.sh`-style
+    /// drivers use (matching core `manifold-tools score --core-commit`'s own
+    /// `$MANIFOLD_CORE_COMMIT` fallback convention).
+    func test_recordIdentity_coreCommitEnvVar_resolvesWithoutFlag() throws {
+        guard let bin = CLIParseTests.cachedBinaryPath else {
+            throw XCTSkip("manifold-tools-mlx binary not found — run `swift build` first")
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: bin)
+        process.arguments = ["record-identity", "Mistral-7B-Instruct-v0.3-4bit"]
+        process.environment = ["MANIFOLD_CORE_COMMIT": "envcommit9"]
+        let stdoutPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertTrue(
+            stdout.contains("coreCommit=envcommit9"),
+            "expected $MANIFOLD_CORE_COMMIT to resolve into coreCommit; got: \(stdout)"
+        )
+    }
 }
