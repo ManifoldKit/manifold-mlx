@@ -127,6 +127,12 @@ let package = Package(
                 .product(name: "ManifoldPersistenceSwiftData", package: "ManifoldKit"),
                 .product(name: "ManifoldTestSupport", package: "ManifoldKit"),
                 .product(name: "ManifoldBackendTestKit", package: "ManifoldKit"),
+                // Lets CLIParseTests compute its expected decoy-pool prefix
+                // from the real ManifoldTools.DecoyTools at test-build time
+                // instead of a literal snapshot, so a pin bump never reds
+                // the automated companion pin-bump gate (see #183's decoy
+                // ordered-prefix tests).
+                .product(name: "ManifoldTools", package: "ManifoldKit"),
             ],
             resources: [
                 // Render-side golden corpus for MLXRenderGoldenTests (#2005).
