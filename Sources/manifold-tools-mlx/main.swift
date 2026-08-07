@@ -29,14 +29,30 @@ struct CLI {
     var common: ScenarioCLIHarness.Options
     var modelPath: String?
     var emitRecords: URL? = nil
+    /// Set only when `--core-commit` is explicitly parsed; `nil` means "resolve
+    /// from `$MANIFOLD_CORE_COMMIT` / `Package.resolved` / the `"unknown"`
+    /// placeholder once the whole argv has been walked" — see `parse(_:)`,
+    /// which calls `resolveCoreCommit` exactly once, after parsing, and stores
+    /// the result into `coreCommit` below. Deferred (rather than resolved as
+    /// this property's own default) so a degraded-fallback stderr note never
+    /// fires when an explicit `--core-commit` was going to win anyway
+    /// (rev-182 LOW 4: the note used to fire unconditionally, on every parse,
+    /// because a stored property's default value expression runs at
+    /// `CLI(common:)` construction time — before the parse loop even looks at
+    /// argv — misleading the one channel an operator reads to confirm
+    /// provenance is live).
+    private var coreCommitOverride: String?
     /// The ManifoldKit core commit the run was built from, stamped onto every
     /// emitted `ConformanceRecord`. Resolved from `--core-commit`, else
-    /// `$MANIFOLD_CORE_COMMIT`, else the documented `"unknown"` placeholder —
-    /// see `resolveCoreCommit(cliOverride:environment:)`. Records are only
+    /// `$MANIFOLD_CORE_COMMIT`, else this repo's own `Package.resolved`, else
+    /// the documented `"unknown"` placeholder — see
+    /// `resolveCoreCommit(cliOverride:environment:)`. Records are only
     /// comparable across the same core binary (`ConformanceScorer.RecordContext`
     /// doc comment), so leaving this unresolved silently made every MLX leg
     /// incomparable to every other leg (the defect this field exists to fix).
-    var coreCommit: String = resolveCoreCommit(cliOverride: nil)
+    /// Placeholder value here (`"unknown"`) is never observed by a caller —
+    /// `parse(_:)` overwrites it with the real resolution before returning.
+    var coreCommit: String = "unknown"
 
     var scenarioFilter: String { common.scenarioFilter }
     var output: URL { common.output }
@@ -98,12 +114,17 @@ struct CLI {
             case "--core-commit":
                 i += 1
                 guard i < remainder.count else { fail("--core-commit requires a value") }
-                cli.coreCommit = remainder[i]
+                cli.coreCommitOverride = remainder[i]
             default:
                 fail("unknown argument: \(arg)")
             }
             i += 1
         }
+        // Resolved exactly once, after the whole argv has been walked, so an
+        // explicit --core-commit (parsed above, possibly late in argv) is known
+        // BEFORE resolveCoreCommit ever runs — a degraded-fallback stderr note
+        // must never fire when the flag was going to win anyway (rev-182 LOW 4).
+        cli.coreCommit = resolveCoreCommit(cliOverride: cli.coreCommitOverride)
         return cli
     }
 
@@ -282,9 +303,15 @@ func resolveCoreCommit(
     environment: [String: String] = ProcessInfo.processInfo.environment,
     packageResolved: () -> String? = { coreCommitFromPackageResolved() }
 ) -> String {
-    if let cliOverride { return cliOverride }
-    if let fromEnv = environment["MANIFOLD_CORE_COMMIT"] { return fromEnv }
-    if let fromPackageResolved = packageResolved() { return fromPackageResolved }
+    // Empty is not a real SHA at any priority level — rev-182 MODERATE 2: an
+    // unguarded `environment["MANIFOLD_CORE_COMMIT"]` let `MANIFOLD_CORE_COMMIT=`
+    // (set but empty — e.g. an unset shell variable interpolated into an env
+    // assignment) win as `coreCommit=""`, which sails past a sweep's "is this
+    // the unknown placeholder?" check while carrying no real provenance. Falls
+    // through to the next priority level instead of accepting the empty value.
+    if let cliOverride, !cliOverride.isEmpty { return cliOverride }
+    if let fromEnv = environment["MANIFOLD_CORE_COMMIT"], !fromEnv.isEmpty { return fromEnv }
+    if let fromPackageResolved = packageResolved(), !fromPackageResolved.isEmpty { return fromPackageResolved }
     return "unknown"
 }
 
@@ -323,6 +350,20 @@ func coreCommitFromPackageResolved(
                 "manifold-tools-mlx: \(url.path) has no 'manifoldkit' pin with a revision — coreCommit falls back to 'unknown'\n".utf8))
             return nil
         }
+        // Echoed even on the success path — not just failures — because
+        // rev-182 MODERATE 3: this reads whatever Package.resolved happens to
+        // sit at the runtime CWD, not necessarily THIS repo's. Running the
+        // binary from a different checkout's directory (e.g. manifold-llama's)
+        // silently reports THAT repo's pinned revision instead of manifold-mlx's
+        // — today the two pin the same ManifoldKit version, so it coincides;
+        // during a release fan-out they can diverge by design, with no error to
+        // catch it. Printing the source path on every successful resolution (not
+        // just the failure path) is the mitigation available without embedding
+        // the pin at build time — it makes a wrong-repo CWD visually
+        // inspectable rather than silent. Full fix (compile-time embedding) is
+        // a larger change than this PR's scope.
+        FileHandle.standardError.write(Data(
+            "manifold-tools-mlx: coreCommit resolved from \(url.path)\n".utf8))
         return revision
     } catch {
         FileHandle.standardError.write(Data(

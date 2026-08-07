@@ -108,6 +108,28 @@ final class CLIParseTests: XCTestCase {
             "stderr must contain standard prefix; got: \(result.stderr)")
     }
 
+    /// An explicit `--core-commit` on the MAIN run path (`CLI.parse`, not the
+    /// `record-identity` seam) must never trigger the degraded-fallback stderr
+    /// note — rev-182 LOW 4: `coreCommit`'s resolution used to run as a stored
+    /// property's default-value expression, evaluated at `CLI(common:)`
+    /// construction time, BEFORE the parse loop had even looked at argv for
+    /// `--core-commit`. So the "Package.resolved falls back to unknown" /
+    /// "coreCommit resolved from ..." notes fired unconditionally on every
+    /// parse, misleading the one channel an operator reads to confirm
+    /// provenance is live, even when an explicit override was about to win.
+    /// `--model` is deliberately omitted so this exercises `CLI.parse` alone
+    /// (exit 2 for missing --model) without needing a real model load —
+    /// `coreCommit` is fully resolved by the time `CLI.parse` returns, before
+    /// the caller ever checks for a model path.
+    func test_coreCommitFlag_neverTriggersPackageResolvedStderrNote() throws {
+        let result = try runBinary(args: ["--scenario", "all", "--core-commit", "deadbeef2"])
+        XCTAssertEqual(result.exitCode, 2, "stderr: \(result.stderr)")
+        XCTAssertFalse(
+            result.stderr.contains("Package.resolved"),
+            "an explicit --core-commit must short-circuit before Package.resolved is ever consulted; got: \(result.stderr)"
+        )
+    }
+
     /// --list must exit 0 and print at least one scenario line (no model needed).
     func test_listFlag_exits0_andPrintsScenarios() throws {
         let result = try runBinary(args: ["--list"])
@@ -236,25 +258,53 @@ final class CLIParseTests: XCTestCase {
         )
     }
 
+    /// Reads the `manifoldkit` pin's revision directly out of the repo root's
+    /// `Package.resolved` — the same file (and same parsing shape) production
+    /// reads via `coreCommitFromPackageResolved(cwd:)`. Computed at test-run
+    /// time rather than hardcoded, so a pin bump never reds this test (rev-182
+    /// HIGH 1: `companion-core-bump.yml`'s gate is `swift build && swift test`
+    /// and only opens the automated bump PR on success, so a hardcoded SHA
+    /// here would abort the fan-out on the very release that bumps it — before
+    /// a PR exists to fix the literal in, since that PR is bot-authored with
+    /// no human in the loop).
+    private func expectedManifoldKitRevisionFromPackageResolved() throws -> String {
+        // Repo root == this test bundle's CWD, matching the same assumption
+        // `coreCommitFromPackageResolved` makes for the binary under test.
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Package.resolved")
+        let data = try Data(contentsOf: url)
+        let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let pins = try XCTUnwrap(root["pins"] as? [[String: Any]])
+        let manifoldKitPin = try XCTUnwrap(pins.first { ($0["identity"] as? String) == "manifoldkit" })
+        let state = try XCTUnwrap(manifoldKitPin["state"] as? [String: Any])
+        return try XCTUnwrap(state["revision"] as? String)
+    }
+
     /// With neither override set, `coreCommit` resolves from THIS repo's own
     /// `Package.resolved` (priority 3 of 4) — the default source, and the
     /// fix for rev-182's SEVERE 1 finding: a default run (no flag, no env)
     /// used to emit the literal string `"unknown"` in every record, which
     /// structurally could not satisfy ManifoldKit#178's acceptance criteria
-    /// from inside this repo. The expected value is this branch's actual
-    /// pinned `manifoldkit` revision — if `Package.swift`'s pin is bumped,
-    /// update this alongside it (the same "test tracks the pin" convention
-    /// as the decoy-pool migration's ordered-prefix tests).
+    /// from inside this repo. Also asserts the resolved value is 40-hex (a
+    /// real git SHA shape) and never the `"unknown"` placeholder — the two
+    /// properties AC1 actually requires, independent of which SHA it is.
     func test_recordIdentity_defaultResolvesFromPackageResolved() throws {
+        let expected = try expectedManifoldKitRevisionFromPackageResolved()
         let result = try runBinaryHermetic(
             args: ["record-identity", "Mistral-7B-Instruct-v0.3-4bit"],
             environment: [:]
         )
         XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
         XCTAssertTrue(
-            result.stdout.contains("coreCommit=3b4d1d2a07c21c785af711bb84430fbdbda4f0d9"),
-            "expected the pinned ManifoldKit revision to resolve from Package.resolved by default; got: \(result.stdout)"
+            result.stdout.contains("coreCommit=\(expected)"),
+            "expected the pinned ManifoldKit revision (\(expected)) to resolve from Package.resolved by default; got: \(result.stdout)"
         )
+        XCTAssertEqual(expected.count, 40, "a git SHA is 40 hex chars; got: \(expected)")
+        XCTAssertTrue(
+            expected.allSatisfy(\.isHexDigit),
+            "expected an all-hex SHA; got: \(expected)"
+        )
+        XCTAssertNotEqual(expected, "unknown")
     }
 
     /// When no override is set AND there is no `Package.resolved` to read
