@@ -1,5 +1,11 @@
 import XCTest
 import Foundation
+// Only for computing this test bundle's OWN expected decoy-pool values from
+// the real ManifoldTools.DecoyTools at test-build time — see the decoy-names
+// tests below. Never used to drive the CLI itself; that stays subprocess-only
+// per this file's own header note (an executable target's CLI/​pure functions
+// still cannot be imported directly).
+import ManifoldTools
 
 /// Tests for the manifold-tools-mlx CLI argument-parse contract.
 ///
@@ -123,65 +129,53 @@ final class CLIParseTests: XCTestCase {
     // truncated OR reordered pool — those are the exact two failure modes that
     // let the stale copy drift undetected. These pin the exact ordered prefix.
     //
-    // The expected values below are the pool as resolved through THIS repo's
-    // pinned ManifoldKit dependency (Package.resolved, currently v0.75.0 /
-    // 3b4d1d2a) — NOT core's live main, which has since renamed positions 1/3
-    // (`get_weather`->`get_air_quality`, `search_web`->`get_movie_showtimes`,
-    // ManifoldKit#2413). That rename lands here automatically the next time the
-    // pin advances; when it does, this test's expected values must be updated
-    // in the same PR that bumps the pin — a failure here after a pin bump is
-    // the intended signal, not a false alarm.
+    // rev-183 HIGH finding: an earlier revision of these tests hardcoded the
+    // expected names as string literals. `companion-core-bump.yml`'s gate is
+    // `swift build && swift test` and only opens the pin-bump PR on success —
+    // so the next core release that renames a pool entry (core#2413 already
+    // did this: `get_weather`->`get_air_quality`, `search_web`->
+    // `get_movie_showtimes`) would red this gate and abort the fan-out BEFORE
+    // a PR exists to fix it (the bump PR is bot-authored, no human in the
+    // loop — "update the literal in the same PR" cannot happen). So the
+    // expected values below are computed from the real
+    // `ManifoldTools.DecoyTools` at test-build time (this test bundle's own
+    // `import ManifoldTools`, resolved through the SAME `Package.resolved` the
+    // CLI binary under test is built against), not a snapshot. A regression
+    // back to a stale LOCAL copy in the executable target still fails these
+    // tests — the test bundle has no local shadow to fall into, so its
+    // `DecoyTools` reference always resolves to the real library, and the
+    // subprocess's stdout is compared against that live value.
 
-    /// The pool must now be core's real 46 entries (was a stale local copy of
-    /// 24) — `maxCount` is the first, cheapest signal a truncated pool is back.
-    func test_decoyNames_maxCountIs46() throws {
-        let result = try runBinary(args: ["decoy-names", "9999"])
+    /// The pool's max count must match the real library's `DecoyTools.maxCount`
+    /// (was a stale local copy of 24) — the first, cheapest signal a truncated
+    /// pool is back, and now immune to the pool ever growing past 46.
+    func test_decoyNames_maxCountMatchesRealPool() throws {
+        let expectedMax = DecoyTools.maxCount
+        let result = try runBinary(args: ["decoy-names", String(expectedMax + 1)])
         // Out-of-range must still name the CURRENT pool size in its error, not
         // a stale one.
         XCTAssertEqual(result.exitCode, 2)
-        XCTAssertTrue(result.stderr.contains("(46)"),
-            "expected pool size 46 in the error; got: \(result.stderr)")
+        XCTAssertTrue(result.stderr.contains("(\(expectedMax))"),
+            "expected pool size \(expectedMax) in the error; got: \(result.stderr)")
     }
 
     /// N=3 pinned to the exact ordered names — catches both truncation
     /// (wrong count) and reordering (right set, wrong sequence).
-    func test_decoyNames_first3_exactOrderedList() throws {
+    func test_decoyNames_first3_matchesRealPoolOrderedPrefix() throws {
         let result = try runBinary(args: ["decoy-names", "3"])
         XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
-        XCTAssertEqual(
-            result.stdout.trimmingCharacters(in: .whitespacesAndNewlines),
-            "get_weather\nsend_email\nsearch_web"
-        )
+        let expected = DecoyTools.names(3).joined(separator: "\n")
+        XCTAssertEqual(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), expected)
     }
 
-    /// N=20 (tonight's planned maximum decoy level) pinned to the exact
-    /// ordered list, so a matched-decoy-level cross-runtime comparison is
-    /// verifiably advertising the same distractors this repo resolves today.
-    func test_decoyNames_first20_exactOrderedList() throws {
+    /// N=20 (tonight's planned maximum decoy level) matched against the exact
+    /// ordered list the real pool resolves to, so a matched-decoy-level
+    /// cross-runtime comparison is verifiably advertising the same distractors
+    /// this repo resolves today.
+    func test_decoyNames_first20_matchesRealPoolOrderedPrefix() throws {
         let result = try runBinary(args: ["decoy-names", "20"])
         XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
-        let expected = """
-        get_weather
-        send_email
-        search_web
-        translate_text
-        set_timer
-        convert_currency
-        create_calendar_event
-        get_stock_price
-        roll_dice
-        convert_units
-        send_sms
-        get_directions
-        play_music
-        set_reminder
-        get_news_headlines
-        book_flight
-        get_definition
-        create_note
-        get_traffic
-        shorten_url
-        """
+        let expected = DecoyTools.names(20).joined(separator: "\n")
         XCTAssertEqual(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), expected)
     }
 
@@ -192,16 +186,18 @@ final class CLIParseTests: XCTestCase {
         XCTAssertEqual(result.stdout, "")
     }
 
-    /// `--extra-tools` must accept up to the real pool size (46) — this failed
-    /// at 24 before the migration, silently capping every decoy sweep below
-    /// the ceiling the other two runtimes could reach.
-    func test_extraTools46_isAccepted_47IsRejected() throws {
-        let ok = try runBinary(args: ["--list", "--extra-tools", "46"])
+    /// `--extra-tools` must accept up to the real pool size — this failed at
+    /// 24 before the migration, silently capping every decoy sweep below the
+    /// ceiling the other two runtimes could reach. Computed against
+    /// `DecoyTools.maxCount` so this doesn't need updating on a pin bump either.
+    func test_extraToolsAcceptsRealMaxCount_rejectsOneOver() throws {
+        let expectedMax = DecoyTools.maxCount
+        let ok = try runBinary(args: ["--list", "--extra-tools", String(expectedMax)])
         XCTAssertEqual(ok.exitCode, 0, "stderr: \(ok.stderr)")
 
-        let over = try runBinary(args: ["--list", "--extra-tools", "47"])
+        let over = try runBinary(args: ["--list", "--extra-tools", String(expectedMax + 1)])
         XCTAssertEqual(over.exitCode, 2)
-        XCTAssertTrue(over.stderr.contains("(46)"),
-            "expected the current pool size 46 in the rejection message; got: \(over.stderr)")
+        XCTAssertTrue(over.stderr.contains("(\(expectedMax))"),
+            "expected the current pool size \(expectedMax) in the rejection message; got: \(over.stderr)")
     }
 }
