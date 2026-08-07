@@ -176,7 +176,7 @@ func makeRegistry(for scenario: Scenario, fixturesRoot: URL, extraTools: Int = 0
     // tools to (mis)select among. Advertising them is handled by
     // `ScenarioRunner(passAllRegisteredTools:)` — see the call site — rather
     // than by patching `scenario.requiredTools`.
-    for decoy in DecoyTools.executors(count: extraTools) {
+    for decoy in DecoyTools.executors(extraTools) {
         registry.register(decoy)
     }
     return registry
@@ -270,7 +270,7 @@ func runCLI() async -> Int32 {
     }
     defer { backend.unloadModel() }
 
-    let decoyNames = Set(DecoyTools.names(count: cli.extraTools))
+    let decoyNames = Set(DecoyTools.names(cli.extraTools))
     if cli.extraTools > 0 {
         print("Advertising \(cli.extraTools) decoy tool(s) per scenario: \(decoyNames.sorted().joined(separator: ", "))")
     }
