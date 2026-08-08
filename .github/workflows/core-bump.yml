@@ -15,6 +15,11 @@ on:
         required: true
         type: string
 
+# Read-only default; the `bump` job below opts up to contents:write +
+# pull-requests:write, which it actually needs (pin rewrite + PR open/merge).
+permissions:
+  contents: read
+
 jobs:
   resolve:
     runs-on: ubuntu-latest

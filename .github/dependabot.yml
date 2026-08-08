@@ -1,0 +1,14 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Collapse all action bumps into one PR/week, matching
+    # ManifoldKit/ManifoldKit's dependabot.yml. Third-party actions in this
+    # repo (and the reusable workflows other repos call) are SHA-pinned;
+    # Dependabot is what keeps those pins from going stale.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
