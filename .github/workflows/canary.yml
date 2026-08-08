@@ -12,6 +12,14 @@ on:
   repository_dispatch:
     types: [core-release]
 
+# No top-level permissions block existed here before — the job ran with
+# whatever the repo's default GITHUB_TOKEN permissions were. companion-canary.yml
+# caps itself to contents:read internally, but that shouldn't be this
+# workflow's only line of defense. Explicit read-only default, matching
+# ci.yml / model-tests.yml / slow-tests.yml in this repo.
+permissions:
+  contents: read
+
 jobs:
   canary:
     uses: ManifoldKit/.github/.github/workflows/companion-canary.yml@main

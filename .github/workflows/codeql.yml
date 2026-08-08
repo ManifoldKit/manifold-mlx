@@ -1,0 +1,52 @@
+name: CodeQL
+
+# Code scanning for GitHub Actions workflows and this repo's Python scripts
+# (scripts/quantize-flux-4bit.py). Swift is deliberately NOT analyzed here —
+# ManifoldKit/ManifoldKit's codeql.yml found CodeQL's Swift tracer wraps every
+# swiftc invocation and pushed build times past a 30-minute timeout on that
+# codebase; the same tracer overhead applies here. If CodeQL Swift support
+# improves, this workflow can grow a swift leg — see core's codeql.yml history.
+#
+# This workflow runs cheap on ubuntu-latest for both legs.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly baseline scan, Mondays 06:00 UTC. Keeps the Security tab fresh
+    # even on quiet weeks.
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write   # required to upload SARIF results to the Security tab
+  actions: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, python]
+
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-and-quality
+
+      - uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
+        with:
+          category: "/language:${{ matrix.language }}"
