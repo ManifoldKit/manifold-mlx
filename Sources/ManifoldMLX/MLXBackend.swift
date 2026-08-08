@@ -8,9 +8,9 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 import MLXVLM
+import ManifoldInference
 import Tokenizers
 import os
-import ManifoldInference
 
 /// MLX Swift inference backend for safetensors/MLX-format models.
 ///
@@ -21,1259 +21,1279 @@ import ManifoldInference
 /// Requires real Apple Silicon hardware — does not work in iOS Simulator.
 public final class MLXBackend: InferenceBackend, @unchecked Sendable {
 
-    // MARK: - Logging
+  // MARK: - Logging
 
-    private static let logger = Logger(
-        subsystem: ManifoldConfiguration.shared.logSubsystem,
-        category: "inference"
+  private static let logger = Logger(
+    subsystem: ManifoldConfiguration.shared.logSubsystem,
+    category: "inference"
+  )
+
+  // MARK: - State
+
+  private var _isModelLoaded = false
+  private var _isGenerating = false
+
+  /// Identity of the current generation, bumped on every `generate()` and on
+  /// every `stopGeneration()` (#171).
+  ///
+  /// `stopGeneration()` must leave `isGenerating == false` synchronously and
+  /// the backend ready for an immediate `generate()` — core's
+  /// `InferenceBackend` contract, points 2 and 3. But `Task.cancel()` is
+  /// cooperative: the cancelled generation keeps unwinding after
+  /// `stopGeneration()` returns, and its teardown ends in
+  /// `_isGenerating = false`. Without an identity check that late write lands
+  /// on whatever generation is running *by then* — clearing a live
+  /// generation's flag from a task nobody owns any more, and admitting a
+  /// third concurrent `generate()`.
+  ///
+  /// So teardown is conditional: it clears the flag only if the epoch it
+  /// captured at launch is still current. A superseded task compares unequal
+  /// and leaves the flag alone. Read and written only under `stateLock`.
+  private var _generationEpoch: UInt64 = 0
+
+  public private(set) var isModelLoaded: Bool {
+    get { withStateLock { _isModelLoaded } }
+    set { withStateLock { _isModelLoaded = newValue } }
+  }
+
+  public private(set) var isGenerating: Bool {
+    get { withStateLock { _isGenerating } }
+    set { withStateLock { _isGenerating = newValue } }
+  }
+
+  // MARK: - Locking
+
+  private let stateLock = NSLock()
+
+  @discardableResult
+  private func withStateLock<T>(_ body: () throws -> T) rethrows -> T {
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    return try body()
+  }
+
+  /// Fallback `maxContextTokens` for `capabilities` whenever no *measured*
+  /// context window is available. Two distinct cases reach this, both
+  /// deliberately: (1) before the first `loadModel(from:plan:)` completes,
+  /// or for injected test doubles that bypass it entirely — `_manifest` is
+  /// `nil`; and (2) **after a real, successful load** whose `config.json`
+  /// carried none of the recognised context-length keys —
+  /// `MLXModelProbe.produceManifest` now leaves `contextWindow` `nil`
+  /// rather than fabricating a number (core PR #2404), and that `nil`
+  /// flows straight through here. Case 2 is the one worth naming plainly:
+  /// this constant is exactly the kind of guess `#2404` asks each consumer
+  /// to own explicitly rather than let the manifest itself assert as fact,
+  /// but the guess still lands in `capabilities.maxContextTokens` — which
+  /// core's `PromptAssembler` trims prompts against — so a genuinely
+  /// oversized model with an unrecognised `config.json` shape is still
+  /// budgeted at 8k here, same as before this PR, just now an auditable,
+  /// named choice instead of a silent one buried in the manifest.
+  /// `maxContextTokens` is a non-optional `Int32`, so this call site must
+  /// name *something*; mirrors `OpenAIBackend.unknownModelContextWindow`.
+  /// Conservative on purpose: an undersized budget only wastes headroom,
+  /// an oversized one risks overflowing a small local model's real trained
+  /// context.
+  static let unknownModelContextWindow: Int32 = 8192
+
+  // MARK: - Capabilities
+
+  public var capabilities: BackendCapabilities {
+    withStateLock {
+      // The manifest is populated at loadModel-time from config.json's
+      // `max_position_embeddings`. Falls back to
+      // ``unknownModelContextWindow`` both before any load completes
+      // AND when a completed load's manifest has `contextWindow == nil`
+      // (config.json had no recognised key) — see that constant's doc
+      // for why the latter case still matters post-#2404.
+      let ctxTokens = _manifest?.contextWindow.map(Int32.init) ?? Self.unknownModelContextWindow
+      // M5 + macOS 26.2: MLX activates Neural Accelerator dispatch automatically (~3-4x TTFT).
+      // Query NeuralAcceleratorProbe.availability in ManifoldHardware for informational UI only.
+      return BackendCapabilities(
+        supportedParameters: [
+          .temperature, .topP, .topK, .repeatPenalty,
+          .minP, .repetitionPenalty, .presencePenalty, .frequencyPenalty,
+        ],
+        maxContextTokens: ctxTokens,
+        requiresPromptTemplate: false,
+        supportsSystemPrompt: true,
+        // Tool calling is honoured only when the loaded model speaks a
+        // recognised tool dialect. `.unknown` (e.g. Gemma — no tool
+        // template, no wire format) correctly reports `false` rather
+        // than over-claiming a capability the generate path no-ops
+        // (the tool stage is gated on `dialect != .unknown` in
+        // `MLXGenerationDriver.run`). Phase 0 / umbrella #2005.
+        supportsToolCalling: _dialect != .unknown,
+        supportsStructuredOutput: false,
+        supportsNativeJSONMode: false,
+        cancellationStyle: .cooperative,
+        supportsTokenCounting: true,
+        memoryStrategy: .resident,
+        maxOutputTokens: 4096,
+        supportsStreaming: true,
+        isRemote: false,
+        // Per-model once a model is loaded; configuration intent before
+        // that (#154).
+        //
+        // Post-load this reports `_kvCacheReuseEligible`
+        // (`enableKVCacheReuse && !routeThroughVLMFactory`) — the same
+        // value the generate path actually gates reuse on. A VLM/MoE
+        // model routed through `VLMModelFactory` full-prefills every
+        // turn, and now says so rather than inheriting the constructor
+        // flag's `true`.
+        //
+        // Pre-load there is no model to be eligible *for*, so this
+        // reports the configured flag: a bare `MLXBackend()` advertises
+        // what it is configured to do, which is the surface the
+        // conformance meta-contract pins
+        // (`MLXBackendConformanceTests` asserts on
+        // `MLXBackend().capabilities`). Reporting `false` pre-load
+        // would instead assert "this backend cannot persist KV" —
+        // untrue of a default-configured backend that simply has not
+        // loaded yet.
+        //
+        // The loaded-ness predicate is `_modelContainer`, NOT
+        // `_isModelLoaded`. Both mean "a model is loaded", but only
+        // `_modelContainer` is written in the *same* `withStateLock`
+        // block as `_kvCacheReuseEligible` (in `loadModel` and in
+        // `_inject`) and cleared alongside it in `unloadModel`.
+        // `isModelLoaded` is a separate lock acquisition at the tail of
+        // `loadModel`, two awaits later (cleanup barrier + arbiter
+        // claim); keying off it would leave a window where eligibility
+        // is already known to be `false` for a VLM/MoE model while this
+        // still reported the configured `true` — the exact over-claim
+        // #154 is about, just narrowed rather than removed. Every
+        // neighbouring model-derived field (`supportsVision`,
+        // `_dialect`, `_manifest`) flips in that same block, so this
+        // keeps the struct internally consistent.
+        //
+        // NOTE for anyone adding a `_modelContainer` writer: this class
+        // now carries two distinct loaded-ness predicates, and they are
+        // not interchangeable.
+        //   • `_modelContainer != nil` — model state is installed.
+        //     The superset; what capability reporting keys off.
+        //   • `_isModelLoaded` — the load is *committed* (arbiter claim
+        //     settled) and generation is permitted. `generate`'s guard.
+        // No test can currently tell them apart: the tests that reach
+        // the loaded state through `_inject` set both in one block, and
+        // the tests that call the real `loadModel` await it to
+        // completion — by which point both are `true` and agree.
+        // Distinguishing them needs an observer that reads
+        // `capabilities` *inside* the load tail, i.e. a real multi-GB
+        // load plus a mid-`await` hook.
+        //
+        // A change here therefore fails silently: assigning
+        // `_modelContainer` outside a block that also sets
+        // `_kvCacheReuseEligible` moves capability reporting with it
+        // and the suite stays green.
+        supportsKVCachePersistence: _modelContainer != nil
+          ? _kvCacheReuseEligible : enableKVCacheReuse,
+        supportsGrammarConstrainedSampling: true,
+        supportsThinking: true,
+        supportsVision: _supportsVision,
+        sharesMLXProcessResources: true,
+        rendersFullPrompt: true,
+        toolDialect: _dialect.coreDialect
+      )
+    }
+  }
+
+  // MARK: - Private
+
+  /// Access only under `stateLock`.
+  private var _modelContainer: (any MLXModelContainerProtocol)?
+  /// Access only under `stateLock`.
+  private var _generationTask: Task<Void, Never>?
+  /// Chained arbiter-teardown task. Each `unloadModel`/`secureWipe` appends
+  /// its `release`/`clearAll` to this chain (`await previousCleanup?.value`)
+  /// so teardown is serialized, and `loadModel` awaits it before issuing a
+  /// new `claim`. Without this barrier the actor could process a fresh
+  /// `claim` *before* the prior `release` for the same `backendID`,
+  /// silently dropping the new claim (the actor runs in scheduling order,
+  /// not call order). Mirrors `LlamaBackend.cleanupTask`. Access only under
+  /// `stateLock`.
+  private var _cleanupTask: Task<Void, Never>?
+  /// The tool-call dialect detected for the currently loaded model.
+  /// Set by `loadModel(from:plan:)` via `MLXToolDialect.detect(at:)`.
+  /// Access only under `stateLock`.
+  private var _dialect: MLXToolDialect = .unknown
+  /// Thinking-marker pair auto-detected from the loaded model's
+  /// `tokenizer_config.json` chat template. `nil` when the model is not
+  /// loaded, the chat template is missing, or no known marker pair was
+  /// found in the template. `GenerationRuntimeHints.thinkingMarkers` always
+  /// overrides this — see the generate path below.
+  /// Access only under `stateLock`.
+  private var _autoDetectedThinkingMarkers: ThinkingMarkers?
+  /// Prompt KV-cache reuse state. Access only under `stateLock`.
+  private var _promptCacheState = MLXPromptCacheCoordinator.State()
+  /// Whether the currently loaded model/config is eligible for prompt-cache reuse.
+  /// Access only under `stateLock`.
+  private var _kvCacheReuseEligible = false
+  /// Tracks whether a real MLX model load initialized the runtime in this process.
+  /// Access only under `stateLock`.
+  private var _hasInitializedRuntime = false
+  /// Stable per-instance identity used by `MLXResourceArbiter` to track
+  /// which backend holds which slice of the process-global cache budget.
+  /// Generated once at init; never changes.
+  private let backendID: MLXResourceArbiter.BackendID = UUID()
+  /// Whether the currently loaded MLX model accepts image inputs.
+  /// Access only under `stateLock`.
+  private var _supportsVision = false
+
+  /// Manifest produced at ``loadModel(from:plan:)`` time from the model's
+  /// `config.json` and `tokenizer_config.json`. Drives ``capabilities``'s
+  /// `maxContextTokens` once populated; falls back to `8192` until then.
+  /// Access only under `stateLock`.
+  private var _manifest: ModelManifest?
+
+  /// Public accessor for the manifest captured at the most recent successful
+  /// load. Returns `nil` before any load and after ``unloadModel()``. Used by
+  /// ``ContextWindowManager`` and the conformance harness — see
+  /// `BackendCapabilitiesContractTests`.
+  public var manifest: ModelManifest? { withStateLock { _manifest } }
+
+  /// The load-time-budgeted context ceiling (`ModelLoadPlan.effectiveContextSize`),
+  /// captured at ``loadModel(from:plan:)`` (#2348).
+  ///
+  /// **This is a memory/KV-allocation budget, NOT the model's trained
+  /// context** (review finding MLX-1 — an earlier revision of this comment
+  /// conflated the two, which made the warning built on this value
+  /// misdiagnose an ordinary long chat as "exceeding the trained context"
+  /// when the real trained ceiling was ~16× further out). `effectiveContextSize`
+  /// is `min(requestedContextSize, trainedContextLength, absoluteCeiling,
+  /// memoryCeiling)` computed by core's `ModelLoadPlan` — with no session
+  /// override it is usually the conservative 8192 default, regardless of
+  /// how large the model's real trained context is. `_manifest?.contextWindow`
+  /// (from the model's own `config.json`) is the value that represents the
+  /// model's real trained maximum.
+  ///
+  /// `_configuredContextSize` feeds a secondary, explicitly budget-scoped
+  /// warning (`reportContextCheck(runningContext:)`) — a memory-headroom
+  /// signal distinct from the primary trained-context warning, worded so
+  /// the two are never conflated in a log line. It intentionally does NOT
+  /// feed a `maxKVSize` cap / `RotatingKVCache` swap — that would evict
+  /// middle conversation turns with no `ContextEstimator` awareness of the
+  /// eviction (see issue #2348's investigation comments); both warnings
+  /// built on this backend's state are visibility-only. `nil` before any
+  /// load, after ``unloadModel()``, and for injected test doubles that skip
+  /// `loadModel` (see `_inject`). Access only under `stateLock`.
+  private var _configuredContextSize: Int?
+
+  /// `true` once this session has already logged the primary
+  /// trained-context-exceeded warning (#2348) — rate-limits
+  /// `reportContextCheck(runningContext:)` to fire at most once per session
+  /// (defined, like KV-cache reuse, as "between `loadModel`/`resetConversation`/
+  /// `unloadModel`" — review finding MLX-5) rather than once per turn for
+  /// the rest of a long conversation. Reset alongside the KV cache itself
+  /// in ``unloadModel()`` and ``resetConversation()``. Access only under
+  /// `stateLock`.
+  private var _hasWarnedTrainedContextExceeded = false
+
+  /// Sibling of `_hasWarnedTrainedContextExceeded` rate-limiting the
+  /// separate budget-crossing warning (#2348, MLX-1 item 2). Independent
+  /// flag because the two ceilings are independent facts that can each
+  /// cross at a different turn.
+  private var _hasWarnedBudgetExceeded = false
+
+  /// Backend tuning knobs (KV cache quantization, prefill batch size).
+  /// Applied at every ``generate`` call's ``GenerateParameters`` construction.
+  /// Access only under `stateLock`. MLX honours `kvCacheQuantization` and
+  /// `prefillBatchSize`; `flashAttention` is silently ignored (MLX's SDPA
+  /// path is always flash-attention-shaped).
+  private var _loadOptions: BackendLoadOptions = .default
+
+  /// Test-only read-side accessor that snapshots `_loadOptions` under the
+  /// state lock. Lets plumbing tests assert the setter persisted the value
+  /// without needing a real model load.
+  @_spi(Testing) public var loadOptionsForTesting: BackendLoadOptions {
+    withStateLock { _loadOptions }
+  }
+
+  // MARK: - Load Progress
+
+  /// Guarded by `stateLock`. Set by `setLoadProgressHandler(_:)` before each load.
+  ///
+  /// `loadModelContainer(from: URL)` in `mlx-swift-lm` provides no granular progress hook
+  /// on local directory loads — the progress handler overload is only available for download
+  /// paths. We emit synthetic bookends (0.0 before, 1.0 after) so `InferenceService` can
+  /// distinguish "load started" from "load complete" rather than showing a flat 0% spinner.
+  private var _loadProgressHandler: (@Sendable (Double) async -> Void)?
+
+  // MARK: - Configuration
+
+  /// Policy controlling MLX's GPU buffer cache size. See `MLXCachePolicy`.
+  /// Defaults to `.auto`, which picks a sensible value based on device RAM.
+  public let cachePolicy: MLXCachePolicy
+  /// Prompt KV-cache reuse is on by default — within a session, consecutive turns
+  /// reuse the prior turn's KV snapshot instead of recomputing the shared prompt
+  /// prefix. Set to `false` to opt out (e.g. to isolate a suspected reuse bug).
+  /// Session switches still call `resetConversation()`/`secureWipe()`, which clear
+  /// the cache, so reuse never crosses a session boundary.
+  public let enableKVCacheReuse: Bool
+
+  // MARK: - Test seams
+
+  /// Invoked in place of `Task.yield()` at every
+  /// `yieldEveryNTokens`-th token during generation. Tests use this to count
+  /// yield occurrences deterministically without timing assertions.
+  ///
+  /// `nil` in production — the real cooperative yield runs instead.
+  @_spi(Testing) public nonisolated(unsafe) static var _yieldHookForTesting:
+    (@Sendable () async -> Void)?
+
+  /// Test-injection hook fired inside `generate()` in the window between the
+  /// state critical section (which claims the generation epoch) and the
+  /// install of `_generationTask` — the window in which a concurrent
+  /// `stopGeneration()` cannot yet see the task being launched (#171).
+  ///
+  /// That race is sub-microsecond and cannot be hit reliably by racing real
+  /// threads, so the guard protecting it would otherwise be untestable and
+  /// could regress silently. Mirrors `_yieldHookForTesting`, which exists for
+  /// the same reason: make a timing-dependent window addressable without
+  /// timing assertions.
+  ///
+  /// Lock-guarded rather than a bare `nonisolated(unsafe) static var` for the
+  /// reason MLX-3 gives above: this is read on the live generation path and
+  /// written by test setup/teardown. `_yieldHookForTesting` is the unlocked
+  /// shape only because it predates that finding — it is not the precedent to
+  /// copy. The exposure is not hypothetical here: this is `@_spi(Testing)`, so
+  /// other packages' test targets can install it, and they are not bound by
+  /// this repo's no-`--parallel` rule.
+  ///
+  /// `nil` in production, where this costs one lock-guarded read per
+  /// `generate()` — against a path that already takes `stateLock`, parses a
+  /// grammar, and spawns a Task.
+  private static let _preTaskInstallHook =
+    OSAllocatedUnfairLock<(@Sendable () -> Void)?>(initialState: nil)
+
+  /// Installs (or clears, with `nil`) the launch-window test hook race-free.
+  @_spi(Testing) public static func setPreTaskInstallHookForTesting(_ hook: (@Sendable () -> Void)?)
+  {
+    _preTaskInstallHook.withLock { $0 = hook }
+  }
+
+  /// Test-injection hook for the primary trained-context-exceeded warning
+  /// (#2348) — invoked with `(runningContext, trainedContextMax)` the first
+  /// time `reportContextCheck(runningContext:)` newly crosses
+  /// `_manifest?.contextWindow` in a session. Lock-guarded (mirrors
+  /// `CloudImageEncoding._encodeHook`) rather than a bare
+  /// `nonisolated(unsafe) static var` — review finding MLX-3: an unlocked
+  /// static var read on the live generation path and written by test
+  /// setup/teardown is a real cross-thread race under `swift test --parallel`,
+  /// not just a style nit (core AGENTS.md Swift-6 gotcha 7). `nil` in
+  /// production.
+  private static let _trainedContextExceededHook =
+    OSAllocatedUnfairLock<(@Sendable (Int, Int) -> Void)?>(initialState: nil)
+
+  /// Installs (or clears, with `nil`) the trained-context test hook race-free.
+  @_spi(Testing) public static func setTrainedContextExceededHookForTesting(
+    _ hook: (@Sendable (Int, Int) -> Void)?
+  ) {
+    _trainedContextExceededHook.withLock { $0 = hook }
+  }
+
+  /// Sibling of `_trainedContextExceededHook` for the secondary
+  /// budget-crossing warning. Same lock-guarded shape, same rationale.
+  private static let _budgetExceededHook =
+    OSAllocatedUnfairLock<(@Sendable (Int, Int) -> Void)?>(initialState: nil)
+
+  @_spi(Testing) public static func setBudgetExceededHookForTesting(
+    _ hook: (@Sendable (Int, Int) -> Void)?
+  ) {
+    _budgetExceededHook.withLock { $0 = hook }
+  }
+
+  // MARK: - Init
+
+  public init(
+    cachePolicy: MLXCachePolicy = .auto,
+    enableKVCacheReuse: Bool = true
+  ) {
+    self.cachePolicy = cachePolicy
+    self.enableKVCacheReuse = enableKVCacheReuse
+  }
+
+  deinit {
+    // A dropped instance (VM teardown, error path, A/B model swap) must
+    // release its per-UUID claim in `MLXResourceArbiter`. The arbiter only
+    // fires `MLX.Memory.clearCache()` on the *last* release, so a leaked
+    // claim means that guarantee never fires again and Metal buffers never
+    // return to the OS. `LlamaBackend.deinit` releases its C resources the
+    // same way (`LlamaBackend.swift:170`).
+    //
+    // deinit cannot be async and must never block (CLAUDE.md: no
+    // `DispatchSemaphore.wait()` under @MainActor ownership). Mirror
+    // `LlamaBackend`'s retain/detach/release pattern: snapshot the identity
+    // + chained cleanup under the lock, then hop off-actor in a detached
+    // task that captures only locals — never `self`.
+    //
+    // Guard on `_hasInitializedRuntime`: the arbiter's last release calls
+    // `MLX.Memory.clearCache()`, which traps with "Failed to load default
+    // metallib" when no real load ever initialized the runtime (injected
+    // test doubles). `_hasInitializedRuntime` is the container-presence
+    // proxy CLAUDE.md's MLX.Memory guard rule requires. It is also false
+    // after `unloadModel()` already ran, so the guard doubles as a
+    // double-release guard for the normal teardown path.
+    let snapshot:
+      (hadRuntime: Bool, previousCleanup: Task<Void, Never>?, id: MLXResourceArbiter.BackendID) =
+        withStateLock {
+          (_hasInitializedRuntime, _cleanupTask, backendID)
+        }
+    guard snapshot.hadRuntime else { return }
+    let previousCleanup = snapshot.previousCleanup
+    let id = snapshot.id
+    Task.detached {
+      await previousCleanup?.value
+      await MLXResourceArbiter.shared.release(backendID: id)
+    }
+  }
+
+  /// Forwards to `MLXGenerationDriver.resolveThinkingMarkers(...)`.
+  ///
+  /// The canonical implementation moved into the driver as part of Phase
+  /// 2.5/β. This forwarder is retained for source-compat with
+  /// `MLXBackendHelpersTests`, which exercises marker-resolution policy
+  /// through the backend's surface.
+  @_spi(Testing) public static func resolveThinkingMarkers(
+    config: GenerationConfig,
+    hints: GenerationRuntimeHints,
+    autoDetected: ThinkingMarkers?
+  ) -> ThinkingMarkers? {
+    MLXGenerationDriver.resolveThinkingMarkers(
+      config: config,
+      hints: hints,
+      autoDetected: autoDetected
     )
+  }
 
-    // MARK: - State
+  // MARK: - Model Lifecycle
 
-    private var _isModelLoaded = false
-    private var _isGenerating = false
+  public func loadModel(from url: URL, plan: ModelLoadPlan) async throws {
+    assert(
+      plan.verdict != .deny,
+      "ModelLoadPlan was denied; callers must check verdict before invoking backend")
+    // MLX has no load-time context parameter to size (unlike llama.cpp's
+    // n_ctx) — `mlx-swift-lm`'s KV cache grows however far a session runs
+    // it. `plan.effectiveContextSize` (the load-time memory budget — see
+    // `_configuredContextSize`'s doc, NOT the model's trained maximum) is
+    // captured below and consulted post-generation alongside the real
+    // trained maximum (`_manifest?.contextWindow`) to warn loudly rather
+    // than let the session silently exceed either (#2348, `reportContextCheck`).
+    unloadModel()
 
-    /// Identity of the current generation, bumped on every `generate()` and on
-    /// every `stopGeneration()` (#171).
-    ///
-    /// `stopGeneration()` must leave `isGenerating == false` synchronously and
-    /// the backend ready for an immediate `generate()` — core's
-    /// `InferenceBackend` contract, points 2 and 3. But `Task.cancel()` is
-    /// cooperative: the cancelled generation keeps unwinding after
-    /// `stopGeneration()` returns, and its teardown ends in
-    /// `_isGenerating = false`. Without an identity check that late write lands
-    /// on whatever generation is running *by then* — clearing a live
-    /// generation's flag from a task nobody owns any more, and admitting a
-    /// third concurrent `generate()`.
-    ///
-    /// So teardown is conditional: it clears the flag only if the epoch it
-    /// captured at launch is still current. A superseded task compares unequal
-    /// and leaves the flag alone. Read and written only under `stateLock`.
-    private var _generationEpoch: UInt64 = 0
+    // Stage the bundled `mlx.metallib` next to the running binary before the
+    // first MLX GPU operation. Under a command-line `swift build` this is
+    // the only way mlx-swift's colocated metallib lookup finds a library;
+    // without it `loadContainer` aborts at GPU init with "Failed to load the
+    // default metallib" (issue #82). No-op under Xcode builds / when no
+    // bundled metallib exists.
+    MLXMetallibStaging.ensureStaged()
 
-    public private(set) var isModelLoaded: Bool {
-        get { withStateLock { _isModelLoaded } }
-        set { withStateLock { _isModelLoaded = newValue } }
+    // Preflight: refuse non-LM architectures up front so a CLIP/SigLIP/Whisper
+    // snapshot can't crash MLX mid-generation or silently produce garbage tokens.
+    // We read config.json directly rather than letting mlx-swift-lm attempt the
+    // load and fail — mlx-swift-lm's own error message ("unsupportedModelType")
+    // surfaces through `modelLoadFailed(underlying:)` and hides the root cause
+    // from the UI. Throwing `.unsupportedModelArchitecture` here makes the reason
+    // explicit and lets `ChatError` map it to `.selectModel`.
+    try MLXModelProbe.validateArchitecture(at: url)
+
+    // Refuse architectures that load fine but crash on the first generation
+    // tick in mlx-swift-lm — a tensor is broadcast against the prompt length,
+    // raising an uncatchable C++ abort + Swift fatal that takes down the
+    // whole process. Covers Gemma 4 (sliding-window/KV-shared cache, upstream
+    // #282/#802), which has no released fix. Throwing here turns a
+    // process-killing mid-generation crash into a catchable load error.
+    if let reason = MLXModelProbe.unsupportedGenerationReason(at: url) {
+      throw InferenceError.modelLoadFailed(
+        underlying: NSError(
+          domain: "ManifoldMLX",
+          code: 1,
+          userInfo: [NSLocalizedDescriptionKey: reason]
+        ))
     }
 
-    public private(set) var isGenerating: Bool {
-        get { withStateLock { _isGenerating } }
-        set { withStateLock { _isGenerating = newValue } }
-    }
+    let progressHandler = withStateLock { _loadProgressHandler }
 
-    // MARK: - Locking
+    // Signal "load started". The `mlx-swift-lm` local-directory API has no granular
+    // progress hook, so we emit a 0.0 bookend here and a 1.0 bookend after the load
+    // completes. This gives InferenceService enough signal to animate a progress
+    // indicator rather than showing a flat 0% spinner for the full load duration.
+    await progressHandler?(0.0)
 
-    private let stateLock = NSLock()
-
-    @discardableResult
-    private func withStateLock<T>(_ body: () throws -> T) rethrows -> T {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return try body()
-    }
-
-    /// Fallback `maxContextTokens` for `capabilities` whenever no *measured*
-    /// context window is available. Two distinct cases reach this, both
-    /// deliberately: (1) before the first `loadModel(from:plan:)` completes,
-    /// or for injected test doubles that bypass it entirely — `_manifest` is
-    /// `nil`; and (2) **after a real, successful load** whose `config.json`
-    /// carried none of the recognised context-length keys —
-    /// `MLXModelProbe.produceManifest` now leaves `contextWindow` `nil`
-    /// rather than fabricating a number (core PR #2404), and that `nil`
-    /// flows straight through here. Case 2 is the one worth naming plainly:
-    /// this constant is exactly the kind of guess `#2404` asks each consumer
-    /// to own explicitly rather than let the manifest itself assert as fact,
-    /// but the guess still lands in `capabilities.maxContextTokens` — which
-    /// core's `PromptAssembler` trims prompts against — so a genuinely
-    /// oversized model with an unrecognised `config.json` shape is still
-    /// budgeted at 8k here, same as before this PR, just now an auditable,
-    /// named choice instead of a silent one buried in the manifest.
-    /// `maxContextTokens` is a non-optional `Int32`, so this call site must
-    /// name *something*; mirrors `OpenAIBackend.unknownModelContextWindow`.
-    /// Conservative on purpose: an undersized budget only wastes headroom,
-    /// an oversized one risks overflowing a small local model's real trained
-    /// context.
-    static let unknownModelContextWindow: Int32 = 8192
-
-    // MARK: - Capabilities
-
-    public var capabilities: BackendCapabilities {
-        withStateLock {
-            // The manifest is populated at loadModel-time from config.json's
-            // `max_position_embeddings`. Falls back to
-            // ``unknownModelContextWindow`` both before any load completes
-            // AND when a completed load's manifest has `contextWindow == nil`
-            // (config.json had no recognised key) — see that constant's doc
-            // for why the latter case still matters post-#2404.
-            let ctxTokens = _manifest?.contextWindow.map(Int32.init) ?? Self.unknownModelContextWindow
-            // M5 + macOS 26.2: MLX activates Neural Accelerator dispatch automatically (~3-4x TTFT).
-            // Query NeuralAcceleratorProbe.availability in ManifoldHardware for informational UI only.
-            return BackendCapabilities(
-                supportedParameters: [
-                    .temperature, .topP, .topK, .repeatPenalty,
-                    .minP, .repetitionPenalty, .presencePenalty, .frequencyPenalty,
-                ],
-                maxContextTokens: ctxTokens,
-                requiresPromptTemplate: false,
-                supportsSystemPrompt: true,
-                // Tool calling is honoured only when the loaded model speaks a
-                // recognised tool dialect. `.unknown` (e.g. Gemma — no tool
-                // template, no wire format) correctly reports `false` rather
-                // than over-claiming a capability the generate path no-ops
-                // (the tool stage is gated on `dialect != .unknown` in
-                // `MLXGenerationDriver.run`). Phase 0 / umbrella #2005.
-                supportsToolCalling: _dialect != .unknown,
-                supportsStructuredOutput: false,
-                supportsNativeJSONMode: false,
-                cancellationStyle: .cooperative,
-                supportsTokenCounting: true,
-                memoryStrategy: .resident,
-                maxOutputTokens: 4096,
-                supportsStreaming: true,
-                isRemote: false,
-                // Per-model once a model is loaded; configuration intent before
-                // that (#154).
-                //
-                // Post-load this reports `_kvCacheReuseEligible`
-                // (`enableKVCacheReuse && !routeThroughVLMFactory`) — the same
-                // value the generate path actually gates reuse on. A VLM/MoE
-                // model routed through `VLMModelFactory` full-prefills every
-                // turn, and now says so rather than inheriting the constructor
-                // flag's `true`.
-                //
-                // Pre-load there is no model to be eligible *for*, so this
-                // reports the configured flag: a bare `MLXBackend()` advertises
-                // what it is configured to do, which is the surface the
-                // conformance meta-contract pins
-                // (`MLXBackendConformanceTests` asserts on
-                // `MLXBackend().capabilities`). Reporting `false` pre-load
-                // would instead assert "this backend cannot persist KV" —
-                // untrue of a default-configured backend that simply has not
-                // loaded yet.
-                //
-                // The loaded-ness predicate is `_modelContainer`, NOT
-                // `_isModelLoaded`. Both mean "a model is loaded", but only
-                // `_modelContainer` is written in the *same* `withStateLock`
-                // block as `_kvCacheReuseEligible` (in `loadModel` and in
-                // `_inject`) and cleared alongside it in `unloadModel`.
-                // `isModelLoaded` is a separate lock acquisition at the tail of
-                // `loadModel`, two awaits later (cleanup barrier + arbiter
-                // claim); keying off it would leave a window where eligibility
-                // is already known to be `false` for a VLM/MoE model while this
-                // still reported the configured `true` — the exact over-claim
-                // #154 is about, just narrowed rather than removed. Every
-                // neighbouring model-derived field (`supportsVision`,
-                // `_dialect`, `_manifest`) flips in that same block, so this
-                // keeps the struct internally consistent.
-                //
-                // NOTE for anyone adding a `_modelContainer` writer: this class
-                // now carries two distinct loaded-ness predicates, and they are
-                // not interchangeable.
-                //   • `_modelContainer != nil` — model state is installed.
-                //     The superset; what capability reporting keys off.
-                //   • `_isModelLoaded` — the load is *committed* (arbiter claim
-                //     settled) and generation is permitted. `generate`'s guard.
-                // No test can currently tell them apart: the tests that reach
-                // the loaded state through `_inject` set both in one block, and
-                // the tests that call the real `loadModel` await it to
-                // completion — by which point both are `true` and agree.
-                // Distinguishing them needs an observer that reads
-                // `capabilities` *inside* the load tail, i.e. a real multi-GB
-                // load plus a mid-`await` hook.
-                //
-                // A change here therefore fails silently: assigning
-                // `_modelContainer` outside a block that also sets
-                // `_kvCacheReuseEligible` moves capability reporting with it
-                // and the suite stays green.
-                supportsKVCachePersistence: _modelContainer != nil ? _kvCacheReuseEligible : enableKVCacheReuse,
-                supportsGrammarConstrainedSampling: true,
-                supportsThinking: true,
-                supportsVision: _supportsVision,
-                sharesMLXProcessResources: true,
-                rendersFullPrompt: true,
-                toolDialect: _dialect.coreDialect
-            )
-        }
-    }
-
-    // MARK: - Private
-
-    /// Access only under `stateLock`.
-    private var _modelContainer: (any MLXModelContainerProtocol)?
-    /// Access only under `stateLock`.
-    private var _generationTask: Task<Void, Never>?
-    /// Chained arbiter-teardown task. Each `unloadModel`/`secureWipe` appends
-    /// its `release`/`clearAll` to this chain (`await previousCleanup?.value`)
-    /// so teardown is serialized, and `loadModel` awaits it before issuing a
-    /// new `claim`. Without this barrier the actor could process a fresh
-    /// `claim` *before* the prior `release` for the same `backendID`,
-    /// silently dropping the new claim (the actor runs in scheduling order,
-    /// not call order). Mirrors `LlamaBackend.cleanupTask`. Access only under
-    /// `stateLock`.
-    private var _cleanupTask: Task<Void, Never>?
-    /// The tool-call dialect detected for the currently loaded model.
-    /// Set by `loadModel(from:plan:)` via `MLXToolDialect.detect(at:)`.
-    /// Access only under `stateLock`.
-    private var _dialect: MLXToolDialect = .unknown
-    /// Thinking-marker pair auto-detected from the loaded model's
-    /// `tokenizer_config.json` chat template. `nil` when the model is not
-    /// loaded, the chat template is missing, or no known marker pair was
-    /// found in the template. `GenerationRuntimeHints.thinkingMarkers` always
-    /// overrides this — see the generate path below.
-    /// Access only under `stateLock`.
-    private var _autoDetectedThinkingMarkers: ThinkingMarkers?
-    /// Prompt KV-cache reuse state. Access only under `stateLock`.
-    private var _promptCacheState = MLXPromptCacheCoordinator.State()
-    /// Whether the currently loaded model/config is eligible for prompt-cache reuse.
-    /// Access only under `stateLock`.
-    private var _kvCacheReuseEligible = false
-    /// Tracks whether a real MLX model load initialized the runtime in this process.
-    /// Access only under `stateLock`.
-    private var _hasInitializedRuntime = false
-    /// Stable per-instance identity used by `MLXResourceArbiter` to track
-    /// which backend holds which slice of the process-global cache budget.
-    /// Generated once at init; never changes.
-    private let backendID: MLXResourceArbiter.BackendID = UUID()
-    /// Whether the currently loaded MLX model accepts image inputs.
-    /// Access only under `stateLock`.
-    private var _supportsVision = false
-
-    /// Manifest produced at ``loadModel(from:plan:)`` time from the model's
-    /// `config.json` and `tokenizer_config.json`. Drives ``capabilities``'s
-    /// `maxContextTokens` once populated; falls back to `8192` until then.
-    /// Access only under `stateLock`.
-    private var _manifest: ModelManifest?
-
-    /// Public accessor for the manifest captured at the most recent successful
-    /// load. Returns `nil` before any load and after ``unloadModel()``. Used by
-    /// ``ContextWindowManager`` and the conformance harness — see
-    /// `BackendCapabilitiesContractTests`.
-    public var manifest: ModelManifest? { withStateLock { _manifest } }
-
-    /// The load-time-budgeted context ceiling (`ModelLoadPlan.effectiveContextSize`),
-    /// captured at ``loadModel(from:plan:)`` (#2348).
-    ///
-    /// **This is a memory/KV-allocation budget, NOT the model's trained
-    /// context** (review finding MLX-1 — an earlier revision of this comment
-    /// conflated the two, which made the warning built on this value
-    /// misdiagnose an ordinary long chat as "exceeding the trained context"
-    /// when the real trained ceiling was ~16× further out). `effectiveContextSize`
-    /// is `min(requestedContextSize, trainedContextLength, absoluteCeiling,
-    /// memoryCeiling)` computed by core's `ModelLoadPlan` — with no session
-    /// override it is usually the conservative 8192 default, regardless of
-    /// how large the model's real trained context is. `_manifest?.contextWindow`
-    /// (from the model's own `config.json`) is the value that represents the
-    /// model's real trained maximum.
-    ///
-    /// `_configuredContextSize` feeds a secondary, explicitly budget-scoped
-    /// warning (`reportContextCheck(runningContext:)`) — a memory-headroom
-    /// signal distinct from the primary trained-context warning, worded so
-    /// the two are never conflated in a log line. It intentionally does NOT
-    /// feed a `maxKVSize` cap / `RotatingKVCache` swap — that would evict
-    /// middle conversation turns with no `ContextEstimator` awareness of the
-    /// eviction (see issue #2348's investigation comments); both warnings
-    /// built on this backend's state are visibility-only. `nil` before any
-    /// load, after ``unloadModel()``, and for injected test doubles that skip
-    /// `loadModel` (see `_inject`). Access only under `stateLock`.
-    private var _configuredContextSize: Int?
-
-    /// `true` once this session has already logged the primary
-    /// trained-context-exceeded warning (#2348) — rate-limits
-    /// `reportContextCheck(runningContext:)` to fire at most once per session
-    /// (defined, like KV-cache reuse, as "between `loadModel`/`resetConversation`/
-    /// `unloadModel`" — review finding MLX-5) rather than once per turn for
-    /// the rest of a long conversation. Reset alongside the KV cache itself
-    /// in ``unloadModel()`` and ``resetConversation()``. Access only under
-    /// `stateLock`.
-    private var _hasWarnedTrainedContextExceeded = false
-
-    /// Sibling of `_hasWarnedTrainedContextExceeded` rate-limiting the
-    /// separate budget-crossing warning (#2348, MLX-1 item 2). Independent
-    /// flag because the two ceilings are independent facts that can each
-    /// cross at a different turn.
-    private var _hasWarnedBudgetExceeded = false
-
-    /// Backend tuning knobs (KV cache quantization, prefill batch size).
-    /// Applied at every ``generate`` call's ``GenerateParameters`` construction.
-    /// Access only under `stateLock`. MLX honours `kvCacheQuantization` and
-    /// `prefillBatchSize`; `flashAttention` is silently ignored (MLX's SDPA
-    /// path is always flash-attention-shaped).
-    private var _loadOptions: BackendLoadOptions = .default
-
-    /// Test-only read-side accessor that snapshots `_loadOptions` under the
-    /// state lock. Lets plumbing tests assert the setter persisted the value
-    /// without needing a real model load.
-    @_spi(Testing) public var loadOptionsForTesting: BackendLoadOptions { withStateLock { _loadOptions } }
-
-    // MARK: - Load Progress
-
-    /// Guarded by `stateLock`. Set by `setLoadProgressHandler(_:)` before each load.
-    ///
-    /// `loadModelContainer(from: URL)` in `mlx-swift-lm` provides no granular progress hook
-    /// on local directory loads — the progress handler overload is only available for download
-    /// paths. We emit synthetic bookends (0.0 before, 1.0 after) so `InferenceService` can
-    /// distinguish "load started" from "load complete" rather than showing a flat 0% spinner.
-    private var _loadProgressHandler: (@Sendable (Double) async -> Void)?
-
-    // MARK: - Configuration
-
-    /// Policy controlling MLX's GPU buffer cache size. See `MLXCachePolicy`.
-    /// Defaults to `.auto`, which picks a sensible value based on device RAM.
-    public let cachePolicy: MLXCachePolicy
-    /// Prompt KV-cache reuse is on by default — within a session, consecutive turns
-    /// reuse the prior turn's KV snapshot instead of recomputing the shared prompt
-    /// prefix. Set to `false` to opt out (e.g. to isolate a suspected reuse bug).
-    /// Session switches still call `resetConversation()`/`secureWipe()`, which clear
-    /// the cache, so reuse never crosses a session boundary.
-    public let enableKVCacheReuse: Bool
-
-    // MARK: - Test seams
-
-    /// Invoked in place of `Task.yield()` at every
-    /// `yieldEveryNTokens`-th token during generation. Tests use this to count
-    /// yield occurrences deterministically without timing assertions.
-    ///
-    /// `nil` in production — the real cooperative yield runs instead.
-    @_spi(Testing) public nonisolated(unsafe) static var _yieldHookForTesting: (@Sendable () async -> Void)?
-
-    /// Test-injection hook fired inside `generate()` in the window between the
-    /// state critical section (which claims the generation epoch) and the
-    /// install of `_generationTask` — the window in which a concurrent
-    /// `stopGeneration()` cannot yet see the task being launched (#171).
-    ///
-    /// That race is sub-microsecond and cannot be hit reliably by racing real
-    /// threads, so the guard protecting it would otherwise be untestable and
-    /// could regress silently. Mirrors `_yieldHookForTesting`, which exists for
-    /// the same reason: make a timing-dependent window addressable without
-    /// timing assertions.
-    ///
-    /// Lock-guarded rather than a bare `nonisolated(unsafe) static var` for the
-    /// reason MLX-3 gives above: this is read on the live generation path and
-    /// written by test setup/teardown. `_yieldHookForTesting` is the unlocked
-    /// shape only because it predates that finding — it is not the precedent to
-    /// copy. The exposure is not hypothetical here: this is `@_spi(Testing)`, so
-    /// other packages' test targets can install it, and they are not bound by
-    /// this repo's no-`--parallel` rule.
-    ///
-    /// `nil` in production, where this costs one lock-guarded read per
-    /// `generate()` — against a path that already takes `stateLock`, parses a
-    /// grammar, and spawns a Task.
-    private static let _preTaskInstallHook =
-        OSAllocatedUnfairLock<(@Sendable () -> Void)?>(initialState: nil)
-
-    /// Installs (or clears, with `nil`) the launch-window test hook race-free.
-    @_spi(Testing) public static func setPreTaskInstallHookForTesting(_ hook: (@Sendable () -> Void)?) {
-        _preTaskInstallHook.withLock { $0 = hook }
-    }
-
-    /// Test-injection hook for the primary trained-context-exceeded warning
-    /// (#2348) — invoked with `(runningContext, trainedContextMax)` the first
-    /// time `reportContextCheck(runningContext:)` newly crosses
-    /// `_manifest?.contextWindow` in a session. Lock-guarded (mirrors
-    /// `CloudImageEncoding._encodeHook`) rather than a bare
-    /// `nonisolated(unsafe) static var` — review finding MLX-3: an unlocked
-    /// static var read on the live generation path and written by test
-    /// setup/teardown is a real cross-thread race under `swift test --parallel`,
-    /// not just a style nit (core AGENTS.md Swift-6 gotcha 7). `nil` in
-    /// production.
-    private static let _trainedContextExceededHook =
-        OSAllocatedUnfairLock<(@Sendable (Int, Int) -> Void)?>(initialState: nil)
-
-    /// Installs (or clears, with `nil`) the trained-context test hook race-free.
-    @_spi(Testing) public static func setTrainedContextExceededHookForTesting(_ hook: (@Sendable (Int, Int) -> Void)?) {
-        _trainedContextExceededHook.withLock { $0 = hook }
-    }
-
-    /// Sibling of `_trainedContextExceededHook` for the secondary
-    /// budget-crossing warning. Same lock-guarded shape, same rationale.
-    private static let _budgetExceededHook =
-        OSAllocatedUnfairLock<(@Sendable (Int, Int) -> Void)?>(initialState: nil)
-
-    @_spi(Testing) public static func setBudgetExceededHookForTesting(_ hook: (@Sendable (Int, Int) -> Void)?) {
-        _budgetExceededHook.withLock { $0 = hook }
-    }
-
-    // MARK: - Init
-
-    public init(
-        cachePolicy: MLXCachePolicy = .auto,
-        enableKVCacheReuse: Bool = true
-    ) {
-        self.cachePolicy = cachePolicy
-        self.enableKVCacheReuse = enableKVCacheReuse
-    }
-
-    deinit {
-        // A dropped instance (VM teardown, error path, A/B model swap) must
-        // release its per-UUID claim in `MLXResourceArbiter`. The arbiter only
-        // fires `MLX.Memory.clearCache()` on the *last* release, so a leaked
-        // claim means that guarantee never fires again and Metal buffers never
-        // return to the OS. `LlamaBackend.deinit` releases its C resources the
-        // same way (`LlamaBackend.swift:170`).
-        //
-        // deinit cannot be async and must never block (CLAUDE.md: no
-        // `DispatchSemaphore.wait()` under @MainActor ownership). Mirror
-        // `LlamaBackend`'s retain/detach/release pattern: snapshot the identity
-        // + chained cleanup under the lock, then hop off-actor in a detached
-        // task that captures only locals — never `self`.
-        //
-        // Guard on `_hasInitializedRuntime`: the arbiter's last release calls
-        // `MLX.Memory.clearCache()`, which traps with "Failed to load default
-        // metallib" when no real load ever initialized the runtime (injected
-        // test doubles). `_hasInitializedRuntime` is the container-presence
-        // proxy CLAUDE.md's MLX.Memory guard rule requires. It is also false
-        // after `unloadModel()` already ran, so the guard doubles as a
-        // double-release guard for the normal teardown path.
-        let snapshot: (hadRuntime: Bool, previousCleanup: Task<Void, Never>?, id: MLXResourceArbiter.BackendID) = withStateLock {
-            (_hasInitializedRuntime, _cleanupTask, backendID)
-        }
-        guard snapshot.hadRuntime else { return }
-        let previousCleanup = snapshot.previousCleanup
-        let id = snapshot.id
-        Task.detached {
-            await previousCleanup?.value
-            await MLXResourceArbiter.shared.release(backendID: id)
-        }
-    }
-
-    /// Forwards to `MLXGenerationDriver.resolveThinkingMarkers(...)`.
-    ///
-    /// The canonical implementation moved into the driver as part of Phase
-    /// 2.5/β. This forwarder is retained for source-compat with
-    /// `MLXBackendHelpersTests`, which exercises marker-resolution policy
-    /// through the backend's surface.
-    @_spi(Testing) public static func resolveThinkingMarkers(
-        config: GenerationConfig,
-        hints: GenerationRuntimeHints,
-        autoDetected: ThinkingMarkers?
-    ) -> ThinkingMarkers? {
-        MLXGenerationDriver.resolveThinkingMarkers(
-            config: config,
-            hints: hints,
-            autoDetected: autoDetected
+    do {
+      // Probe once; both the vision flag and the factory-routing decision
+      // consume the same result so config.json is read only once here.
+      let probedCapabilities: ModelCapabilities?
+      do {
+        probedCapabilities = try ModelCapabilityProbe.probe(modelDirectory: url)
+      } catch {
+        Log.inference.info(
+          "MLX capability probe failed for \(url.lastPathComponent, privacy: .public); continuing with conservative vision defaults (\(error.localizedDescription, privacy: .public))"
         )
+        probedCapabilities = nil
+      }
+      let supportsVision = BackendVisionCapability.mlxSupportsImageInput(
+        probedCapabilities: probedCapabilities)
+      let routeThroughVLMFactory = MLXModelProbe.requiresVLMFactory(
+        at: url, precomputedCapabilities: probedCapabilities)
+      // Load from a local directory containing config.json + .safetensors.
+      // We dispatch directly to either `LLMModelFactory.shared` or
+      // `VLMModelFactory.shared` rather than calling the registry-iterating
+      // free function `loadModelContainer(from:using:)`. Reason: the MoE
+      // Gemma 4 decoder lives only on the VLM side in mlx-swift-lm 3.31.3
+      // (`Libraries/MLXVLM/Models/Gemma4.swift`), so the registry walk
+      // would otherwise hand the 26B `gemma4` model to the dense
+      // `Gemma4Text.swift` LLM path and fail with "Unhandled keys
+      // [experts, router, …]". See issue #752. Dense Gemma 4 variants
+      // stay on the LLM factory unless the model also declares
+      // `vision_config` or `text_config.enable_moe_block`.
+      //
+      // `TransformersTokenizerLoader` (hand-expanded from MLXHuggingFace's
+      // `#huggingFaceTokenizerLoader()` macro) adapts swift-transformers'
+      // `AutoTokenizer` to the `TokenizerLoader` protocol both factories
+      // accept — inlined to keep swift-syntax out of default builds.
+      let container: ModelContainer
+      if routeThroughVLMFactory {
+        Self.logger.info("MLX routing via VLMModelFactory (MoE / VLM-only architecture)")
+        container = try await VLMModelFactory.shared.loadContainer(
+          from: url,
+          using: TransformersTokenizerLoader()
+        )
+      } else {
+        container = try await LLMModelFactory.shared.loadContainer(
+          from: url,
+          using: TransformersTokenizerLoader()
+        )
+      }
+      let detectedDialect = MLXToolDialect.detect(at: url)
+      let detectedThinkingMarkers = MLXModelProbe.detectThinkingMarkers(at: url)
+      let producedManifest = MLXModelProbe.produceManifest(
+        at: url,
+        detectedThinkingMarkers: detectedThinkingMarkers,
+        supportsVision: supportsVision
+      )
+      let kvCacheReuseEligible = enableKVCacheReuse && !routeThroughVLMFactory
+      withStateLock {
+        _modelContainer = container
+        _dialect = detectedDialect
+        _autoDetectedThinkingMarkers = detectedThinkingMarkers
+        _supportsVision = supportsVision
+        _manifest = producedManifest
+        _configuredContextSize = plan.effectiveContextSize
+        _promptCacheState.invalidate()
+        _kvCacheReuseEligible = kvCacheReuseEligible
+        _hasInitializedRuntime = true
+      }
+      // Apply the cache policy after loadModelContainer succeeds. Doing
+      // this *after* the load (rather than before) keeps it inside the
+      // implicit "MLX runtime is initialized" window — touching MLX's
+      // Memory namespace before the runtime is up trips a metallib
+      // load error in environments without Xcode-compiled shaders
+      // (e.g. `swift test`). The cost is that the load itself runs
+      // under whatever cacheLimit was previously in effect — usually
+      // mlx-swift's own default on a fresh process, which is fine.
+      //
+      // The cache is process-global; route through `MLXResourceArbiter`
+      // so multi-backend hosts (chat + embeddings, A/B comparisons)
+      // accumulate per-instance claims rather than overwriting each
+      // other's `cacheLimit`.
+      let cacheBytes = cachePolicy.resolvedBytes()
+      // Barrier: the `unloadModel()` issued at the top of this method
+      // spawned a chained teardown task that calls `release`/`clearAll`
+      // on the arbiter. Await it before claiming so a stale release from
+      // the prior lineage cannot land *after* this fresh claim and drop
+      // it (the arbiter is an actor; it runs enqueued ops in scheduling
+      // order, not call order). See `_cleanupTask`.
+      await pendingCleanupTask()?.value
+      await MLXResourceArbiter.shared.claim(
+        backendID: backendID,
+        requestedCacheBytes: cacheBytes
+      )
+      Self.logger.info(
+        "MLX cache claim registered: \(cacheBytes / (1024 * 1024)) MB (policy: \(String(describing: self.cachePolicy)))"
+      )
+      isModelLoaded = true
+      // Signal load complete before returning so InferenceService sees 1.0
+      // before it clears the handler and flips isModelLoaded.
+      await progressHandler?(1.0)
+      Self.logger.info("MLX backend loaded model from \(url.lastPathComponent)")
+    } catch {
+      Self.logger.error("MLX model load failed: \(error)")
+      throw InferenceError.modelLoadFailed(underlying: error)
+    }
+  }
+
+  // MARK: - Generation
+
+  /// Generates a token stream from the loaded MLX model.
+  ///
+  /// - Important: Generation is dispatched to `@MainActor` because `ModelContainer.generate()`
+  ///   in `mlx-swift-lm` must be called on the main thread (the MLX GPU scheduler is not
+  ///   thread-safe). This means long responses will occupy the main event loop. The effect
+  ///   is mitigated by the relatively short context windows used for on-device inference.
+  ///   If a future version of `mlx-swift-lm` supports a background-thread generate API,
+  ///   remove the `@MainActor` annotation from the inner `Task`.
+  public func generate(
+    prompt: String,
+    systemPrompt: String?,
+    config: GenerationConfig,
+    hints: GenerationRuntimeHints
+  ) throws -> GenerationStream {
+    // Single critical section: validate, flip `_isGenerating`, and
+    // snapshot every input the driver needs. The driver runs without
+    // touching backend state — so once we leave the lock, the driver call
+    // is decoupled from `setLoadOptions` racing in. Conversation history is
+    // no longer instance state — it rides `hints.history` per call (#2312).
+    // Parse the GBNF grammar up front — before the no-model and
+    // already-generating checks — so a grammar using a construct this
+    // executor does not support yields a precise `unsupportedGrammar`
+    // diagnostic rather than silently unconstrained output (issue #96
+    // decision). A nil grammar leaves `parsedGrammar` nil and the normal
+    // unconstrained path runs.
+    let parsedGrammar: GBNFGrammar?
+    if let gbnf = config.grammar {
+      do {
+        parsedGrammar = try GBNFGrammar(parsing: gbnf)
+      } catch {
+        throw InferenceError.unsupportedGrammar(
+          reason: "MLXBackend could not compile the GBNF grammar: \(error)"
+        )
+      }
+    } else {
+      parsedGrammar = nil
     }
 
-    // MARK: - Model Lifecycle
+    // Conversation history arrives per-call on `hints.history` (ManifoldKit
+    // #2312) — never from shared instance state. Derive the three shapes the
+    // driver consumes from that single structured value: the tool-aware wire
+    // history only when the turn actually carries tool parts (so a tools-free
+    // request never renders stale tool turns), and the structured history
+    // whenever any prior turn exists (carrying image parts for VLM turns).
+    let historyMessages = hints.history
+    let derivedConversationHistory = historyMessages.flattenedHistory
+    let derivedToolAwareHistory =
+      historyMessages.containsToolParts ? historyMessages.toolAwareHistory : nil
+    let derivedStructuredHistory = historyMessages.isEmpty ? nil : historyMessages
 
-    public func loadModel(from url: URL, plan: ModelLoadPlan) async throws {
-        assert(plan.verdict != .deny,
-               "ModelLoadPlan was denied; callers must check verdict before invoking backend")
-        // MLX has no load-time context parameter to size (unlike llama.cpp's
-        // n_ctx) — `mlx-swift-lm`'s KV cache grows however far a session runs
-        // it. `plan.effectiveContextSize` (the load-time memory budget — see
-        // `_configuredContextSize`'s doc, NOT the model's trained maximum) is
-        // captured below and consulted post-generation alongside the real
-        // trained maximum (`_manifest?.contextWindow`) to warn loudly rather
-        // than let the session silently exceed either (#2348, `reportContextCheck`).
-        unloadModel()
+    /// This call's generation identity, claimed under `stateLock` below and
+    /// captured by the generation task so both its install and its teardown
+    /// can tell whether it is still the current generation (#171).
+    /// Immutable by construction — it must not be reassignable once the
+    /// escaping task closure has captured it.
+    let generationEpoch: UInt64
+    let snapshot: GenerationCallSnapshot
+    (snapshot, generationEpoch) = try withStateLock {
+      guard _isModelLoaded, let container = _modelContainer else {
+        throw InferenceError.inferenceFailure("No model loaded")
+      }
+      guard !_isGenerating else {
+        throw InferenceError.alreadyGenerating
+      }
+      _isGenerating = true
+      // Claim a fresh generation identity; the task launched below
+      // captures it, and both installs and tears itself down only while
+      // it is still the current generation (#171).
+      _generationEpoch &+= 1
+      let claimedEpoch = _generationEpoch
+      let snapshot = GenerationCallSnapshot(
+        container: container,
+        loadOptions: _loadOptions,
+        conversationHistory: derivedConversationHistory,
+        toolAwareHistory: derivedToolAwareHistory,
+        structuredHistory: derivedStructuredHistory,
+        dialect: _dialect,
+        autoDetectedMarkers: _autoDetectedThinkingMarkers,
+        kvCacheReuseEligible: _kvCacheReuseEligible,
+        pendingSnapshotTask: _promptCacheState.pendingSnapshotTask,
+        grammar: Self.wrapToolCallGrammarIfNeeded(
+          parsedGrammar, dialect: _dialect, tools: config.tools,
+          toolChoice: config.toolChoice
+        ),
+        hints: hints
+      )
+      return (snapshot, claimedEpoch)
+    }
+    Self.logger.debug("MLX generate started")
 
-        // Stage the bundled `mlx.metallib` next to the running binary before the
-        // first MLX GPU operation. Under a command-line `swift build` this is
-        // the only way mlx-swift's colocated metallib lookup finds a library;
-        // without it `loadContainer` aborts at GPU init with "Failed to load the
-        // default metallib" (issue #82). No-op under Xcode builds / when no
-        // bundled metallib exists.
-        MLXMetallibStaging.ensureStaged()
+    let (stream, continuation) = AsyncThrowingStream.makeStream(of: GenerationEvent.self)
+    let generationStream = GenerationStream(stream)
 
-        // Preflight: refuse non-LM architectures up front so a CLIP/SigLIP/Whisper
-        // snapshot can't crash MLX mid-generation or silently produce garbage tokens.
-        // We read config.json directly rather than letting mlx-swift-lm attempt the
-        // load and fail — mlx-swift-lm's own error message ("unsupportedModelType")
-        // surfaces through `modelLoadFailed(underlying:)` and hides the root cause
-        // from the UI. Throwing `.unsupportedModelArchitecture` here makes the reason
-        // explicit and lets `ChatError` map it to `.selectModel`.
-        try MLXModelProbe.validateArchitecture(at: url)
+    let task = Task { @MainActor [weak self, generationStream] in
+      defer {
+        Self.logger.debug("MLX generate finished")
+      }
 
-        // Refuse architectures that load fine but crash on the first generation
-        // tick in mlx-swift-lm — a tensor is broadcast against the prompt length,
-        // raising an uncatchable C++ abort + Swift fatal that takes down the
-        // whole process. Covers Gemma 4 (sliding-window/KV-shared cache, upstream
-        // #282/#802), which has no released fix. Throwing here turns a
-        // process-killing mid-generation crash into a catchable load error.
-        if let reason = MLXModelProbe.unsupportedGenerationReason(at: url) {
-            throw InferenceError.modelLoadFailed(underlying: NSError(
-                domain: "ManifoldMLX",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: reason]
-            ))
+      do {
+        let driver = MLXGenerationDriver()
+        let result = try await driver.generate(
+          prompt: prompt,
+          systemPrompt: systemPrompt,
+          config: config,
+          loadOptions: snapshot.loadOptions,
+          container: snapshot.container,
+          conversationHistory: snapshot.conversationHistory,
+          toolAwareHistory: snapshot.toolAwareHistory,
+          structuredHistory: snapshot.structuredHistory,
+          dialect: snapshot.dialect,
+          autoDetectedMarkers: snapshot.autoDetectedMarkers,
+          kvCacheReuseEligible: snapshot.kvCacheReuseEligible,
+          pendingSnapshotTask: snapshot.pendingSnapshotTask,
+          // Closure re-reads the snapshot AFTER the driver awaits
+          // `pendingSnapshotTask`, so we see the value the prior turn's
+          // snapshot task wrote rather than the nil we'd have captured here.
+          currentSnapshot: { [weak self] in
+            self?.withStateLock { self?._promptCacheState.snapshot } ?? nil
+          },
+          grammar: snapshot.grammar,
+          hints: snapshot.hints,
+          generationStream: generationStream,
+          continuation: continuation,
+          yieldHook: MLXBackend._yieldHookForTesting,
+          // The driver reports the KV cache's raw running offset;
+          // this backend owns comparison thresholds, rate-limiting,
+          // and the actual warning (review MLX-1/MLX-5 — see
+          // `reportContextCheck(runningContext:)`).
+          onContextCheck: { [weak self] running in
+            self?.reportContextCheck(runningContext: running)
+          }
+        )
+
+        if let self {
+          self.clearIsGeneratingIfCurrent(epoch: generationEpoch)
         }
-
-        let progressHandler = withStateLock { _loadProgressHandler }
-
-        // Signal "load started". The `mlx-swift-lm` local-directory API has no granular
-        // progress hook, so we emit a 0.0 bookend here and a 1.0 bookend after the load
-        // completes. This gives InferenceService enough signal to animate a progress
-        // indicator rather than showing a flat 0% spinner for the full load duration.
-        await progressHandler?(0.0)
-
-        do {
-            // Probe once; both the vision flag and the factory-routing decision
-            // consume the same result so config.json is read only once here.
-            let probedCapabilities: ModelCapabilities?
-            do {
-                probedCapabilities = try ModelCapabilityProbe.probe(modelDirectory: url)
-            } catch {
-                Log.inference.info(
-                    "MLX capability probe failed for \(url.lastPathComponent, privacy: .public); continuing with conservative vision defaults (\(error.localizedDescription, privacy: .public))"
-                )
-                probedCapabilities = nil
-            }
-            let supportsVision = BackendVisionCapability.mlxSupportsImageInput(probedCapabilities: probedCapabilities)
-            let routeThroughVLMFactory = MLXModelProbe.requiresVLMFactory(at: url, precomputedCapabilities: probedCapabilities)
-            // Load from a local directory containing config.json + .safetensors.
-            // We dispatch directly to either `LLMModelFactory.shared` or
-            // `VLMModelFactory.shared` rather than calling the registry-iterating
-            // free function `loadModelContainer(from:using:)`. Reason: the MoE
-            // Gemma 4 decoder lives only on the VLM side in mlx-swift-lm 3.31.3
-            // (`Libraries/MLXVLM/Models/Gemma4.swift`), so the registry walk
-            // would otherwise hand the 26B `gemma4` model to the dense
-            // `Gemma4Text.swift` LLM path and fail with "Unhandled keys
-            // [experts, router, …]". See issue #752. Dense Gemma 4 variants
-            // stay on the LLM factory unless the model also declares
-            // `vision_config` or `text_config.enable_moe_block`.
-            //
-            // `TransformersTokenizerLoader` (hand-expanded from MLXHuggingFace's
-            // `#huggingFaceTokenizerLoader()` macro) adapts swift-transformers'
-            // `AutoTokenizer` to the `TokenizerLoader` protocol both factories
-            // accept — inlined to keep swift-syntax out of default builds.
-            let container: ModelContainer
-            if routeThroughVLMFactory {
-                Self.logger.info("MLX routing via VLMModelFactory (MoE / VLM-only architecture)")
-                container = try await VLMModelFactory.shared.loadContainer(
-                    from: url,
-                    using: TransformersTokenizerLoader()
-                )
-            } else {
-                container = try await LLMModelFactory.shared.loadContainer(
-                    from: url,
-                    using: TransformersTokenizerLoader()
-                )
-            }
-            let detectedDialect = MLXToolDialect.detect(at: url)
-            let detectedThinkingMarkers = MLXModelProbe.detectThinkingMarkers(at: url)
-            let producedManifest = MLXModelProbe.produceManifest(
-                at: url,
-                detectedThinkingMarkers: detectedThinkingMarkers,
-                supportsVision: supportsVision
-            )
-            let kvCacheReuseEligible = enableKVCacheReuse && !routeThroughVLMFactory
-            withStateLock {
-                _modelContainer = container
-                _dialect = detectedDialect
-                _autoDetectedThinkingMarkers = detectedThinkingMarkers
-                _supportsVision = supportsVision
-                _manifest = producedManifest
-                _configuredContextSize = plan.effectiveContextSize
-                _promptCacheState.invalidate()
-                _kvCacheReuseEligible = kvCacheReuseEligible
-                _hasInitializedRuntime = true
-            }
-            // Apply the cache policy after loadModelContainer succeeds. Doing
-            // this *after* the load (rather than before) keeps it inside the
-            // implicit "MLX runtime is initialized" window — touching MLX's
-            // Memory namespace before the runtime is up trips a metallib
-            // load error in environments without Xcode-compiled shaders
-            // (e.g. `swift test`). The cost is that the load itself runs
-            // under whatever cacheLimit was previously in effect — usually
-            // mlx-swift's own default on a fresh process, which is fine.
-            //
-            // The cache is process-global; route through `MLXResourceArbiter`
-            // so multi-backend hosts (chat + embeddings, A/B comparisons)
-            // accumulate per-instance claims rather than overwriting each
-            // other's `cacheLimit`.
-            let cacheBytes = cachePolicy.resolvedBytes()
-            // Barrier: the `unloadModel()` issued at the top of this method
-            // spawned a chained teardown task that calls `release`/`clearAll`
-            // on the arbiter. Await it before claiming so a stale release from
-            // the prior lineage cannot land *after* this fresh claim and drop
-            // it (the arbiter is an actor; it runs enqueued ops in scheduling
-            // order, not call order). See `_cleanupTask`.
-            await pendingCleanupTask()?.value
-            await MLXResourceArbiter.shared.claim(
-                backendID: backendID,
-                requestedCacheBytes: cacheBytes
-            )
-            Self.logger.info("MLX cache claim registered: \(cacheBytes / (1024 * 1024)) MB (policy: \(String(describing: self.cachePolicy)))")
-            isModelLoaded = true
-            // Signal load complete before returning so InferenceService sees 1.0
-            // before it clears the handler and flips isModelLoaded.
-            await progressHandler?(1.0)
-            Self.logger.info("MLX backend loaded model from \(url.lastPathComponent)")
-        } catch {
-            Self.logger.error("MLX model load failed: \(error)")
-            throw InferenceError.modelLoadFailed(underlying: error)
+        generationStream.setPhase(.done)
+        if let self, let snapshotInputs = result.snapshotInputs {
+          self.scheduleSnapshotCaptureLocked(
+            cache: snapshotInputs.cache,
+            promptTokenIds: snapshotInputs.promptTokenIds
+          )
         }
+        continuation.finish()
+      } catch {
+        if let self {
+          self.clearIsGeneratingIfCurrent(epoch: generationEpoch)
+        }
+        if !Task.isCancelled {
+          Self.logger.error("MLX generation error: \(error)")
+          generationStream.setPhase(.failed(error.localizedDescription))
+          continuation.finish(throwing: error)
+          return
+        }
+        generationStream.setPhase(.done)
+        continuation.finish()
+      }
     }
 
-    // MARK: - Generation
+    Self._preTaskInstallHook.withLock { $0 }?()
 
-    /// Generates a token stream from the loaded MLX model.
-    ///
-    /// - Important: Generation is dispatched to `@MainActor` because `ModelContainer.generate()`
-    ///   in `mlx-swift-lm` must be called on the main thread (the MLX GPU scheduler is not
-    ///   thread-safe). This means long responses will occupy the main event loop. The effect
-    ///   is mitigated by the relatively short context windows used for on-device inference.
-    ///   If a future version of `mlx-swift-lm` supports a background-thread generate API,
-    ///   remove the `@MainActor` annotation from the inner `Task`.
-    public func generate(
-        prompt: String,
-        systemPrompt: String?,
-        config: GenerationConfig,
-        hints: GenerationRuntimeHints
-    ) throws -> GenerationStream {
-        // Single critical section: validate, flip `_isGenerating`, and
-        // snapshot every input the driver needs. The driver runs without
-        // touching backend state — so once we leave the lock, the driver call
-        // is decoupled from `setLoadOptions` racing in. Conversation history is
-        // no longer instance state — it rides `hints.history` per call (#2312).
-        // Parse the GBNF grammar up front — before the no-model and
-        // already-generating checks — so a grammar using a construct this
-        // executor does not support yields a precise `unsupportedGrammar`
-        // diagnostic rather than silently unconstrained output (issue #96
-        // decision). A nil grammar leaves `parsedGrammar` nil and the normal
-        // unconstrained path runs.
-        let parsedGrammar: GBNFGrammar?
-        if let gbnf = config.grammar {
-            do {
-                parsedGrammar = try GBNFGrammar(parsing: gbnf)
-            } catch {
-                throw InferenceError.unsupportedGrammar(
-                    reason: "MLXBackend could not compile the GBNF grammar: \(error)"
-                )
-            }
-        } else {
-            parsedGrammar = nil
-        }
-
-        // Conversation history arrives per-call on `hints.history` (ManifoldKit
-        // #2312) — never from shared instance state. Derive the three shapes the
-        // driver consumes from that single structured value: the tool-aware wire
-        // history only when the turn actually carries tool parts (so a tools-free
-        // request never renders stale tool turns), and the structured history
-        // whenever any prior turn exists (carrying image parts for VLM turns).
-        let historyMessages = hints.history
-        let derivedConversationHistory = historyMessages.flattenedHistory
-        let derivedToolAwareHistory = historyMessages.containsToolParts ? historyMessages.toolAwareHistory : nil
-        let derivedStructuredHistory = historyMessages.isEmpty ? nil : historyMessages
-
-        /// This call's generation identity, claimed under `stateLock` below and
-        /// captured by the generation task so both its install and its teardown
-        /// can tell whether it is still the current generation (#171).
-        /// Immutable by construction — it must not be reassignable once the
-        /// escaping task closure has captured it.
-        let generationEpoch: UInt64
-        let snapshot: GenerationCallSnapshot
-        (snapshot, generationEpoch) = try withStateLock {
-            guard _isModelLoaded, let container = _modelContainer else {
-                throw InferenceError.inferenceFailure("No model loaded")
-            }
-            guard !_isGenerating else {
-                throw InferenceError.alreadyGenerating
-            }
-            _isGenerating = true
-            // Claim a fresh generation identity; the task launched below
-            // captures it, and both installs and tears itself down only while
-            // it is still the current generation (#171).
-            _generationEpoch &+= 1
-            let claimedEpoch = _generationEpoch
-            let snapshot = GenerationCallSnapshot(
-                container: container,
-                loadOptions: _loadOptions,
-                conversationHistory: derivedConversationHistory,
-                toolAwareHistory: derivedToolAwareHistory,
-                structuredHistory: derivedStructuredHistory,
-                dialect: _dialect,
-                autoDetectedMarkers: _autoDetectedThinkingMarkers,
-                kvCacheReuseEligible: _kvCacheReuseEligible,
-                pendingSnapshotTask: _promptCacheState.pendingSnapshotTask,
-                grammar: Self.wrapToolCallGrammarIfNeeded(
-                    parsedGrammar, dialect: _dialect, tools: config.tools,
-                    toolChoice: config.toolChoice
-                ),
-                hints: hints
-            )
-            return (snapshot, claimedEpoch)
-        }
-        Self.logger.debug("MLX generate started")
-
-        let (stream, continuation) = AsyncThrowingStream.makeStream(of: GenerationEvent.self)
-        let generationStream = GenerationStream(stream)
-
-        let task = Task { @MainActor [weak self, generationStream] in
-            defer {
-                Self.logger.debug("MLX generate finished")
-            }
-
-            do {
-                let driver = MLXGenerationDriver()
-                let result = try await driver.generate(
-                    prompt: prompt,
-                    systemPrompt: systemPrompt,
-                    config: config,
-                    loadOptions: snapshot.loadOptions,
-                    container: snapshot.container,
-                    conversationHistory: snapshot.conversationHistory,
-                    toolAwareHistory: snapshot.toolAwareHistory,
-                    structuredHistory: snapshot.structuredHistory,
-                    dialect: snapshot.dialect,
-                    autoDetectedMarkers: snapshot.autoDetectedMarkers,
-                    kvCacheReuseEligible: snapshot.kvCacheReuseEligible,
-                    pendingSnapshotTask: snapshot.pendingSnapshotTask,
-                    // Closure re-reads the snapshot AFTER the driver awaits
-                    // `pendingSnapshotTask`, so we see the value the prior turn's
-                    // snapshot task wrote rather than the nil we'd have captured here.
-                    currentSnapshot: { [weak self] in
-                        self?.withStateLock { self?._promptCacheState.snapshot } ?? nil
-                    },
-                    grammar: snapshot.grammar,
-                    hints: snapshot.hints,
-                    generationStream: generationStream,
-                    continuation: continuation,
-                    yieldHook: MLXBackend._yieldHookForTesting,
-                    // The driver reports the KV cache's raw running offset;
-                    // this backend owns comparison thresholds, rate-limiting,
-                    // and the actual warning (review MLX-1/MLX-5 — see
-                    // `reportContextCheck(runningContext:)`).
-                    onContextCheck: { [weak self] running in
-                        self?.reportContextCheck(runningContext: running)
-                    }
-                )
-
-                if let self {
-                    self.clearIsGeneratingIfCurrent(epoch: generationEpoch)
-                }
-                generationStream.setPhase(.done)
-                if let self, let snapshotInputs = result.snapshotInputs {
-                    self.scheduleSnapshotCaptureLocked(
-                        cache: snapshotInputs.cache,
-                        promptTokenIds: snapshotInputs.promptTokenIds
-                    )
-                }
-                continuation.finish()
-            } catch {
-                if let self {
-                    self.clearIsGeneratingIfCurrent(epoch: generationEpoch)
-                }
-                if !Task.isCancelled {
-                    Self.logger.error("MLX generation error: \(error)")
-                    generationStream.setPhase(.failed(error.localizedDescription))
-                    continuation.finish(throwing: error)
-                    return
-                }
-                generationStream.setPhase(.done)
-                continuation.finish()
-            }
-        }
-
-        Self._preTaskInstallHook.withLock { $0 }?()
-
-        // Install only if this generation is still current (#171).
-        //
-        // The critical section above released the lock before this task could
-        // be built, so a `stopGeneration()` can land in between — and it would
-        // find `_generationTask` still holding the *previous* task (or nil),
-        // cancel that, and never see this one. Storing unconditionally would
-        // then leave an uncancelled task that no future `stopGeneration()` can
-        // reach, while `_isGenerating` reads `false` — so the next `generate()`
-        // is admitted and two generations run concurrently against one
-        // `ModelContainer`.
-        //
-        // That window predates this fix, but it was previously benign: a missed
-        // cancel left `_isGenerating == true`, so the next `generate()` bounced
-        // with `alreadyGenerating` and no overlap was possible. Clearing the
-        // flag synchronously is what turns it into real concurrency, so the
-        // epoch has to be honoured here too, not just at teardown.
-        withStateLock {
-            guard _generationEpoch == generationEpoch else {
-                task.cancel()
-                return
-            }
-            self._generationTask = task
-        }
-
-        // Cancel on ANY termination, not just `.cancelled`. A consumer that
-        // abandons the stream early (stops iterating, or the `GenerationStream`
-        // deinits) terminates it with `.finished`; without cancelling here the
-        // `@MainActor` generation task keeps running, occupying the MLX GPU
-        // scheduler until it completes naturally. The driver already treats
-        // `Task.isCancelled` as clean completion. Matches Llama / Foundation /
-        // the SSE runner.
-        continuation.onTermination = { @Sendable _ in
-            task.cancel()
-        }
-
-        return generationStream
+    // Install only if this generation is still current (#171).
+    //
+    // The critical section above released the lock before this task could
+    // be built, so a `stopGeneration()` can land in between — and it would
+    // find `_generationTask` still holding the *previous* task (or nil),
+    // cancel that, and never see this one. Storing unconditionally would
+    // then leave an uncancelled task that no future `stopGeneration()` can
+    // reach, while `_isGenerating` reads `false` — so the next `generate()`
+    // is admitted and two generations run concurrently against one
+    // `ModelContainer`.
+    //
+    // That window predates this fix, but it was previously benign: a missed
+    // cancel left `_isGenerating == true`, so the next `generate()` bounced
+    // with `alreadyGenerating` and no overlap was possible. Clearing the
+    // flag synchronously is what turns it into real concurrency, so the
+    // epoch has to be honoured here too, not just at teardown.
+    withStateLock {
+      guard _generationEpoch == generationEpoch else {
+        task.cancel()
+        return
+      }
+      self._generationTask = task
     }
 
-    // MARK: - Context ceiling warnings (#2348)
+    // Cancel on ANY termination, not just `.cancelled`. A consumer that
+    // abandons the stream early (stops iterating, or the `GenerationStream`
+    // deinits) terminates it with `.finished`; without cancelling here the
+    // `@MainActor` generation task keeps running, occupying the MLX GPU
+    // scheduler until it completes naturally. The driver already treats
+    // `Task.isCancelled` as clean completion. Matches Llama / Foundation /
+    // the SSE runner.
+    continuation.onTermination = { @Sendable _ in
+      task.cancel()
+    }
 
-    /// Compares the KV cache's actual running offset — reported by
-    /// `MLXGenerationDriver` after every generation attempt, including a
-    /// thrown or cancelled one — against the two independent ceilings this
-    /// backend tracks, and logs a visible, rate-limited warning for each one
-    /// newly crossed this session.
-    ///
-    /// **Two ceilings, two messages, never conflated (review MLX-1 — the
-    /// blocker).** An earlier revision of this warning compared only against
-    /// `_configuredContextSize` (the memory-budget-clamped
-    /// `ModelLoadPlan.effectiveContextSize`, usually the conservative 8192
-    /// default with no session override) and *called it* the model's trained
-    /// context. That made the warning fire on essentially every long chat
-    /// while the model's real trained ceiling — `_manifest?.contextWindow`,
-    /// from `config.json` — was still ~16× further out for a real
-    /// Llama-3.1-8B-4bit snapshot. A warning that names the wrong cause is
-    /// worse than no warning: it trains the reader to ignore the signal, the
-    /// exact inversion of Principle 6 ("errors are visible"). So:
-    /// - **Primary** — `runningContext > _manifest?.contextWindow`: this is
-    ///   the actual quality cliff #2348 asks to make visible. Named "trained
-    ///   context" in the log line.
-    /// - **Secondary** — `runningContext > _configuredContextSize`: a
-    ///   memory-headroom signal, not a quality cliff (with no session
-    ///   override this fires on almost every session, since the budget
-    ///   default is much smaller than most models' trained context — that is
-    ///   expected and is explicitly NOT the same claim as the primary
-    ///   warning). Named "budgeted KV allocation" in the log line so it is
-    ///   never mistaken for the trained-context warning.
-    ///
-    /// **Rate-limited to once per session** (review MLX-5) via
-    /// `_hasWarnedTrainedContextExceeded` / `_hasWarnedBudgetExceeded`, reset
-    /// in `unloadModel()` and `resetConversation()` — the same session
-    /// boundary `InferenceBackend`'s KV-reuse contract documents. Without
-    /// this, a long conversation would re-log the same warning on every
-    /// subsequent turn.
-    ///
-    /// **The primary warning also gates on `_manifest?.contextWindow` being
-    /// non-`nil` (review MLX-A)** — since core PR #2404, `ModelManifest.contextWindow`
-    /// is `Int?` and `nil` means `MLXModelProbe.produceManifest` found none of
-    /// the recognised context-length keys in `config.json`, rather than
-    /// fabricating an 8192 guess. Stating a guess as "the model's trained
-    /// context" would be the same class of defect MLX-1 fixed, just narrower —
-    /// a real 128k model whose config omits the key would otherwise be told,
-    /// falsely, that it blew an 8192 ceiling the first time a chat ran long.
-    /// No measurement → no primary warning; the secondary budget warning is
-    /// unaffected and still fires independently (`_configuredContextSize`
-    /// always comes from `ModelLoadPlan`, never a guess).
-    private func reportContextCheck(runningContext: Int) {
-        let toWarn: (trained: Int?, budget: Int?) = withStateLock {
-            var trainedToWarn: Int?
-            var budgetToWarn: Int?
-            if let trainedMax = _manifest?.contextWindow,
-               runningContext > trainedMax,
-               !_hasWarnedTrainedContextExceeded {
-                _hasWarnedTrainedContextExceeded = true
-                trainedToWarn = trainedMax
-            }
-            if let budget = _configuredContextSize,
-               runningContext > budget,
-               !_hasWarnedBudgetExceeded {
-                _hasWarnedBudgetExceeded = true
-                budgetToWarn = budget
-            }
-            return (trainedToWarn, budgetToWarn)
+    return generationStream
+  }
+
+  // MARK: - Context ceiling warnings (#2348)
+
+  /// Compares the KV cache's actual running offset — reported by
+  /// `MLXGenerationDriver` after every generation attempt, including a
+  /// thrown or cancelled one — against the two independent ceilings this
+  /// backend tracks, and logs a visible, rate-limited warning for each one
+  /// newly crossed this session.
+  ///
+  /// **Two ceilings, two messages, never conflated (review MLX-1 — the
+  /// blocker).** An earlier revision of this warning compared only against
+  /// `_configuredContextSize` (the memory-budget-clamped
+  /// `ModelLoadPlan.effectiveContextSize`, usually the conservative 8192
+  /// default with no session override) and *called it* the model's trained
+  /// context. That made the warning fire on essentially every long chat
+  /// while the model's real trained ceiling — `_manifest?.contextWindow`,
+  /// from `config.json` — was still ~16× further out for a real
+  /// Llama-3.1-8B-4bit snapshot. A warning that names the wrong cause is
+  /// worse than no warning: it trains the reader to ignore the signal, the
+  /// exact inversion of Principle 6 ("errors are visible"). So:
+  /// - **Primary** — `runningContext > _manifest?.contextWindow`: this is
+  ///   the actual quality cliff #2348 asks to make visible. Named "trained
+  ///   context" in the log line.
+  /// - **Secondary** — `runningContext > _configuredContextSize`: a
+  ///   memory-headroom signal, not a quality cliff (with no session
+  ///   override this fires on almost every session, since the budget
+  ///   default is much smaller than most models' trained context — that is
+  ///   expected and is explicitly NOT the same claim as the primary
+  ///   warning). Named "budgeted KV allocation" in the log line so it is
+  ///   never mistaken for the trained-context warning.
+  ///
+  /// **Rate-limited to once per session** (review MLX-5) via
+  /// `_hasWarnedTrainedContextExceeded` / `_hasWarnedBudgetExceeded`, reset
+  /// in `unloadModel()` and `resetConversation()` — the same session
+  /// boundary `InferenceBackend`'s KV-reuse contract documents. Without
+  /// this, a long conversation would re-log the same warning on every
+  /// subsequent turn.
+  ///
+  /// **The primary warning also gates on `_manifest?.contextWindow` being
+  /// non-`nil` (review MLX-A)** — since core PR #2404, `ModelManifest.contextWindow`
+  /// is `Int?` and `nil` means `MLXModelProbe.produceManifest` found none of
+  /// the recognised context-length keys in `config.json`, rather than
+  /// fabricating an 8192 guess. Stating a guess as "the model's trained
+  /// context" would be the same class of defect MLX-1 fixed, just narrower —
+  /// a real 128k model whose config omits the key would otherwise be told,
+  /// falsely, that it blew an 8192 ceiling the first time a chat ran long.
+  /// No measurement → no primary warning; the secondary budget warning is
+  /// unaffected and still fires independently (`_configuredContextSize`
+  /// always comes from `ModelLoadPlan`, never a guess).
+  private func reportContextCheck(runningContext: Int) {
+    let toWarn: (trained: Int?, budget: Int?) = withStateLock {
+      var trainedToWarn: Int?
+      var budgetToWarn: Int?
+      if let trainedMax = _manifest?.contextWindow,
+        runningContext > trainedMax,
+        !_hasWarnedTrainedContextExceeded
+      {
+        _hasWarnedTrainedContextExceeded = true
+        trainedToWarn = trainedMax
+      }
+      if let budget = _configuredContextSize,
+        runningContext > budget,
+        !_hasWarnedBudgetExceeded
+      {
+        _hasWarnedBudgetExceeded = true
+        budgetToWarn = budget
+      }
+      return (trainedToWarn, budgetToWarn)
+    }
+    if let trainedMax = toWarn.trained {
+      Self.logger.warning(
+        "MLX session context (\(runningContext, privacy: .public) tokens) exceeded the model's trained context (\(trainedMax, privacy: .public) tokens). mlx-swift-lm's KV cache grows unbounded past this point — no truncation, no error — so generation quality may silently degrade. See ManifoldKit issue #2348."
+      )
+      MLXBackend._trainedContextExceededHook.withLock { $0 }?(runningContext, trainedMax)
+    }
+    if let budget = toWarn.budget {
+      Self.logger.warning(
+        "MLX session context (\(runningContext, privacy: .public) tokens) exceeded the budgeted KV allocation (\(budget, privacy: .public) tokens). This is a memory-headroom signal, not a quality cliff — set a session context-size override to raise it. See ManifoldKit issue #2348."
+      )
+      MLXBackend._budgetExceededHook.withLock { $0 }?(runningContext, budget)
+    }
+  }
+
+  /// Coherent per-call snapshot of every piece of backend state the driver
+  /// reads. Captured under `stateLock` so the driver's view stays consistent
+  /// even if a `set*History` / `setLoadOptions` call lands mid-stream.
+  private struct GenerationCallSnapshot {
+    let container: any MLXModelContainerProtocol
+    let loadOptions: BackendLoadOptions
+    let conversationHistory: [(role: String, content: String)]
+    let toolAwareHistory: [ToolAwareHistoryEntry]?
+    let structuredHistory: [StructuredMessage]?
+    let dialect: MLXToolDialect
+    let autoDetectedMarkers: ThinkingMarkers?
+    let kvCacheReuseEligible: Bool
+    let pendingSnapshotTask: Task<Void, Never>?
+    let grammar: GBNFGrammar?
+    let hints: GenerationRuntimeHints
+  }
+
+  /// Wraps a *bare* tool-call envelope grammar (the `{"name":…,"arguments":…}`
+  /// union `ToolGrammarBuilder` emits) in the dialect's textual `<tool_call>`
+  /// delimiters so the model emits the wrapper the existing `ToolCallTransform`
+  /// extracts, while the grammar still constrains the inner JSON to each tool's
+  /// schema (#96). Only applied when a grammar is present, the request carries
+  /// tools, and the loaded model speaks a `<tool_call>` dialect — otherwise the
+  /// grammar passes through unwrapped (e.g. raw structured-output grammars).
+  private static func wrapToolCallGrammarIfNeeded(
+    _ grammar: GBNFGrammar?,
+    dialect: MLXToolDialect,
+    tools: [ToolDefinition],
+    toolChoice: ToolChoice
+  ) -> GBNFGrammar? {
+    guard let grammar, !tools.isEmpty else { return grammar }
+    switch dialect {
+    case .qwen25, .llama:
+      // Only wrap a *forced-call* envelope, where every branch starts with
+      // `{` — so the grammar's sole acceptable first byte is `{`. A
+      // `.permissive` grammar (toolChoice == .auto) also admits a prose
+      // first byte; wrapping that would wrongly force a call, so it passes
+      // through unwrapped. Mirrors the `<tool_call>\n` … `\n</tool_call>`
+      // shape Qwen emits and `MLXToolMarkers.markers(dialect:)` parses.
+      guard GBNFMatcher(grammar: grammar).acceptableFirstBytes() == [UInt8(ascii: "{")] else {
+        return grammar
+      }
+      return grammar.wrappingRoot(
+        prefix: Array("<tool_call>\n".utf8),
+        suffix: Array("\n</tool_call>".utf8)
+      )
+    case .mistral:
+      // Mistral's tool-call channel is `[TOOL_CALLS] [ {…} ]` (a sentinel +
+      // JSON array, EOS-keyed — see `MLXToolMarkers`), not the `<tool_call>`
+      // object wrapper. Core's derived grammar (the bare object union, or a
+      // prose-permitting union under `.auto`) does NOT constrain that
+      // channel — the model free-runs `[TOOL_CALLS]` and the detokenizer
+      // mangles it to zero parseable calls (#106/#104). Rebuild the derived
+      // grammar as the proper `[TOOL_CALLS]` array envelope so decoding can
+      // only produce a well-formed, marker-matching block. `grammar != nil`
+      // here means core derived a tool-call grammar for this turn
+      // (`toolChoice != .none`); fall back to the unwrapped grammar if the
+      // envelope cannot be built.
+      return MLXMistralToolGrammar.build(tools: tools, toolChoice: toolChoice) ?? grammar
+    case .unknown:
+      return grammar
+    }
+  }
+
+  /// Schedules an off-main capture of the prompt KV cache for next-turn reuse.
+  ///
+  /// The capture itself runs `@MainActor` because every MLX call inside
+  /// `MLXPromptCacheCoordinator.capturePromptCacheSnapshot` shares the
+  /// single-threaded GPU scheduler with `ModelContainer.generate`. A monotonic
+  /// write token guards against stale snapshots overwriting a newer turn's
+  /// cache state if the next `generate()` call has already invalidated this
+  /// lineage.
+  @MainActor
+  private func scheduleSnapshotCaptureLocked(
+    cache: MLXPromptCache,
+    promptTokenIds: [Int]
+  ) {
+    withStateLock {
+      _promptCacheState.writeToken &+= 1
+      let snapshotWriteToken = _promptCacheState.writeToken
+      let snapshotTask = MLXPromptCacheCoordinator.makeSnapshotCaptureTask(
+        cache: cache,
+        promptTokenIds: promptTokenIds,
+        writeToken: snapshotWriteToken
+      ) { [weak self] token, snapshot in
+        guard let self else { return }
+        self.withStateLock {
+          guard self._promptCacheState.writeToken == token else { return }
+          self._promptCacheState.snapshot = snapshot
+          self._promptCacheState.pendingSnapshotTask = nil
         }
-        if let trainedMax = toWarn.trained {
-            Self.logger.warning(
-                "MLX session context (\(runningContext, privacy: .public) tokens) exceeded the model's trained context (\(trainedMax, privacy: .public) tokens). mlx-swift-lm's KV cache grows unbounded past this point — no truncation, no error — so generation quality may silently degrade. See ManifoldKit issue #2348."
-            )
-            MLXBackend._trainedContextExceededHook.withLock { $0 }?(runningContext, trainedMax)
-        }
-        if let budget = toWarn.budget {
-            Self.logger.warning(
-                "MLX session context (\(runningContext, privacy: .public) tokens) exceeded the budgeted KV allocation (\(budget, privacy: .public) tokens). This is a memory-headroom signal, not a quality cliff — set a session context-size override to raise it. See ManifoldKit issue #2348."
-            )
-            MLXBackend._budgetExceededHook.withLock { $0 }?(runningContext, budget)
-        }
+      }
+      _promptCacheState.pendingSnapshotTask = snapshotTask
     }
+  }
 
-    /// Coherent per-call snapshot of every piece of backend state the driver
-    /// reads. Captured under `stateLock` so the driver's view stays consistent
-    /// even if a `set*History` / `setLoadOptions` call lands mid-stream.
-    private struct GenerationCallSnapshot {
-        let container: any MLXModelContainerProtocol
-        let loadOptions: BackendLoadOptions
-        let conversationHistory: [(role: String, content: String)]
-        let toolAwareHistory: [ToolAwareHistoryEntry]?
-        let structuredHistory: [StructuredMessage]?
-        let dialect: MLXToolDialect
-        let autoDetectedMarkers: ThinkingMarkers?
-        let kvCacheReuseEligible: Bool
-        let pendingSnapshotTask: Task<Void, Never>?
-        let grammar: GBNFGrammar?
-        let hints: GenerationRuntimeHints
+  // MARK: - Testing
+
+  /// Injects a mock container so unit tests can exercise the generation path
+  /// without loading real model weights. Call this before `generate()`.
+  ///
+  /// Not part of the public API — @_spi(Testing) seam for backend test targets (#1749).
+  ///
+  /// `routesThroughVLMFactory` stands in for the load-time architecture
+  /// dispatch (#154): a real `loadModel` sets `_kvCacheReuseEligible` to
+  /// `enableKVCacheReuse && !routeThroughVLMFactory`, and passing `true` here
+  /// reproduces the VLM/MoE branch — the one that full-prefills every turn —
+  /// without needing a multi-GB `vision_config`-bearing snapshot on disk.
+  /// Defaults to `false` (the LLM-factory path), preserving every existing
+  /// call site's behavior.
+  @_spi(Testing) public func _inject(
+    _ container: any MLXModelContainerProtocol,
+    supportsVision: Bool = false,
+    dialect: MLXToolDialect = .unknown,
+    configuredContextSize: Int? = nil,
+    routesThroughVLMFactory: Bool = false
+  ) {
+    withStateLock {
+      _modelContainer = container
+      _isModelLoaded = true
+      _supportsVision = supportsVision
+      _dialect = dialect
+      _promptCacheState.invalidate()
+      _kvCacheReuseEligible = enableKVCacheReuse && !routesThroughVLMFactory
+      _hasInitializedRuntime = false
+      _configuredContextSize = configuredContextSize
+      // Review MLX-C: unlike `unloadModel()`, this was leaving the
+      // once-per-session warning flags untouched, so a *second* inject
+      // into the same backend instance would silently start with an
+      // already-suppressed warning. Harmless while every test injects
+      // into a fresh `MLXBackend()`, but not a contract worth leaving
+      // unstated. `_manifest` is deliberately NOT reset here — it is
+      // set by `_injectManifest`, called separately.
+      _hasWarnedTrainedContextExceeded = false
+      _hasWarnedBudgetExceeded = false
     }
+  }
 
-    /// Wraps a *bare* tool-call envelope grammar (the `{"name":…,"arguments":…}`
-    /// union `ToolGrammarBuilder` emits) in the dialect's textual `<tool_call>`
-    /// delimiters so the model emits the wrapper the existing `ToolCallTransform`
-    /// extracts, while the grammar still constrains the inner JSON to each tool's
-    /// schema (#96). Only applied when a grammar is present, the request carries
-    /// tools, and the loaded model speaks a `<tool_call>` dialect — otherwise the
-    /// grammar passes through unwrapped (e.g. raw structured-output grammars).
-    private static func wrapToolCallGrammarIfNeeded(
-        _ grammar: GBNFGrammar?,
-        dialect: MLXToolDialect,
-        tools: [ToolDefinition],
-        toolChoice: ToolChoice
-    ) -> GBNFGrammar? {
-        guard let grammar, !tools.isEmpty else { return grammar }
-        switch dialect {
-        case .qwen25, .llama:
-            // Only wrap a *forced-call* envelope, where every branch starts with
-            // `{` — so the grammar's sole acceptable first byte is `{`. A
-            // `.permissive` grammar (toolChoice == .auto) also admits a prose
-            // first byte; wrapping that would wrongly force a call, so it passes
-            // through unwrapped. Mirrors the `<tool_call>\n` … `\n</tool_call>`
-            // shape Qwen emits and `MLXToolMarkers.markers(dialect:)` parses.
-            guard GBNFMatcher(grammar: grammar).acceptableFirstBytes() == [UInt8(ascii: "{")] else {
-                return grammar
-            }
-            return grammar.wrappingRoot(
-                prefix: Array("<tool_call>\n".utf8),
-                suffix: Array("\n</tool_call>".utf8)
-            )
-        case .mistral:
-            // Mistral's tool-call channel is `[TOOL_CALLS] [ {…} ]` (a sentinel +
-            // JSON array, EOS-keyed — see `MLXToolMarkers`), not the `<tool_call>`
-            // object wrapper. Core's derived grammar (the bare object union, or a
-            // prose-permitting union under `.auto`) does NOT constrain that
-            // channel — the model free-runs `[TOOL_CALLS]` and the detokenizer
-            // mangles it to zero parseable calls (#106/#104). Rebuild the derived
-            // grammar as the proper `[TOOL_CALLS]` array envelope so decoding can
-            // only produce a well-formed, marker-matching block. `grammar != nil`
-            // here means core derived a tool-call grammar for this turn
-            // (`toolChoice != .none`); fall back to the unwrapped grammar if the
-            // envelope cannot be built.
-            return MLXMistralToolGrammar.build(tools: tools, toolChoice: toolChoice) ?? grammar
-        case .unknown:
-            return grammar
-        }
+  @_spi(Testing) public func _hasPromptCacheSnapshotForTesting() -> Bool {
+    withStateLock { _promptCacheState.hasSnapshotOrPending }
+  }
+
+  @_spi(Testing) public func _isPromptCacheSnapshotReadyForTesting() -> Bool {
+    withStateLock { _promptCacheState.isSnapshotReady }
+  }
+
+  /// Test-only seam: forces the auto-detected thinking markers to a specific
+  /// value, simulating what the load path would have read from
+  /// `tokenizer_config.json`. Tests use this to verify that
+  /// `hints.thinkingMarkers` correctly overrides auto-detection without
+  /// having to stage a real model directory.
+  @_spi(Testing) public func _injectAutoDetectedThinkingMarkers(_ markers: ThinkingMarkers?) {
+    withStateLock { _autoDetectedThinkingMarkers = markers }
+  }
+
+  /// Test-only seam: forces `_manifest` to a specific value, simulating
+  /// what `loadModel(from:plan:)` would have populated from `config.json`
+  /// (#2348). `reportContextCheck(runningContext:)`'s primary
+  /// trained-context warning reads it, so tests need this to exercise that
+  /// path without a real model load — mirrors
+  /// `_injectAutoDetectedThinkingMarkers`.
+  ///
+  /// Since core PR #2404, `ModelManifest.contextWindow` is `Int?` and `nil`
+  /// means "not measured" directly — there is no separate detection
+  /// side-channel any more (review MLX-A's `_trainedContextWasDetected`
+  /// flag was retired in favor of the optional itself). Pass a manifest
+  /// built with `contextWindow: nil` to simulate `produceManifest`'s
+  /// could-not-determine path.
+  @_spi(Testing) public func _injectManifest(_ manifest: ModelManifest?) {
+    withStateLock {
+      _manifest = manifest
     }
+  }
 
-    /// Schedules an off-main capture of the prompt KV cache for next-turn reuse.
-    ///
-    /// The capture itself runs `@MainActor` because every MLX call inside
-    /// `MLXPromptCacheCoordinator.capturePromptCacheSnapshot` shares the
-    /// single-threaded GPU scheduler with `ModelContainer.generate`. A monotonic
-    /// write token guards against stale snapshots overwriting a newer turn's
-    /// cache state if the next `generate()` call has already invalidated this
-    /// lineage.
-    @MainActor
-    private func scheduleSnapshotCaptureLocked(
-        cache: MLXPromptCache,
-        promptTokenIds: [Int]
-    ) {
-        withStateLock {
-            _promptCacheState.writeToken &+= 1
-            let snapshotWriteToken = _promptCacheState.writeToken
-            let snapshotTask = MLXPromptCacheCoordinator.makeSnapshotCaptureTask(
-                cache: cache,
-                promptTokenIds: promptTokenIds,
-                writeToken: snapshotWriteToken
-            ) { [weak self] token, snapshot in
-                guard let self else { return }
-                self.withStateLock {
-                    guard self._promptCacheState.writeToken == token else { return }
-                    self._promptCacheState.snapshot = snapshot
-                    self._promptCacheState.pendingSnapshotTask = nil
-                }
-            }
-            _promptCacheState.pendingSnapshotTask = snapshotTask
-        }
+  // MARK: - Control
+
+  /// Cancels the in-flight generation and leaves the backend immediately
+  /// reusable, per core's `InferenceBackend` contract: after this returns,
+  /// `isGenerating` is `false` and a fresh `generate()` must succeed without
+  /// a reload, a reset, or a backoff (#171).
+  ///
+  /// `Task.cancel()` alone cannot deliver that — it is cooperative, so the
+  /// cancelled task is still unwinding when this method returns. Clearing
+  /// `_isGenerating` here is what makes the contract true synchronously;
+  /// bumping the epoch is what keeps that safe, by orphaning the outgoing
+  /// task so neither its install nor its teardown can touch a *successor's*
+  /// state.
+  ///
+  /// One nuance in the launch-window case (a stop arriving while a
+  /// `generate()` is between claiming its epoch and installing its task):
+  /// contract point 1 — the stream's `onTermination` firing — is satisfied a
+  /// moment *after* this returns, because the cancel happens at install.
+  /// Making it synchronous would mean holding `stateLock` across task
+  /// construction, which is worse. Points 2 and 3, the ones callers actually
+  /// poll, are synchronous either way.
+  ///
+  /// **Note for anyone debugging #157** (Metal command-buffer/encoder crashes
+  /// under rapid successive generations): that issue names **"cancel → resend
+  /// → replay"** as its repro pattern, and this method *is* that seam — so the
+  /// connection is direct, not incidental. The contract obliges this backend
+  /// to accept a resend while the outgoing generation's MLX work may still be
+  /// unwinding on the GPU. `MLXGenerationDriver` breaks its token loop only at
+  /// the top of the next chunk, so one more forward pass is typically already
+  /// dispatched, and the abandoned mlx-swift-lm producer task cancels
+  /// cooperatively too. Successor and predecessor can therefore overlap
+  /// briefly by design. The prompt-cache capture — the path that mutates KV
+  /// state off the driver's own timeline — is excluded on the cancel path
+  /// (`snapshotInputs` is gated on `completedNormally`), so it cannot race a
+  /// successor's cache. If #157 is ever root-caused to overlapping GPU work,
+  /// this is the seam to look at first.
+  public func stopGeneration() {
+    withStateLock {
+      _generationTask?.cancel()
+      _generationTask = nil
+      // Order matters only in that both happen under one lock: the
+      // outgoing task can never observe a half-updated state.
+      _generationEpoch &+= 1
+      _isGenerating = false
     }
+  }
 
-    // MARK: - Testing
-
-    /// Injects a mock container so unit tests can exercise the generation path
-    /// without loading real model weights. Call this before `generate()`.
-    ///
-    /// Not part of the public API — @_spi(Testing) seam for backend test targets (#1749).
-    ///
-    /// `routesThroughVLMFactory` stands in for the load-time architecture
-    /// dispatch (#154): a real `loadModel` sets `_kvCacheReuseEligible` to
-    /// `enableKVCacheReuse && !routeThroughVLMFactory`, and passing `true` here
-    /// reproduces the VLM/MoE branch — the one that full-prefills every turn —
-    /// without needing a multi-GB `vision_config`-bearing snapshot on disk.
-    /// Defaults to `false` (the LLM-factory path), preserving every existing
-    /// call site's behavior.
-    @_spi(Testing) public func _inject(
-        _ container: any MLXModelContainerProtocol,
-        supportsVision: Bool = false,
-        dialect: MLXToolDialect = .unknown,
-        configuredContextSize: Int? = nil,
-        routesThroughVLMFactory: Bool = false
-    ) {
-        withStateLock {
-            _modelContainer = container
-            _isModelLoaded = true
-            _supportsVision = supportsVision
-            _dialect = dialect
-            _promptCacheState.invalidate()
-            _kvCacheReuseEligible = enableKVCacheReuse && !routesThroughVLMFactory
-            _hasInitializedRuntime = false
-            _configuredContextSize = configuredContextSize
-            // Review MLX-C: unlike `unloadModel()`, this was leaving the
-            // once-per-session warning flags untouched, so a *second* inject
-            // into the same backend instance would silently start with an
-            // already-suppressed warning. Harmless while every test injects
-            // into a fresh `MLXBackend()`, but not a contract worth leaving
-            // unstated. `_manifest` is deliberately NOT reset here — it is
-            // set by `_injectManifest`, called separately.
-            _hasWarnedTrainedContextExceeded = false
-            _hasWarnedBudgetExceeded = false
-        }
+  /// Teardown hook for a generation task: clears `_isGenerating` only if
+  /// `epoch` is still the current generation (#171).
+  ///
+  /// A task cancelled by `stopGeneration()`, or otherwise superseded, has a
+  /// stale epoch and must leave the flag alone — the generation that owns it
+  /// now is someone else's.
+  private func clearIsGeneratingIfCurrent(epoch: UInt64) {
+    withStateLock {
+      guard _generationEpoch == epoch else { return }
+      _isGenerating = false
     }
+  }
 
-    @_spi(Testing) public func _hasPromptCacheSnapshotForTesting() -> Bool {
-        withStateLock { _promptCacheState.hasSnapshotOrPending }
+  public func unloadModel() {
+    stopGeneration()
+    // Only touch MLX's Memory namespace after a real model load has
+    // initialized the runtime in this process. Injected test doubles do not
+    // compile the metallib, so releasing the arbiter claim after
+    // `_inject(...)` would trip the same failure this guard exists to
+    // avoid (the arbiter calls `Memory.clearCache()` on the last release).
+    let hadInitializedRuntime: Bool = withStateLock {
+      let had = _hasInitializedRuntime
+      _modelContainer = nil
+      _isModelLoaded = false
+      _isGenerating = false
+      _dialect = .unknown
+      _autoDetectedThinkingMarkers = nil
+      _supportsVision = false
+      _manifest = nil
+      _configuredContextSize = nil
+      _hasWarnedTrainedContextExceeded = false
+      _hasWarnedBudgetExceeded = false
+      _promptCacheState.invalidate()
+      _kvCacheReuseEligible = false
+      _hasInitializedRuntime = false
+      return had
     }
-
-    @_spi(Testing) public func _isPromptCacheSnapshotReadyForTesting() -> Bool {
-        withStateLock { _promptCacheState.isSnapshotReady }
+    if hadInitializedRuntime {
+      // The protocol contract for `unloadModel()` is synchronous, but
+      // cache eviction does not need to block teardown — so we still
+      // spawn a task rather than awaiting. The arbiter clears
+      // `MLX.Memory` only on the last release; while sibling MLX backends
+      // are still loaded, this preserves their pooled buffers — that's
+      // the whole point of routing through the arbiter rather than
+      // calling `Memory.clearCache()` directly.
+      //
+      // Chain onto the prior cleanup (`await previousCleanup?.value`) and
+      // store the result so the next `loadModel` can await it before
+      // claiming. This serializes teardown vs a following load and stops
+      // a stale `release` from dropping a fresh `claim`.
+      let id = backendID
+      let previousCleanup = withStateLock { () -> Task<Void, Never>? in
+        let prior = _cleanupTask
+        _cleanupTask = nil
+        return prior
+      }
+      let cleanup = Task {
+        await previousCleanup?.value
+        await MLXResourceArbiter.shared.release(backendID: id)
+      }
+      withStateLock { _cleanupTask = cleanup }
     }
+    Self.logger.info("MLX backend unloaded")
+  }
 
-    /// Test-only seam: forces the auto-detected thinking markers to a specific
-    /// value, simulating what the load path would have read from
-    /// `tokenizer_config.json`. Tests use this to verify that
-    /// `hints.thinkingMarkers` correctly overrides auto-detection without
-    /// having to stage a real model directory.
-    @_spi(Testing) public func _injectAutoDetectedThinkingMarkers(_ markers: ThinkingMarkers?) {
-        withStateLock { _autoDetectedThinkingMarkers = markers }
-    }
+  /// Schedules the same arbiter teardown as ``unloadModel()`` and awaits the
+  /// chained cleanup task that releases this backend's cache claim.
+  ///
+  /// Production code that drops the backend can keep calling fire-and-forget
+  /// ``unloadModel()`` — but the reload loop, programmatic back-to-back load
+  /// cycles, and tests should await this so the prior `release` is guaranteed
+  /// to have completed before the next `claim`. Mirrors
+  /// `LlamaBackend.unloadAndWait()`.
+  public func unloadAndWait() async {
+    unloadModel()
+    await pendingCleanupTask()?.value
+  }
 
-    /// Test-only seam: forces `_manifest` to a specific value, simulating
-    /// what `loadModel(from:plan:)` would have populated from `config.json`
-    /// (#2348). `reportContextCheck(runningContext:)`'s primary
-    /// trained-context warning reads it, so tests need this to exercise that
-    /// path without a real model load — mirrors
-    /// `_injectAutoDetectedThinkingMarkers`.
-    ///
-    /// Since core PR #2404, `ModelManifest.contextWindow` is `Int?` and `nil`
-    /// means "not measured" directly — there is no separate detection
-    /// side-channel any more (review MLX-A's `_trainedContextWasDetected`
-    /// flag was retired in favor of the optional itself). Pass a manifest
-    /// built with `contextWindow: nil` to simulate `produceManifest`'s
-    /// could-not-determine path.
-    @_spi(Testing) public func _injectManifest(_ manifest: ModelManifest?) {
-        withStateLock {
-            _manifest = manifest
-        }
-    }
-
-    // MARK: - Control
-
-    /// Cancels the in-flight generation and leaves the backend immediately
-    /// reusable, per core's `InferenceBackend` contract: after this returns,
-    /// `isGenerating` is `false` and a fresh `generate()` must succeed without
-    /// a reload, a reset, or a backoff (#171).
-    ///
-    /// `Task.cancel()` alone cannot deliver that — it is cooperative, so the
-    /// cancelled task is still unwinding when this method returns. Clearing
-    /// `_isGenerating` here is what makes the contract true synchronously;
-    /// bumping the epoch is what keeps that safe, by orphaning the outgoing
-    /// task so neither its install nor its teardown can touch a *successor's*
-    /// state.
-    ///
-    /// One nuance in the launch-window case (a stop arriving while a
-    /// `generate()` is between claiming its epoch and installing its task):
-    /// contract point 1 — the stream's `onTermination` firing — is satisfied a
-    /// moment *after* this returns, because the cancel happens at install.
-    /// Making it synchronous would mean holding `stateLock` across task
-    /// construction, which is worse. Points 2 and 3, the ones callers actually
-    /// poll, are synchronous either way.
-    ///
-    /// **Note for anyone debugging #157** (Metal command-buffer/encoder crashes
-    /// under rapid successive generations): that issue names **"cancel → resend
-    /// → replay"** as its repro pattern, and this method *is* that seam — so the
-    /// connection is direct, not incidental. The contract obliges this backend
-    /// to accept a resend while the outgoing generation's MLX work may still be
-    /// unwinding on the GPU. `MLXGenerationDriver` breaks its token loop only at
-    /// the top of the next chunk, so one more forward pass is typically already
-    /// dispatched, and the abandoned mlx-swift-lm producer task cancels
-    /// cooperatively too. Successor and predecessor can therefore overlap
-    /// briefly by design. The prompt-cache capture — the path that mutates KV
-    /// state off the driver's own timeline — is excluded on the cancel path
-    /// (`snapshotInputs` is gated on `completedNormally`), so it cannot race a
-    /// successor's cache. If #157 is ever root-caused to overlapping GPU work,
-    /// this is the seam to look at first.
-    public func stopGeneration() {
-        withStateLock {
-            _generationTask?.cancel()
-            _generationTask = nil
-            // Order matters only in that both happen under one lock: the
-            // outgoing task can never observe a half-updated state.
-            _generationEpoch &+= 1
-            _isGenerating = false
-        }
-    }
-
-    /// Teardown hook for a generation task: clears `_isGenerating` only if
-    /// `epoch` is still the current generation (#171).
-    ///
-    /// A task cancelled by `stopGeneration()`, or otherwise superseded, has a
-    /// stale epoch and must leave the flag alone — the generation that owns it
-    /// now is someone else's.
-    private func clearIsGeneratingIfCurrent(epoch: UInt64) {
-        withStateLock {
-            guard _generationEpoch == epoch else { return }
-            _isGenerating = false
-        }
-    }
-
-    public func unloadModel() {
-        stopGeneration()
-        // Only touch MLX's Memory namespace after a real model load has
-        // initialized the runtime in this process. Injected test doubles do not
-        // compile the metallib, so releasing the arbiter claim after
-        // `_inject(...)` would trip the same failure this guard exists to
-        // avoid (the arbiter calls `Memory.clearCache()` on the last release).
-        let hadInitializedRuntime: Bool = withStateLock {
-            let had = _hasInitializedRuntime
-            _modelContainer = nil
-            _isModelLoaded = false
-            _isGenerating = false
-            _dialect = .unknown
-            _autoDetectedThinkingMarkers = nil
-            _supportsVision = false
-            _manifest = nil
-            _configuredContextSize = nil
-            _hasWarnedTrainedContextExceeded = false
-            _hasWarnedBudgetExceeded = false
-            _promptCacheState.invalidate()
-            _kvCacheReuseEligible = false
-            _hasInitializedRuntime = false
-            return had
-        }
-        if hadInitializedRuntime {
-            // The protocol contract for `unloadModel()` is synchronous, but
-            // cache eviction does not need to block teardown — so we still
-            // spawn a task rather than awaiting. The arbiter clears
-            // `MLX.Memory` only on the last release; while sibling MLX backends
-            // are still loaded, this preserves their pooled buffers — that's
-            // the whole point of routing through the arbiter rather than
-            // calling `Memory.clearCache()` directly.
-            //
-            // Chain onto the prior cleanup (`await previousCleanup?.value`) and
-            // store the result so the next `loadModel` can await it before
-            // claiming. This serializes teardown vs a following load and stops
-            // a stale `release` from dropping a fresh `claim`.
-            let id = backendID
-            let previousCleanup = withStateLock { () -> Task<Void, Never>? in
-                let prior = _cleanupTask
-                _cleanupTask = nil
-                return prior
-            }
-            let cleanup = Task {
-                await previousCleanup?.value
-                await MLXResourceArbiter.shared.release(backendID: id)
-            }
-            withStateLock { _cleanupTask = cleanup }
-        }
-        Self.logger.info("MLX backend unloaded")
-    }
-
-    /// Schedules the same arbiter teardown as ``unloadModel()`` and awaits the
-    /// chained cleanup task that releases this backend's cache claim.
-    ///
-    /// Production code that drops the backend can keep calling fire-and-forget
-    /// ``unloadModel()`` — but the reload loop, programmatic back-to-back load
-    /// cycles, and tests should await this so the prior `release` is guaranteed
-    /// to have completed before the next `claim`. Mirrors
-    /// `LlamaBackend.unloadAndWait()`.
-    public func unloadAndWait() async {
-        unloadModel()
-        await pendingCleanupTask()?.value
-    }
-
-    /// Snapshots the pending arbiter-cleanup task under `stateLock`. Callers
-    /// await its `.value` to barrier against an in-flight `release`/`clearAll`.
-    private func pendingCleanupTask() -> Task<Void, Never>? {
-        withStateLock { _cleanupTask }
-    }
+  /// Snapshots the pending arbiter-cleanup task under `stateLock`. Callers
+  /// await its `.value` to barrier against an in-flight `release`/`clearAll`.
+  private func pendingCleanupTask() -> Task<Void, Never>? {
+    withStateLock { _cleanupTask }
+  }
 }
 
 extension MLXBackend {
-    public func resetConversation() {
-        withStateLock {
-            _promptCacheState.invalidate()
-            // A conversation reset starts a fresh KV-cache session (same
-            // boundary the `InferenceBackend` KV-reuse contract documents:
-            // "between loadModel(), resetConversation(), and unloadModel()").
-            // Both context warnings are per-session, not per-process, so they
-            // must be eligible to fire again in the new conversation (#2348,
-            // MLX-5).
-            _hasWarnedTrainedContextExceeded = false
-            _hasWarnedBudgetExceeded = false
-        }
+  public func resetConversation() {
+    withStateLock {
+      _promptCacheState.invalidate()
+      // A conversation reset starts a fresh KV-cache session (same
+      // boundary the `InferenceBackend` KV-reuse contract documents:
+      // "between loadModel(), resetConversation(), and unloadModel()").
+      // Both context warnings are per-session, not per-process, so they
+      // must be eligible to fire again in the new conversation (#2348,
+      // MLX-5).
+      _hasWarnedTrainedContextExceeded = false
+      _hasWarnedBudgetExceeded = false
     }
+  }
 
-    /// Evicts pooled Metal GPU buffers that may contain KV-cache residue from
-    /// prior inference turns.
-    ///
-    /// MLX does not expose an API to explicitly zero Metal `MTLBuffer` contents
-    /// after the fact; the best available measure is to evict all pooled buffers
-    /// (`MLX.Memory.clearCache()` under the hood, routed through
-    /// ``MLXResourceArbiter/clearAll()``) so they are returned to the OS rather
-    /// than reused by the next request. The prompt-cache state is also
-    /// invalidated so the next ``generate(_:config:)`` call starts fresh.
-    ///
-    /// **Note**: this provides an eviction guarantee, NOT a zero guarantee. Any
-    /// residue in currently-active Metal allocations (e.g. mid-stream) is
-    /// not affected.
-    public func secureWipe() {
-        let hasRuntime = withStateLock { () -> Bool in
-            _promptCacheState.invalidate()
-            return _hasInitializedRuntime
-        }
-        if hasRuntime {
-            // `secureWipe` is an explicit eviction request — the docstring
-            // promises the pooled buffers are returned to the OS. Because the
-            // pool is process-global, partial scrubbing isn't possible: route
-            // through `clearAll` so the arbiter drops accounting state too,
-            // and surviving sibling backends will re-claim on their next
-            // load. Chain it through `_cleanupTask` (same barrier as
-            // `unloadModel`) so a following `loadModel`'s `claim` can't be
-            // dropped by this `clearAll`.
-            let previousCleanup = withStateLock { () -> Task<Void, Never>? in
-                let prior = _cleanupTask
-                _cleanupTask = nil
-                return prior
-            }
-            let cleanup = Task {
-                await previousCleanup?.value
-                await MLXResourceArbiter.shared.clearAll()
-            }
-            withStateLock { _cleanupTask = cleanup }
-        }
+  /// Evicts pooled Metal GPU buffers that may contain KV-cache residue from
+  /// prior inference turns.
+  ///
+  /// MLX does not expose an API to explicitly zero Metal `MTLBuffer` contents
+  /// after the fact; the best available measure is to evict all pooled buffers
+  /// (`MLX.Memory.clearCache()` under the hood, routed through
+  /// ``MLXResourceArbiter/clearAll()``) so they are returned to the OS rather
+  /// than reused by the next request. The prompt-cache state is also
+  /// invalidated so the next ``generate(_:config:)`` call starts fresh.
+  ///
+  /// **Note**: this provides an eviction guarantee, NOT a zero guarantee. Any
+  /// residue in currently-active Metal allocations (e.g. mid-stream) is
+  /// not affected.
+  public func secureWipe() {
+    let hasRuntime = withStateLock { () -> Bool in
+      _promptCacheState.invalidate()
+      return _hasInitializedRuntime
     }
+    if hasRuntime {
+      // `secureWipe` is an explicit eviction request — the docstring
+      // promises the pooled buffers are returned to the OS. Because the
+      // pool is process-global, partial scrubbing isn't possible: route
+      // through `clearAll` so the arbiter drops accounting state too,
+      // and surviving sibling backends will re-claim on their next
+      // load. Chain it through `_cleanupTask` (same barrier as
+      // `unloadModel`) so a following `loadModel`'s `claim` can't be
+      // dropped by this `clearAll`.
+      let previousCleanup = withStateLock { () -> Task<Void, Never>? in
+        let prior = _cleanupTask
+        _cleanupTask = nil
+        return prior
+      }
+      let cleanup = Task {
+        await previousCleanup?.value
+        await MLXResourceArbiter.shared.clearAll()
+      }
+      withStateLock { _cleanupTask = cleanup }
+    }
+  }
 }
 
 // MARK: - LoadProgressReporting
 
 extension MLXBackend: LoadProgressReporting {
-    /// Installs a synthetic-bookend progress handler. Because `mlx-swift-lm`'s local-directory
-    /// load path exposes no granular progress, the handler receives `0.0` when the load begins
-    /// and `1.0` when it completes successfully. This is enough for `InferenceService` to show
-    /// a non-zero progress indicator rather than a flat 0% spinner.
-    public func setLoadProgressHandler(_ handler: (@Sendable (Double) async -> Void)?) {
-        withStateLock { _loadProgressHandler = handler }
-    }
+  /// Installs a synthetic-bookend progress handler. Because `mlx-swift-lm`'s local-directory
+  /// load path exposes no granular progress, the handler receives `0.0` when the load begins
+  /// and `1.0` when it completes successfully. This is enough for `InferenceService` to show
+  /// a non-zero progress indicator rather than a flat 0% spinner.
+  public func setLoadProgressHandler(_ handler: (@Sendable (Double) async -> Void)?) {
+    withStateLock { _loadProgressHandler = handler }
+  }
 
-    /// Installs backend tuning knobs (KV cache quantization, prefill batch size)
-    /// applied at every ``generate(prompt:systemPrompt:config:)``
-    /// ``GenerateParameters`` construction.
-    ///
-    /// MLX honours `kvCacheQuantization` (mapped to `kvBits = nil/8/4`) and
-    /// `prefillBatchSize` (mapped to `prefillStepSize`). The `flashAttention`
-    /// field is silently ignored — MLX's SDPA path is always
-    /// flash-attention-shaped.
-    ///
-    /// Defaults use Q8 KV cache and backend-default prefill batching. Per the
-    /// BCK API shape, `BackendLoadOptions` is named "load" because llama.cpp
-    /// wires these into `ctxParams` at context-creation time. MLX could in
-    /// principle change them per-generation; the API stays load-time-shaped to
-    /// keep both backends symmetric.
-    public func setLoadOptions(_ options: BackendLoadOptions) {
-        withStateLock { _loadOptions = options }
-    }
+  /// Installs backend tuning knobs (KV cache quantization, prefill batch size)
+  /// applied at every ``generate(prompt:systemPrompt:config:)``
+  /// ``GenerateParameters`` construction.
+  ///
+  /// MLX honours `kvCacheQuantization` (mapped to `kvBits = nil/8/4`) and
+  /// `prefillBatchSize` (mapped to `prefillStepSize`). The `flashAttention`
+  /// field is silently ignored — MLX's SDPA path is always
+  /// flash-attention-shaped.
+  ///
+  /// Defaults use Q8 KV cache and backend-default prefill batching. Per the
+  /// BCK API shape, `BackendLoadOptions` is named "load" because llama.cpp
+  /// wires these into `ctxParams` at context-creation time. MLX could in
+  /// principle change them per-generation; the API stays load-time-shaped to
+  /// keep both backends symmetric.
+  public func setLoadOptions(_ options: BackendLoadOptions) {
+    withStateLock { _loadOptions = options }
+  }
 }

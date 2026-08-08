@@ -1,9 +1,9 @@
-import XCTest
 import MLXLMCommon
 import ManifoldInference
-import ManifoldTestSupport
 import ManifoldMLX
 @_spi(Testing) import ManifoldMLX
+import ManifoldTestSupport
+import XCTest
 
 /// Pins the **event ordering** emitted by `MLXBackend.generate(...)` against
 /// a frozen expected sequence.
@@ -27,255 +27,263 @@ import ManifoldMLX
 /// Silicon required.
 final class MLXBackendEventOrderParityTests: XCTestCase {
 
-    // MARK: - Helpers
+  // MARK: - Helpers
 
-    /// Drains a stream into an ordered event list and a parallel kind list
-    /// so assertions can compare on **case identity** without caring about
-    /// associated values that may legitimately vary (e.g. the exact reused
-    /// token count when the mock changes).
-    private func collectEvents(
-        from stream: GenerationStream
-    ) async throws -> [GenerationEvent] {
-        var events: [GenerationEvent] = []
-        for try await event in stream.events {
-            events.append(event)
-        }
-        return events
+  /// Drains a stream into an ordered event list and a parallel kind list
+  /// so assertions can compare on **case identity** without caring about
+  /// associated values that may legitimately vary (e.g. the exact reused
+  /// token count when the mock changes).
+  private func collectEvents(
+    from stream: GenerationStream
+  ) async throws -> [GenerationEvent] {
+    var events: [GenerationEvent] = []
+    for try await event in stream.events {
+      events.append(event)
+    }
+    return events
+  }
+
+  /// String tag for an event used in the assertions below. Stable across
+  /// associated-value churn so the parity test stays pinned to the
+  /// **shape** of the stream rather than the exact payloads (those have
+  /// dedicated coverage elsewhere).
+  private func tag(_ event: GenerationEvent) -> String {
+    switch event {
+    case .token: return "token"
+    case .thinkingToken: return "thinkingToken"
+    case .thinkingCompleted: return "thinkingCompleted"
+    case .thinkingSignature: return "thinkingSignature"
+    case .kvCacheReuse: return "kvCacheReuse"
+    case .toolCallStart: return "toolCallStart"
+    case .toolCallArgumentsDelta: return "toolCallArgumentsDelta"
+    case .toolCall: return "toolCall"
+    case .toolResult: return "toolResult"
+    case .toolIterationLimitExceeded: return "toolIterationLimitExceeded"
+    case .toolProgress: return "toolProgress"
+    case .toolDispatchStarted: return "toolDispatchStarted"
+    case .toolDispatchCompleted: return "toolDispatchCompleted"
+    case .toolCallApproved: return "toolCallApproved"
+    case .usage: return "usage"
+    case .prefillProgress: return "prefillProgress"
+    case .throttleDiagnostic: return "throttleDiagnostic"
+    case .handoffRequested: return "handoffRequested"
+    case .generationCompleted: return "generationCompleted"
+    // GenerationEvent is a non-frozen enum in ManifoldContract; new cases
+    // (e.g. .promptRendered in 0.52.0) are additive on the core side but
+    // source-breaking for an exhaustive switch here. Map unknown events to
+    // a stable tag so this parity test survives core enum growth across
+    // pin bumps instead of failing to compile on each new case.
+    @unknown default: return "unknown"
+    }
+  }
+
+  // MARK: - 1. Simple completion: tokens only, no kvCacheReuse
+
+  /// Cold-start generation must yield only `.token` events in order, with
+  /// no `.kvCacheReuse` (no prior snapshot to reuse from).
+  func test_simpleCompletion_emitsTokensInOrder_withoutKVCacheReuse() async throws {
+    let mock = MockMLXModelContainer()
+    mock.tokensToYield = ["Hello", " ", "world"]
+
+    let backend = MLXBackend()
+    backend._inject(mock)
+
+    let stream = try backend.generate(
+      prompt: "hi",
+      systemPrompt: nil,
+      config: GenerationConfig()
+    )
+    let events = try await collectEvents(from: stream)
+    let tags = events.map(tag)
+
+    XCTAssertEqual(
+      tags,
+      ["token", "token", "token", "usage"],
+      "Cold-start completion must emit exactly three .token events followed by .usage, no .kvCacheReuse"
+    )
+
+    // Pin the payload order too — token values must match the mock's
+    // yield order one-for-one.
+    let tokenTexts = events.compactMap { event -> String? in
+      if case .token(let t) = event { return t } else { return nil }
+    }
+    XCTAssertEqual(tokenTexts, ["Hello", " ", "world"])
+  }
+
+  // MARK: - 2. KV-cache reuse: .kvCacheReuse fires BEFORE any .token
+
+  /// On a second turn with a matching prompt prefix, `.kvCacheReuse` must
+  /// precede every `.token`. Re-ordering the driver's initial yields
+  /// would surface here.
+  func test_kvCacheReuse_precedesFirstToken() async throws {
+    let mock = MockMLXModelContainer()
+    mock.tokensToYield = ["ok"]
+    mock.preparedTokenBatches = [
+      [11, 12, 13, 14],
+      [11, 12, 13, 14, 15],
+    ]
+
+    let backend = MLXBackend(enableKVCacheReuse: true)
+    backend._inject(mock)
+
+    // First turn primes the snapshot — discard events.
+    _ = try await collectEvents(
+      from: try backend.generate(
+        prompt: "first",
+        systemPrompt: nil,
+        config: GenerationConfig()
+      ))
+
+    // Wait for the async snapshot-capture task to finish writing back
+    // into _promptCacheState. Without this poll the second turn races
+    // the snapshot write and `existingSnapshot` reads as nil, suppressing
+    // the .kvCacheReuse event entirely. The existing
+    // test_generate_reusesPromptCachePrefixOnMatchingTurn test in
+    // MLXBackendGenerationTests hits the same race when run in
+    // isolation; staging the poll here keeps this suite reliable
+    // regardless of `--filter` ordering.
+    let snapshotReady = expectation(description: "prompt cache snapshot ready")
+    Task {
+      let deadline = ContinuousClock.now + .seconds(2)
+      while !backend._isPromptCacheSnapshotReadyForTesting(),
+        ContinuousClock.now < deadline
+      {
+        await Task.yield()
+      }
+      snapshotReady.fulfill()
+    }
+    await fulfillment(of: [snapshotReady], timeout: 3)
+    XCTAssertTrue(
+      backend._isPromptCacheSnapshotReadyForTesting(),
+      "Prompt-cache snapshot must be persisted before the second turn — required for .kvCacheReuse to fire"
+    )
+
+    // Second turn: shared prefix triggers .kvCacheReuse before the
+    // single token.
+    let secondStream = try backend.generate(
+      prompt: "second",
+      systemPrompt: nil,
+      config: GenerationConfig()
+    )
+    let events = try await collectEvents(from: secondStream)
+    let tags = events.map(tag)
+
+    // Find the indices of the kvCacheReuse and first token events. Pin
+    // the ordering between them without over-asserting on incidental
+    // events (e.g. .prefillProgress) the driver may emit between.
+    guard let reuseIdx = tags.firstIndex(of: "kvCacheReuse") else {
+      XCTFail("KV-cache-reuse turn must include .kvCacheReuse; got: \(tags)")
+      return
+    }
+    guard let firstTokenIdx = tags.firstIndex(of: "token") else {
+      XCTFail("KV-cache-reuse turn must yield at least one .token; got: \(tags)")
+      return
+    }
+    XCTAssertLessThan(
+      reuseIdx, firstTokenIdx,
+      ".kvCacheReuse must precede first .token (driver init order); got: \(tags)"
+    )
+
+    // Verify the .kvCacheReuse associated value: 4-token shared prefix.
+    if case .kvCacheReuse(let reused) = events[reuseIdx] {
+      XCTAssertEqual(reused, 4, "Shared prefix length")
+    } else {
+      XCTFail("Expected .kvCacheReuse case at index \(reuseIdx)")
+    }
+  }
+
+  // MARK: - 3. Cancellation mid-stream: consumer can break early
+
+  /// A consumer may `break` out of the event loop after consuming only some
+  /// of the available tokens, and doing so must tear the stream down cleanly:
+  /// `isGenerating` returns to false once the cancel propagates.
+  ///
+  /// NOTE: This test does NOT verify "no phantom completion / .usage events"
+  /// — breaking at `observed.count == 2` makes `tags == ["token","token"]`
+  /// true by construction (the loop exits before any later event could be
+  /// observed), so that claim would be tautological here. The positive
+  /// "no trailing terminal events" check lives in
+  /// `test_simpleCompletion_emitsNoUsageOrCompletionEventsAfterTokens`, which
+  /// drains the full stream.
+  func test_cancelMidStream_consumerCanBreakEarly_andIsGeneratingClears() async throws {
+    let mock = MockMLXModelContainer()
+    // Use a generous yield list so the producer always has work
+    // queued up at the cancel point.
+    mock.tokensToYield = ["a", "b", "c", "d", "e"]
+
+    let backend = MLXBackend()
+    backend._inject(mock)
+
+    let stream = try backend.generate(
+      prompt: "hi",
+      systemPrompt: nil,
+      config: GenerationConfig()
+    )
+
+    var observed: [GenerationEvent] = []
+    for try await event in stream.events {
+      observed.append(event)
+      if case .token = event, observed.count == 2 {
+        break
+      }
     }
 
-    /// String tag for an event used in the assertions below. Stable across
-    /// associated-value churn so the parity test stays pinned to the
-    /// **shape** of the stream rather than the exact payloads (those have
-    /// dedicated coverage elsewhere).
-    private func tag(_ event: GenerationEvent) -> String {
-        switch event {
-        case .token: return "token"
-        case .thinkingToken: return "thinkingToken"
-        case .thinkingCompleted: return "thinkingCompleted"
-        case .thinkingSignature: return "thinkingSignature"
-        case .kvCacheReuse: return "kvCacheReuse"
-        case .toolCallStart: return "toolCallStart"
-        case .toolCallArgumentsDelta: return "toolCallArgumentsDelta"
-        case .toolCall: return "toolCall"
-        case .toolResult: return "toolResult"
-        case .toolIterationLimitExceeded: return "toolIterationLimitExceeded"
-        case .toolProgress: return "toolProgress"
-        case .toolDispatchStarted: return "toolDispatchStarted"
-        case .toolDispatchCompleted: return "toolDispatchCompleted"
-        case .toolCallApproved: return "toolCallApproved"
-        case .usage: return "usage"
-        case .prefillProgress: return "prefillProgress"
-        case .throttleDiagnostic: return "throttleDiagnostic"
-        case .handoffRequested: return "handoffRequested"
-        case .generationCompleted: return "generationCompleted"
-        // GenerationEvent is a non-frozen enum in ManifoldContract; new cases
-        // (e.g. .promptRendered in 0.52.0) are additive on the core side but
-        // source-breaking for an exhaustive switch here. Map unknown events to
-        // a stable tag so this parity test survives core enum growth across
-        // pin bumps instead of failing to compile on each new case.
-        @unknown default: return "unknown"
-        }
+    // We consumed exactly the two tokens we asked for before breaking.
+    XCTAssertEqual(
+      observed.count, 2,
+      "Consumer should have stopped after observing two events")
+    XCTAssertEqual(
+      observed.map(tag), ["token", "token"],
+      "The two consumed events are tokens (mock yields tokens only)")
+
+    // Wait for the cancel to propagate so other tests aren't racing on
+    // shared backend state. Matches the pattern in
+    // MLXBackendGenerationTests.test_generate_cancellation.
+    let expectation = expectation(description: "isGenerating clears after cancel")
+    Task {
+      let deadline = ContinuousClock.now + .seconds(2)
+      while backend.isGenerating, ContinuousClock.now < deadline {
+        await Task.yield()
+      }
+      expectation.fulfill()
     }
+    await fulfillment(of: [expectation], timeout: 3)
+    XCTAssertFalse(
+      backend.isGenerating,
+      "Breaking out of the consumer loop must tear the stream down and clear isGenerating")
+  }
 
-    // MARK: - 1. Simple completion: tokens only, no kvCacheReuse
+  /// Pins the terminal-event contract for a plain completion: the driver must
+  /// emit exactly one `.usage` event after all tokens, and no
+  /// `.generationCompleted` event. (`GenerationEvent` has no `stopReason`
+  /// case today — see
+  /// MLXBackendGenerationTests.test_stopReason_currentlyCollapsesToDone.)
+  func test_simpleCompletion_emitsUsageEventAfterTokens() async throws {
+    let mock = MockMLXModelContainer()
+    mock.tokensToYield = ["a", "b", "c"]
 
-    /// Cold-start generation must yield only `.token` events in order, with
-    /// no `.kvCacheReuse` (no prior snapshot to reuse from).
-    func test_simpleCompletion_emitsTokensInOrder_withoutKVCacheReuse() async throws {
-        let mock = MockMLXModelContainer()
-        mock.tokensToYield = ["Hello", " ", "world"]
+    let backend = MLXBackend()
+    backend._inject(mock)
 
-        let backend = MLXBackend()
-        backend._inject(mock)
+    let stream = try backend.generate(
+      prompt: "hi",
+      systemPrompt: nil,
+      config: GenerationConfig()
+    )
 
-        let stream = try backend.generate(
-            prompt: "hi",
-            systemPrompt: nil,
-            config: GenerationConfig()
-        )
-        let events = try await collectEvents(from: stream)
-        let tags = events.map(tag)
+    // Drain the ENTIRE stream — no early break — so any trailing
+    // synthesised terminal event would be captured here.
+    let events = try await collectEvents(from: stream)
+    let tags = events.map(tag)
 
-        XCTAssertEqual(
-            tags,
-            ["token", "token", "token", "usage"],
-            "Cold-start completion must emit exactly three .token events followed by .usage, no .kvCacheReuse"
-        )
-
-        // Pin the payload order too — token values must match the mock's
-        // yield order one-for-one.
-        let tokenTexts = events.compactMap { event -> String? in
-            if case .token(let t) = event { return t } else { return nil }
-        }
-        XCTAssertEqual(tokenTexts, ["Hello", " ", "world"])
-    }
-
-    // MARK: - 2. KV-cache reuse: .kvCacheReuse fires BEFORE any .token
-
-    /// On a second turn with a matching prompt prefix, `.kvCacheReuse` must
-    /// precede every `.token`. Re-ordering the driver's initial yields
-    /// would surface here.
-    func test_kvCacheReuse_precedesFirstToken() async throws {
-        let mock = MockMLXModelContainer()
-        mock.tokensToYield = ["ok"]
-        mock.preparedTokenBatches = [
-            [11, 12, 13, 14],
-            [11, 12, 13, 14, 15],
-        ]
-
-        let backend = MLXBackend(enableKVCacheReuse: true)
-        backend._inject(mock)
-
-        // First turn primes the snapshot — discard events.
-        _ = try await collectEvents(from: try backend.generate(
-            prompt: "first",
-            systemPrompt: nil,
-            config: GenerationConfig()
-        ))
-
-        // Wait for the async snapshot-capture task to finish writing back
-        // into _promptCacheState. Without this poll the second turn races
-        // the snapshot write and `existingSnapshot` reads as nil, suppressing
-        // the .kvCacheReuse event entirely. The existing
-        // test_generate_reusesPromptCachePrefixOnMatchingTurn test in
-        // MLXBackendGenerationTests hits the same race when run in
-        // isolation; staging the poll here keeps this suite reliable
-        // regardless of `--filter` ordering.
-        let snapshotReady = expectation(description: "prompt cache snapshot ready")
-        Task {
-            let deadline = ContinuousClock.now + .seconds(2)
-            while !backend._isPromptCacheSnapshotReadyForTesting(),
-                  ContinuousClock.now < deadline {
-                await Task.yield()
-            }
-            snapshotReady.fulfill()
-        }
-        await fulfillment(of: [snapshotReady], timeout: 3)
-        XCTAssertTrue(
-            backend._isPromptCacheSnapshotReadyForTesting(),
-            "Prompt-cache snapshot must be persisted before the second turn — required for .kvCacheReuse to fire"
-        )
-
-        // Second turn: shared prefix triggers .kvCacheReuse before the
-        // single token.
-        let secondStream = try backend.generate(
-            prompt: "second",
-            systemPrompt: nil,
-            config: GenerationConfig()
-        )
-        let events = try await collectEvents(from: secondStream)
-        let tags = events.map(tag)
-
-        // Find the indices of the kvCacheReuse and first token events. Pin
-        // the ordering between them without over-asserting on incidental
-        // events (e.g. .prefillProgress) the driver may emit between.
-        guard let reuseIdx = tags.firstIndex(of: "kvCacheReuse") else {
-            XCTFail("KV-cache-reuse turn must include .kvCacheReuse; got: \(tags)")
-            return
-        }
-        guard let firstTokenIdx = tags.firstIndex(of: "token") else {
-            XCTFail("KV-cache-reuse turn must yield at least one .token; got: \(tags)")
-            return
-        }
-        XCTAssertLessThan(
-            reuseIdx, firstTokenIdx,
-            ".kvCacheReuse must precede first .token (driver init order); got: \(tags)"
-        )
-
-        // Verify the .kvCacheReuse associated value: 4-token shared prefix.
-        if case .kvCacheReuse(let reused) = events[reuseIdx] {
-            XCTAssertEqual(reused, 4, "Shared prefix length")
-        } else {
-            XCTFail("Expected .kvCacheReuse case at index \(reuseIdx)")
-        }
-    }
-
-    // MARK: - 3. Cancellation mid-stream: consumer can break early
-
-    /// A consumer may `break` out of the event loop after consuming only some
-    /// of the available tokens, and doing so must tear the stream down cleanly:
-    /// `isGenerating` returns to false once the cancel propagates.
-    ///
-    /// NOTE: This test does NOT verify "no phantom completion / .usage events"
-    /// — breaking at `observed.count == 2` makes `tags == ["token","token"]`
-    /// true by construction (the loop exits before any later event could be
-    /// observed), so that claim would be tautological here. The positive
-    /// "no trailing terminal events" check lives in
-    /// `test_simpleCompletion_emitsNoUsageOrCompletionEventsAfterTokens`, which
-    /// drains the full stream.
-    func test_cancelMidStream_consumerCanBreakEarly_andIsGeneratingClears() async throws {
-        let mock = MockMLXModelContainer()
-        // Use a generous yield list so the producer always has work
-        // queued up at the cancel point.
-        mock.tokensToYield = ["a", "b", "c", "d", "e"]
-
-        let backend = MLXBackend()
-        backend._inject(mock)
-
-        let stream = try backend.generate(
-            prompt: "hi",
-            systemPrompt: nil,
-            config: GenerationConfig()
-        )
-
-        var observed: [GenerationEvent] = []
-        for try await event in stream.events {
-            observed.append(event)
-            if case .token = event, observed.count == 2 {
-                break
-            }
-        }
-
-        // We consumed exactly the two tokens we asked for before breaking.
-        XCTAssertEqual(observed.count, 2,
-            "Consumer should have stopped after observing two events")
-        XCTAssertEqual(observed.map(tag), ["token", "token"],
-            "The two consumed events are tokens (mock yields tokens only)")
-
-        // Wait for the cancel to propagate so other tests aren't racing on
-        // shared backend state. Matches the pattern in
-        // MLXBackendGenerationTests.test_generate_cancellation.
-        let expectation = expectation(description: "isGenerating clears after cancel")
-        Task {
-            let deadline = ContinuousClock.now + .seconds(2)
-            while backend.isGenerating, ContinuousClock.now < deadline {
-                await Task.yield()
-            }
-            expectation.fulfill()
-        }
-        await fulfillment(of: [expectation], timeout: 3)
-        XCTAssertFalse(backend.isGenerating,
-            "Breaking out of the consumer loop must tear the stream down and clear isGenerating")
-    }
-
-    /// Pins the terminal-event contract for a plain completion: the driver must
-    /// emit exactly one `.usage` event after all tokens, and no
-    /// `.generationCompleted` event. (`GenerationEvent` has no `stopReason`
-    /// case today — see
-    /// MLXBackendGenerationTests.test_stopReason_currentlyCollapsesToDone.)
-    func test_simpleCompletion_emitsUsageEventAfterTokens() async throws {
-        let mock = MockMLXModelContainer()
-        mock.tokensToYield = ["a", "b", "c"]
-
-        let backend = MLXBackend()
-        backend._inject(mock)
-
-        let stream = try backend.generate(
-            prompt: "hi",
-            systemPrompt: nil,
-            config: GenerationConfig()
-        )
-
-        // Drain the ENTIRE stream — no early break — so any trailing
-        // synthesised terminal event would be captured here.
-        let events = try await collectEvents(from: stream)
-        let tags = events.map(tag)
-
-        XCTAssertEqual(tags, ["token", "token", "token", "usage"],
-            "A plain completion must emit its tokens followed by a single .usage event; got: \(tags)")
-        XCTAssertEqual(tags.filter { $0 == "usage" }.count, 1,
-            "Exactly one .usage event must be emitted; got: \(tags)")
-        XCTAssertFalse(tags.contains("generationCompleted"),
-            "Driver must not synthesise a .generationCompleted event; got: \(tags)")
-    }
+    XCTAssertEqual(
+      tags, ["token", "token", "token", "usage"],
+      "A plain completion must emit its tokens followed by a single .usage event; got: \(tags)")
+    XCTAssertEqual(
+      tags.filter { $0 == "usage" }.count, 1,
+      "Exactly one .usage event must be emitted; got: \(tags)")
+    XCTAssertFalse(
+      tags.contains("generationCompleted"),
+      "Driver must not synthesise a .generationCompleted event; got: \(tags)")
+  }
 }

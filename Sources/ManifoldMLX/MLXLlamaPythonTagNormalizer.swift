@@ -38,125 +38,127 @@ import Foundation
 // split, #1749) so the python-tag recovery has a first-class unit net.
 @_spi(Testing) public struct MLXLlamaPythonTagNormalizer {
 
-    /// Llama native delimiters. Mirrors `MLXToolMarkers` so the synthetic close
-    /// we inject matches a marker the transform actually scans for.
-    private static let openTag = "<|python_tag|>"
-    private static let eomTag  = "<|eom_id|>"
-    private static let eotTag  = "<|eot_id|>"
+  /// Llama native delimiters. Mirrors `MLXToolMarkers` so the synthetic close
+  /// we inject matches a marker the transform actually scans for.
+  private static let openTag = "<|python_tag|>"
+  private static let eomTag = "<|eom_id|>"
+  private static let eotTag = "<|eot_id|>"
 
-    /// Active only for the Llama dialect; every other dialect is identity.
-    private let enabled: Bool
+  /// Active only for the Llama dialect; every other dialect is identity.
+  private let enabled: Bool
 
-    /// `true` once a `<|python_tag|>` open has been seen with no visible close
-    /// (`<|eom_id|>` / `<|eot_id|>`) after it. Reset when a close is observed.
-    private var pythonTagOpen = false
+  /// `true` once a `<|python_tag|>` open has been seen with no visible close
+  /// (`<|eom_id|>` / `<|eot_id|>`) after it. Reset when a close is observed.
+  private var pythonTagOpen = false
 
-    /// Carries a partial open/close tag that straddled a chunk boundary so a tag
-    /// split across two MLX chunks is still recognised. Bounded by the longest
-    /// tag length, so this never grows.
-    private var holdback = ""
+  /// Carries a partial open/close tag that straddled a chunk boundary so a tag
+  /// split across two MLX chunks is still recognised. Bounded by the longest
+  /// tag length, so this never grows.
+  private var holdback = ""
 
-    public init(dialect: MLXToolDialect) {
-        self.enabled = (dialect == .llama)
+  public init(dialect: MLXToolDialect) {
+    self.enabled = (dialect == .llama)
+  }
+
+  /// The maximum number of trailing characters we must retain to detect a tag
+  /// that is split across chunk boundaries (one less than the longest tag).
+  private static let maxTagSuffix = max(openTag.count, max(eomTag.count, eotTag.count)) - 1
+
+  /// Rewrite one raw text chunk. For non-Llama dialects this returns `chunk`
+  /// unchanged. For Llama it tracks python-tag open/close state and passes the
+  /// text through verbatim (the only mutation this normaliser makes is the
+  /// synthetic close appended by ``finalize()``).
+  public mutating func process(_ chunk: String) -> String {
+    guard enabled else { return chunk }
+
+    // Scan the (held-back tail + new chunk) for tag transitions, then emit
+    // everything except a possible partial-tag suffix we hold for next time.
+    let combined = holdback + chunk
+    updateOpenState(scanning: combined)
+
+    // Decide how much of the tail to hold back: the longest suffix of
+    // `combined` that is a strict prefix of any tag could be the start of a
+    // tag continued in the next chunk. We only need to retain text we have
+    // not already emitted via a prior holdback, so emit `combined` minus the
+    // retained suffix.
+    let retain = Self.partialTagSuffixLength(of: combined)
+    let emitCount = combined.count - retain
+    let emit = String(combined.prefix(emitCount))
+    holdback = String(combined.suffix(retain))
+    return emit
+  }
+
+  /// Flush the held-back tail and, when a `<|python_tag|>` block is still open,
+  /// inject a synthetic `<|eom_id|>` close so the downstream marker fires.
+  public mutating func finalize() -> String {
+    guard enabled else { return "" }
+    // The retained tail may itself complete a tag; re-scan it so a python tag
+    // that ended exactly at the stream boundary is accounted for.
+    updateOpenState(scanning: holdback)
+    var tail = holdback
+    holdback = ""
+    if pythonTagOpen {
+      // Inject `<|eom_id|>` (not `<|eot_id|>`): `MLXToolMarkers.markers`
+      // lists the `<|python_tag|>` → `<|eom_id|>` marker *before* the
+      // `<|eot_id|>` variant, and `ToolCallTransform` binds an open
+      // `<|python_tag|>` to the first matching marker — so the active block
+      // is waiting on `<|eom_id|>`. `<|eom_id|>` is also Llama's documented
+      // tool terminator, so this is the faithful close to synthesise.
+      tail += Self.eomTag
+      pythonTagOpen = false
     }
+    return tail
+  }
 
-    /// The maximum number of trailing characters we must retain to detect a tag
-    /// that is split across chunk boundaries (one less than the longest tag).
-    private static let maxTagSuffix = max(openTag.count, max(eomTag.count, eotTag.count)) - 1
-
-    /// Rewrite one raw text chunk. For non-Llama dialects this returns `chunk`
-    /// unchanged. For Llama it tracks python-tag open/close state and passes the
-    /// text through verbatim (the only mutation this normaliser makes is the
-    /// synthetic close appended by ``finalize()``).
-    public mutating func process(_ chunk: String) -> String {
-        guard enabled else { return chunk }
-
-        // Scan the (held-back tail + new chunk) for tag transitions, then emit
-        // everything except a possible partial-tag suffix we hold for next time.
-        let combined = holdback + chunk
-        updateOpenState(scanning: combined)
-
-        // Decide how much of the tail to hold back: the longest suffix of
-        // `combined` that is a strict prefix of any tag could be the start of a
-        // tag continued in the next chunk. We only need to retain text we have
-        // not already emitted via a prior holdback, so emit `combined` minus the
-        // retained suffix.
-        let retain = Self.partialTagSuffixLength(of: combined)
-        let emitCount = combined.count - retain
-        let emit = String(combined.prefix(emitCount))
-        holdback = String(combined.suffix(retain))
-        return emit
+  /// Update `pythonTagOpen` by walking `text` left-to-right: an open tag sets
+  /// it, a visible close tag clears it. Only the final state matters, so a
+  /// block opened and closed within one chunk nets to closed.
+  private mutating func updateOpenState(scanning text: String) {
+    guard !text.isEmpty else { return }
+    var index = text.startIndex
+    while index < text.endIndex {
+      if matches(Self.openTag, in: text, at: index) {
+        pythonTagOpen = true
+        index = text.index(index, offsetBy: Self.openTag.count)
+      } else if pythonTagOpen,
+        matches(Self.eomTag, in: text, at: index)
+      {
+        pythonTagOpen = false
+        index = text.index(index, offsetBy: Self.eomTag.count)
+      } else if pythonTagOpen,
+        matches(Self.eotTag, in: text, at: index)
+      {
+        pythonTagOpen = false
+        index = text.index(index, offsetBy: Self.eotTag.count)
+      } else {
+        index = text.index(after: index)
+      }
     }
+  }
 
-    /// Flush the held-back tail and, when a `<|python_tag|>` block is still open,
-    /// inject a synthetic `<|eom_id|>` close so the downstream marker fires.
-    public mutating func finalize() -> String {
-        guard enabled else { return "" }
-        // The retained tail may itself complete a tag; re-scan it so a python tag
-        // that ended exactly at the stream boundary is accounted for.
-        updateOpenState(scanning: holdback)
-        var tail = holdback
-        holdback = ""
-        if pythonTagOpen {
-            // Inject `<|eom_id|>` (not `<|eot_id|>`): `MLXToolMarkers.markers`
-            // lists the `<|python_tag|>` → `<|eom_id|>` marker *before* the
-            // `<|eot_id|>` variant, and `ToolCallTransform` binds an open
-            // `<|python_tag|>` to the first matching marker — so the active block
-            // is waiting on `<|eom_id|>`. `<|eom_id|>` is also Llama's documented
-            // tool terminator, so this is the faithful close to synthesise.
-            tail += Self.eomTag
-            pythonTagOpen = false
-        }
-        return tail
+  private func matches(_ tag: String, in text: String, at index: String.Index) -> Bool {
+    guard let end = text.index(index, offsetBy: tag.count, limitedBy: text.endIndex) else {
+      return false
     }
+    return text[index..<end] == tag
+  }
 
-    /// Update `pythonTagOpen` by walking `text` left-to-right: an open tag sets
-    /// it, a visible close tag clears it. Only the final state matters, so a
-    /// block opened and closed within one chunk nets to closed.
-    private mutating func updateOpenState(scanning text: String) {
-        guard !text.isEmpty else { return }
-        var index = text.startIndex
-        while index < text.endIndex {
-            if matches(Self.openTag, in: text, at: index) {
-                pythonTagOpen = true
-                index = text.index(index, offsetBy: Self.openTag.count)
-            } else if pythonTagOpen,
-                      matches(Self.eomTag, in: text, at: index) {
-                pythonTagOpen = false
-                index = text.index(index, offsetBy: Self.eomTag.count)
-            } else if pythonTagOpen,
-                      matches(Self.eotTag, in: text, at: index) {
-                pythonTagOpen = false
-                index = text.index(index, offsetBy: Self.eotTag.count)
-            } else {
-                index = text.index(after: index)
-            }
-        }
+  /// Length of the longest suffix of `text` that is a strict prefix of any
+  /// Llama tag — i.e. text that might be the start of a tag continued next
+  /// chunk and so must be held back rather than emitted. Capped at
+  /// ``maxTagSuffix`` so a long chunk costs only a bounded tail scan.
+  private static func partialTagSuffixLength(of text: String) -> Int {
+    let tags = [openTag, eomTag, eotTag]
+    let upper = min(maxTagSuffix, text.count)
+    var best = 0
+    var length = 1
+    while length <= upper {
+      let suffix = text.suffix(length)
+      if tags.contains(where: { $0.count > length && $0.hasPrefix(suffix) }) {
+        best = length
+      }
+      length += 1
     }
-
-    private func matches(_ tag: String, in text: String, at index: String.Index) -> Bool {
-        guard let end = text.index(index, offsetBy: tag.count, limitedBy: text.endIndex) else {
-            return false
-        }
-        return text[index..<end] == tag
-    }
-
-    /// Length of the longest suffix of `text` that is a strict prefix of any
-    /// Llama tag — i.e. text that might be the start of a tag continued next
-    /// chunk and so must be held back rather than emitted. Capped at
-    /// ``maxTagSuffix`` so a long chunk costs only a bounded tail scan.
-    private static func partialTagSuffixLength(of text: String) -> Int {
-        let tags = [openTag, eomTag, eotTag]
-        let upper = min(maxTagSuffix, text.count)
-        var best = 0
-        var length = 1
-        while length <= upper {
-            let suffix = text.suffix(length)
-            if tags.contains(where: { $0.count > length && $0.hasPrefix(suffix) }) {
-                best = length
-            }
-            length += 1
-        }
-        return best
-    }
+    return best
+  }
 }

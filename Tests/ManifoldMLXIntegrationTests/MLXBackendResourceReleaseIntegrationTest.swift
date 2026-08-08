@@ -1,8 +1,8 @@
-import XCTest
 import ManifoldInference
-import ManifoldTestSupport
 import ManifoldMLX
 @_spi(Testing) import ManifoldMLX
+import ManifoldTestSupport
+import XCTest
 
 /// Behavioral proof that dropping an `MLXBackend` releases its `MLXResourceArbiter`
 /// claim (#1623 class C — "asymmetric sibling").
@@ -27,40 +27,40 @@ import ManifoldMLX
 @MainActor
 final class MLXBackendResourceReleaseIntegrationTest: XCTestCase {
 
-    func test_mlxBackend_releasesArbiterClaim_onDrop() async throws {
-        try XCTSkipUnless(HardwareRequirements.isAppleSilicon, "Requires Apple Silicon")
-        try XCTSkipUnless(HardwareRequirements.hasMetalDevice, "Requires Metal GPU")
+  func test_mlxBackend_releasesArbiterClaim_onDrop() async throws {
+    try XCTSkipUnless(HardwareRequirements.isAppleSilicon, "Requires Apple Silicon")
+    try XCTSkipUnless(HardwareRequirements.hasMetalDevice, "Requires Metal GPU")
 
-        guard let mlxDir = HardwareRequirements.findMLXModelDirectory() else {
-            throw XCTSkip(
-                "No loadable MLX model found on disk. Install a local MLX snapshot with config.json, tokenizer, and safetensors weights."
-            )
-        }
-
-        let before = await MLXResourceArbiter.shared._activeClaimCountForTesting()
-
-        var backend: MLXBackend? = MLXBackend()
-        try await backend!.loadModel(from: mlxDir, plan: .testStub(effectiveContextSize: 2048))
-
-        let claimed = await MLXResourceArbiter.shared._activeClaimCountForTesting()
-        XCTAssertEqual(claimed, before + 1, "loadModel must claim an arbiter slot")
-
-        backend = nil // deinit -> Task.detached -> release (async)
-
-        // Poll until the claim drops back to baseline or a ~5s deadline elapses.
-        // Release is async (chained behind the prior cleanup task), so an immediate
-        // read after `= nil` would race the detached release.
-        var released = false
-        for _ in 0..<50 {
-            if await MLXResourceArbiter.shared._activeClaimCountForTesting() == before {
-                released = true
-                break
-            }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        XCTAssertTrue(
-            released,
-            "Dropping MLXBackend must release its arbiter claim (#1623 class C)"
-        )
+    guard let mlxDir = HardwareRequirements.findMLXModelDirectory() else {
+      throw XCTSkip(
+        "No loadable MLX model found on disk. Install a local MLX snapshot with config.json, tokenizer, and safetensors weights."
+      )
     }
+
+    let before = await MLXResourceArbiter.shared._activeClaimCountForTesting()
+
+    var backend: MLXBackend? = MLXBackend()
+    try await backend!.loadModel(from: mlxDir, plan: .testStub(effectiveContextSize: 2048))
+
+    let claimed = await MLXResourceArbiter.shared._activeClaimCountForTesting()
+    XCTAssertEqual(claimed, before + 1, "loadModel must claim an arbiter slot")
+
+    backend = nil  // deinit -> Task.detached -> release (async)
+
+    // Poll until the claim drops back to baseline or a ~5s deadline elapses.
+    // Release is async (chained behind the prior cleanup task), so an immediate
+    // read after `= nil` would race the detached release.
+    var released = false
+    for _ in 0..<50 {
+      if await MLXResourceArbiter.shared._activeClaimCountForTesting() == before {
+        released = true
+        break
+      }
+      try await Task.sleep(for: .milliseconds(100))
+    }
+    XCTAssertTrue(
+      released,
+      "Dropping MLXBackend must release its arbiter claim (#1623 class C)"
+    )
+  }
 }

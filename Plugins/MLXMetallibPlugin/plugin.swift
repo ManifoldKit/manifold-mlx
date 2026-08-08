@@ -31,50 +31,51 @@ import PackagePlugin
 /// (compiles fine, only aborts at MLX GPU init).
 @main
 struct MLXMetallibPlugin: BuildToolPlugin {
-    func createBuildCommands(context: PluginContext, target: Target) async throws -> [Command] {
-        guard let mlxDir = mlxSwiftDirectory(in: context) else {
-            Diagnostics.warning(
-                "MLXMetallibPlugin: could not locate the mlx-swift dependency checkout; "
-                + "skipping default.metallib build. MLX GPU init will fail at runtime "
-                + "unless a metallib is produced another way (e.g. an Xcode build)."
-            )
-            return []
-        }
-
-        let generatedMetalDir = mlxDir.appending(path: "Source/Cmlx/mlx-generated/metal")
-        let script = context.package.directoryURL.appending(path: "scripts/build-mlx-metallib.sh")
-        let outputDir = context.pluginWorkDirectoryURL.appending(path: "Generated")
-        // `context.tool(named:)` only resolves toolchain / in-package tools, not
-        // PATH binaries, so reference the system shell by absolute path. (An
-        // in-package executable target can't be used here either: prebuild
-        // commands run before the package's own targets are built.)
-        let bash = URL(filePath: "/bin/bash")
-
-        return [
-            .prebuildCommand(
-                displayName: "Compiling mlx-swift Metal kernels → mlx.metallib",
-                executable: bash,
-                arguments: [
-                    script.path(percentEncoded: false),
-                    generatedMetalDir.path(percentEncoded: false),
-                    outputDir.path(percentEncoded: false),
-                ],
-                outputFilesDirectory: outputDir
-            )
-        ]
+  func createBuildCommands(context: PluginContext, target: Target) async throws -> [Command] {
+    guard let mlxDir = mlxSwiftDirectory(in: context) else {
+      Diagnostics.warning(
+        "MLXMetallibPlugin: could not locate the mlx-swift dependency checkout; "
+          + "skipping default.metallib build. MLX GPU init will fail at runtime "
+          + "unless a metallib is produced another way (e.g. an Xcode build)."
+      )
+      return []
     }
 
-    /// Finds the resolved mlx-swift package's source directory among this
-    /// package's dependencies.
-    private func mlxSwiftDirectory(in context: PluginContext) -> URL? {
-        for dependency in context.package.dependencies {
-            let pkg = dependency.package
-            if pkg.id.lowercased() == "mlx-swift"
-                || pkg.displayName.lowercased() == "mlx-swift"
-                || pkg.directoryURL.lastPathComponent.lowercased() == "mlx-swift" {
-                return pkg.directoryURL
-            }
-        }
-        return nil
+    let generatedMetalDir = mlxDir.appending(path: "Source/Cmlx/mlx-generated/metal")
+    let script = context.package.directoryURL.appending(path: "scripts/build-mlx-metallib.sh")
+    let outputDir = context.pluginWorkDirectoryURL.appending(path: "Generated")
+    // `context.tool(named:)` only resolves toolchain / in-package tools, not
+    // PATH binaries, so reference the system shell by absolute path. (An
+    // in-package executable target can't be used here either: prebuild
+    // commands run before the package's own targets are built.)
+    let bash = URL(filePath: "/bin/bash")
+
+    return [
+      .prebuildCommand(
+        displayName: "Compiling mlx-swift Metal kernels → mlx.metallib",
+        executable: bash,
+        arguments: [
+          script.path(percentEncoded: false),
+          generatedMetalDir.path(percentEncoded: false),
+          outputDir.path(percentEncoded: false),
+        ],
+        outputFilesDirectory: outputDir
+      )
+    ]
+  }
+
+  /// Finds the resolved mlx-swift package's source directory among this
+  /// package's dependencies.
+  private func mlxSwiftDirectory(in context: PluginContext) -> URL? {
+    for dependency in context.package.dependencies {
+      let pkg = dependency.package
+      if pkg.id.lowercased() == "mlx-swift"
+        || pkg.displayName.lowercased() == "mlx-swift"
+        || pkg.directoryURL.lastPathComponent.lowercased() == "mlx-swift"
+      {
+        return pkg.directoryURL
+      }
     }
+    return nil
+  }
 }

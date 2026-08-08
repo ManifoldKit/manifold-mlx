@@ -2,8 +2,8 @@ import Foundation
 @preconcurrency import MLX
 import MLXLMCommon
 import MLXRandom
-import os
 import ManifoldInference
+import os
 
 /// Owns the token-streaming loop for a single `MLXBackend.generate()` call.
 ///
@@ -16,529 +16,534 @@ import ManifoldInference
 @MainActor
 @_spi(Testing) public struct MLXGenerationDriver: LocalInferenceAdapter {
 
-    public nonisolated init() {}
+  public nonisolated init() {}
 
-    // MARK: - Test seams
+  // MARK: - Test seams
 
-    /// Invoked synchronously on the main actor immediately after
-    /// `generationStream.setPhase(.streaming)` is called in the normalizer-tail
-    /// path. Tests use this to verify the phase transition happened without
-    /// racing against the unconditional `setPhase(.done)` that follows.
-    ///
-    /// `nil` in production.
-    @_spi(Testing) public nonisolated(unsafe) static var _streamingPhaseSetInTailHook: (() -> Void)?
+  /// Invoked synchronously on the main actor immediately after
+  /// `generationStream.setPhase(.streaming)` is called in the normalizer-tail
+  /// path. Tests use this to verify the phase transition happened without
+  /// racing against the unconditional `setPhase(.done)` that follows.
+  ///
+  /// `nil` in production.
+  @_spi(Testing) public nonisolated(unsafe) static var _streamingPhaseSetInTailHook: (() -> Void)?
 
-    private static let logger = Logger(
-        subsystem: ManifoldConfiguration.shared.logSubsystem,
-        category: "inference"
-    )
+  private static let logger = Logger(
+    subsystem: ManifoldConfiguration.shared.logSubsystem,
+    category: "inference"
+  )
 
-    // MARK: - LocalInferenceAdapter conformance
+  // MARK: - LocalInferenceAdapter conformance
 
-    /// `nonisolated` so cross-backend drift guards can introspect the
-    /// composed witnesses from any actor without hopping onto the main
-    /// actor. The values are immutable, so this is race-free by
-    /// construction.
-    public nonisolated let adapterName: String = "mlx.generation"
-    public nonisolated let toolCallShape: any LocalToolCallShape = InlineXMLToolCallMarkers()
-    public nonisolated let thinkingMarkerStrategy: LocalThinkingMarkerStrategy = .eagerWhenMarkersPresent
-    /// MLX's static capability shape published for drift-guard probing.
-    /// Mirrors `MLXBackend.capabilities` once a model is loaded; the
-    /// driver-level snapshot uses the conservative 8 k context fallback
-    /// (the backend overrides this from the loaded manifest at runtime).
-    public nonisolated let declaredCapabilities: BackendCapabilities = BackendCapabilities(
-        supportedParameters: [
-            .temperature, .topP, .topK, .repeatPenalty,
-            .minP, .repetitionPenalty, .presencePenalty, .frequencyPenalty,
-        ],
-        maxContextTokens: 8192,
-        requiresPromptTemplate: false,
-        supportsSystemPrompt: true,
-        supportsToolCalling: true,
-        supportsStructuredOutput: false,
-        supportsNativeJSONMode: false,
-        cancellationStyle: .cooperative,
-        supportsTokenCounting: true,
-        memoryStrategy: .resident,
-        maxOutputTokens: 4096,
-        supportsStreaming: true,
-        isRemote: false,
-        supportsGrammarConstrainedSampling: true,
-        supportsThinking: true,
-        sharesMLXProcessResources: true,
-        rendersFullPrompt: true
-    )
+  /// `nonisolated` so cross-backend drift guards can introspect the
+  /// composed witnesses from any actor without hopping onto the main
+  /// actor. The values are immutable, so this is race-free by
+  /// construction.
+  public nonisolated let adapterName: String = "mlx.generation"
+  public nonisolated let toolCallShape: any LocalToolCallShape = InlineXMLToolCallMarkers()
+  public nonisolated let thinkingMarkerStrategy: LocalThinkingMarkerStrategy =
+    .eagerWhenMarkersPresent
+  /// MLX's static capability shape published for drift-guard probing.
+  /// Mirrors `MLXBackend.capabilities` once a model is loaded; the
+  /// driver-level snapshot uses the conservative 8 k context fallback
+  /// (the backend overrides this from the loaded manifest at runtime).
+  public nonisolated let declaredCapabilities: BackendCapabilities = BackendCapabilities(
+    supportedParameters: [
+      .temperature, .topP, .topK, .repeatPenalty,
+      .minP, .repetitionPenalty, .presencePenalty, .frequencyPenalty,
+    ],
+    maxContextTokens: 8192,
+    requiresPromptTemplate: false,
+    supportsSystemPrompt: true,
+    supportsToolCalling: true,
+    supportsStructuredOutput: false,
+    supportsNativeJSONMode: false,
+    cancellationStyle: .cooperative,
+    supportsTokenCounting: true,
+    memoryStrategy: .resident,
+    maxOutputTokens: 4096,
+    supportsStreaming: true,
+    isRemote: false,
+    supportsGrammarConstrainedSampling: true,
+    supportsThinking: true,
+    sharesMLXProcessResources: true,
+    rendersFullPrompt: true
+  )
 
-    /// Outcome of a `run(...)` call.
-    struct RunResult {
-        /// `true` when the loop completed without throwing and was not cancelled —
-        /// callers may snapshot the prompt cache for next-turn reuse.
-        let completedNormally: Bool
-        /// Completion metadata emitted by the stream's `.info` element, when present.
-        let completionInfo: GenerateCompletionInfo?
-        /// Number of chunks the stream emitted (prompt-token fallback when `.info` absent).
-        let completionTokenCount: Int
+  /// Outcome of a `run(...)` call.
+  struct RunResult {
+    /// `true` when the loop completed without throwing and was not cancelled —
+    /// callers may snapshot the prompt cache for next-turn reuse.
+    let completedNormally: Bool
+    /// Completion metadata emitted by the stream's `.info` element, when present.
+    let completionInfo: GenerateCompletionInfo?
+    /// Number of chunks the stream emitted (prompt-token fallback when `.info` absent).
+    let completionTokenCount: Int
+  }
+
+  /// Outcome of a `generate(...)` call.
+  ///
+  /// Wraps `RunResult` and surfaces the inputs the backend needs to schedule
+  /// a post-generation prompt-cache snapshot capture. The backend owns the
+  /// snapshot lineage (write-token bookkeeping, install under the state
+  /// lock), so the driver returns the *materials* for the capture rather
+  /// than performing it.
+  struct GenerateResult {
+    let run: RunResult
+    /// Non-nil only when KV-cache reuse was eligible, the run completed
+    /// normally, and a prompt-token array was captured during input
+    /// preparation. The backend reads this to decide whether to fire a
+    /// `MLXPromptCacheCoordinator.makeSnapshotCaptureTask`.
+    let snapshotInputs: MLXPromptCacheCoordinator.SnapshotCaptureInputs?
+  }
+
+  /// High-level orchestrator: encodes chat messages, prepares the model
+  /// input and KV cache (honouring reuse eligibility), seeds the RNG,
+  /// constructs `GenerateParameters`, and drives the token stream via
+  /// ``run(...)``.
+  ///
+  /// This is the entry point the backend calls — `run(...)` stays public
+  /// to the file so the inner token-streaming loop remains independently
+  /// testable, but the backend never has to reach past `generate(...)`.
+  ///
+  /// On the happy path the function yields `.kvCacheReuse` (when a prompt
+  /// prefix was restored) and the full event stream from the inner loop
+  /// into `continuation`. The caller is responsible for `continuation.finish()`
+  /// and `generationStream.setPhase(...)` once the function returns or
+  /// throws. The driver only yields events and updates the "streaming" phase
+  /// on first content (mirrors the previous in-backend behaviour).
+  func generate(
+    prompt: String,
+    systemPrompt: String?,
+    config: GenerationConfig,
+    loadOptions: BackendLoadOptions,
+    container: any MLXModelContainerProtocol,
+    conversationHistory: [(role: String, content: String)],
+    toolAwareHistory: [ToolAwareHistoryEntry]?,
+    structuredHistory: [StructuredMessage]?,
+    dialect: MLXToolDialect,
+    autoDetectedMarkers: ThinkingMarkers?,
+    kvCacheReuseEligible: Bool,
+    pendingSnapshotTask: Task<Void, Never>?,
+    // Re-reading the snapshot AFTER awaiting `pendingSnapshotTask` is load-bearing:
+    // the prior turn's snapshot task writes to backend state, and a value captured
+    // before the await is always stale on second turn. See driver lines 169-174.
+    currentSnapshot: @MainActor @Sendable () -> MLXPromptCacheCoordinator.Snapshot?,
+    // Pre-parsed GBNF grammar (#96). Non-nil when the request set
+    // `config.grammar` and the backend parsed it; the inner loop builds an
+    // ``MLXGrammarLogitProcessor`` from it.
+    grammar: GBNFGrammar?,
+    // Per-request runtime hints (ManifoldKit #2152) — carries
+    // `thinkingMarkers` now that it has moved off `GenerationConfig`.
+    hints: GenerationRuntimeHints,
+    generationStream: GenerationStream,
+    continuation: AsyncThrowingStream<GenerationEvent, Error>.Continuation,
+    yieldHook: (@Sendable () async -> Void)?,
+    // Reports the KV cache's running `offset` (prompt + completion tokens,
+    // including any reused-turn history) after every generation attempt —
+    // success, thrown error, or cancellation (#2348). The driver is a pure
+    // reporter here: it does not know the model's trained context or the
+    // load-time memory budget, and does not decide whether either ceiling
+    // was crossed or whether to log anything. `MLXBackend` owns that
+    // policy (comparison thresholds, once-per-session rate limiting, the
+    // actual warning) because it is the one with persistent per-session
+    // state — this driver is deliberately stateless (see the type doc).
+    onContextCheck: @MainActor @Sendable (_ runningContext: Int) -> Void
+  ) async throws -> GenerateResult {
+    // Seed the MLX global RandomState before constructing GenerateParameters
+    // so the sampler's per-instance `RandomState()` (initialised from the
+    // default state) produces a deterministic token stream. `nil` skips
+    // seeding entirely — the process keeps whatever entropy MLX last picked up.
+    if let seed = config.seed {
+      MLXRandom.seed(seed)
     }
 
-    /// Outcome of a `generate(...)` call.
-    ///
-    /// Wraps `RunResult` and surfaces the inputs the backend needs to schedule
-    /// a post-generation prompt-cache snapshot capture. The backend owns the
-    /// snapshot lineage (write-token bookkeeping, install under the state
-    /// lock), so the driver returns the *materials* for the capture rather
-    /// than performing it.
-    struct GenerateResult {
-        let run: RunResult
-        /// Non-nil only when KV-cache reuse was eligible, the run completed
-        /// normally, and a prompt-token array was captured during input
-        /// preparation. The backend reads this to decide whether to fire a
-        /// `MLXPromptCacheCoordinator.makeSnapshotCaptureTask`.
-        let snapshotInputs: MLXPromptCacheCoordinator.SnapshotCaptureInputs?
+    // KV cache quantization: nil = library default (FP16). 8 / 4 map to mlx's
+    // explicit kvBits levels. Group size 64 and quantizedKVStart 0 match
+    // mlx-lm Python conventions and have no exposure on the BCK API yet.
+    let kvBits: Int? = {
+      switch loadOptions.kvCacheQuantization {
+      case .f16: return nil
+      case .q8: return 8
+      case .q4: return 4
+      }
+    }()
+
+    let generateConfig = GenerateParameters(
+      kvBits: kvBits,
+      temperature: config.temperature,
+      topP: config.topP,
+      topK: Int(config.topK ?? 0),
+      minP: config.minP ?? 0.0,
+      repetitionPenalty: config.repetitionPenalty ?? config.repeatPenalty,
+      repetitionContextSize: config.repetitionContextSize ?? 20,
+      presencePenalty: config.presencePenalty,
+      presenceContextSize: config.presenceContextSize ?? 20,
+      frequencyPenalty: config.frequencyPenalty,
+      frequencyContextSize: config.frequencyContextSize ?? 20,
+      prefillStepSize: loadOptions.prefillBatchSize ?? 512
+    )
+
+    let effectiveSystemPrompt: String? = MLXChatMessageEncoder.effectiveSystemPrompt(
+      systemPrompt: systemPrompt,
+      config: config,
+      dialect: dialect
+    )
+
+    let (chatMessages, messages) = try MLXChatMessageEncoder.buildChatMessages(
+      prompt: prompt,
+      effectiveSystemPrompt: effectiveSystemPrompt,
+      conversationHistory: conversationHistory,
+      toolAwareHistory: toolAwareHistory,
+      structuredHistory: structuredHistory,
+      dialect: dialect
+    )
+
+    // Structural tools: for tools-aware-template dialects (Mistral) thread
+    // the tool descriptors into `applyChatTemplate(messages:tools:)` so the
+    // model's own template renders its native tool block (`[AVAILABLE_TOOLS]`)
+    // instead of relying on a hand-built prose block (Phase 0 / #2005, F3).
+    // `nil` for Llama/Qwen/unknown — those keep the prose path unchanged.
+    let toolSpecs = MLXChatMessageEncoder.structuralToolSpecs(
+      config: config,
+      dialect: dialect
+    )
+
+    let resolvedMarkers = resolveThinkingMarkers(
+      config: config,
+      hints: hints,
+      autoDetected: autoDetectedMarkers
+    )
+
+    // Wait for any pending KV snapshot capture from the previous turn to
+    // complete before we restore from it — otherwise we'd race
+    // `Snapshot` writes against reads. Then re-read the snapshot from
+    // backend state: a value captured before the await is stale because
+    // the snapshot task writes there.
+    if kvCacheReuseEligible, let pendingSnapshotTask {
+      await pendingSnapshotTask.value
+    }
+    let resolvedSnapshot: MLXPromptCacheCoordinator.Snapshot? =
+      kvCacheReuseEligible ? currentSnapshot() : nil
+
+    let prepared = try await MLXPromptCacheCoordinator.prepareInputAndCache(
+      container: container,
+      chatMessages: chatMessages,
+      messages: messages,
+      toolSpecs: toolSpecs,
+      generateConfig: generateConfig,
+      kvCacheReuseEligible: kvCacheReuseEligible,
+      snapshot: resolvedSnapshot
+    )
+    if prepared.reuseLen > 0 {
+      continuation.yield(.kvCacheReuse(promptTokensReused: prepared.reuseLen))
+    } else if kvCacheReuseEligible {
+      // Surface *why* a reuse-eligible turn fell back to a full prefill —
+      // hybrid/recurrent layers that can't slice show up here instead of
+      // an invisible performance cliff.
+      Self.logger.debug(
+        "MLX prompt-cache reuse missed: \(prepared.reuseReason.description, privacy: .public)"
+      )
     }
 
-    /// High-level orchestrator: encodes chat messages, prepares the model
-    /// input and KV cache (honouring reuse eligibility), seeds the RNG,
-    /// constructs `GenerateParameters`, and drives the token stream via
-    /// ``run(...)``.
-    ///
-    /// This is the entry point the backend calls — `run(...)` stays public
-    /// to the file so the inner token-streaming loop remains independently
-    /// testable, but the backend never has to reach past `generate(...)`.
-    ///
-    /// On the happy path the function yields `.kvCacheReuse` (when a prompt
-    /// prefix was restored) and the full event stream from the inner loop
-    /// into `continuation`. The caller is responsible for `continuation.finish()`
-    /// and `generationStream.setPhase(...)` once the function returns or
-    /// throws. The driver only yields events and updates the "streaming" phase
-    /// on first content (mirrors the previous in-backend behaviour).
-    func generate(
-        prompt: String,
-        systemPrompt: String?,
-        config: GenerationConfig,
-        loadOptions: BackendLoadOptions,
-        container: any MLXModelContainerProtocol,
-        conversationHistory: [(role: String, content: String)],
-        toolAwareHistory: [ToolAwareHistoryEntry]?,
-        structuredHistory: [StructuredMessage]?,
-        dialect: MLXToolDialect,
-        autoDetectedMarkers: ThinkingMarkers?,
-        kvCacheReuseEligible: Bool,
-        pendingSnapshotTask: Task<Void, Never>?,
-        // Re-reading the snapshot AFTER awaiting `pendingSnapshotTask` is load-bearing:
-        // the prior turn's snapshot task writes to backend state, and a value captured
-        // before the await is always stale on second turn. See driver lines 169-174.
-        currentSnapshot: @MainActor @Sendable () -> MLXPromptCacheCoordinator.Snapshot?,
-        // Pre-parsed GBNF grammar (#96). Non-nil when the request set
-        // `config.grammar` and the backend parsed it; the inner loop builds an
-        // ``MLXGrammarLogitProcessor`` from it.
-        grammar: GBNFGrammar?,
-        // Per-request runtime hints (ManifoldKit #2152) — carries
-        // `thinkingMarkers` now that it has moved off `GenerationConfig`.
-        hints: GenerationRuntimeHints,
-        generationStream: GenerationStream,
-        continuation: AsyncThrowingStream<GenerationEvent, Error>.Continuation,
-        yieldHook: (@Sendable () async -> Void)?,
-        // Reports the KV cache's running `offset` (prompt + completion tokens,
-        // including any reused-turn history) after every generation attempt —
-        // success, thrown error, or cancellation (#2348). The driver is a pure
-        // reporter here: it does not know the model's trained context or the
-        // load-time memory budget, and does not decide whether either ceiling
-        // was crossed or whether to log anything. `MLXBackend` owns that
-        // policy (comparison thresholds, once-per-session rate limiting, the
-        // actual warning) because it is the one with persistent per-session
-        // state — this driver is deliberately stateless (see the type doc).
-        onContextCheck: @MainActor @Sendable (_ runningContext: Int) -> Void
-    ) async throws -> GenerateResult {
-        // Seed the MLX global RandomState before constructing GenerateParameters
-        // so the sampler's per-instance `RandomState()` (initialised from the
-        // default state) produces a deterministic token stream. `nil` skips
-        // seeding entirely — the process keeps whatever entropy MLX last picked up.
-        if let seed = config.seed {
-            MLXRandom.seed(seed)
+    // `defer`, not a post-call statement: MLX-5 review — a turn that
+    // throws (e.g. a tokenizer/model error) or is cancelled must still
+    // report the cache's running offset, since the cache can have already
+    // grown past a ceiling before the failure. `defer` runs on every exit
+    // path from here, including `try await run(...)` throwing. Cancellation
+    // does not throw (the inner loop `break`s and `run` returns normally),
+    // so it was already covered before this comment — this only fixes the
+    // throw path.
+    defer {
+      if let runningContext = prepared.cache.value.map(\.offset).max() {
+        onContextCheck(runningContext)
+      }
+    }
+
+    let result = try await run(
+      container: container,
+      generationInput: prepared.generationInput,
+      cache: prepared.cache,
+      generateConfig: generateConfig,
+      config: config,
+      dialect: dialect,
+      markers: resolvedMarkers,
+      grammar: grammar,
+      generationStream: generationStream,
+      continuation: continuation,
+      yieldHook: yieldHook
+    )
+
+    let snapshotInputs: MLXPromptCacheCoordinator.SnapshotCaptureInputs? =
+      if kvCacheReuseEligible,
+        result.completedNormally,
+        let ids = prepared.promptTokenIds
+      {
+        MLXPromptCacheCoordinator.SnapshotCaptureInputs(
+          cache: prepared.cache,
+          promptTokenIds: ids
+        )
+      } else {
+        nil
+      }
+
+    let usage: TokenUsage
+    if let info = result.completionInfo {
+      usage = TokenUsage(
+        promptTokens: info.promptTokenCount,
+        completionTokens: info.generationTokenCount
+      )
+    } else {
+      usage = TokenUsage(
+        promptTokens: prepared.generationInput.promptTokenIds.count,
+        completionTokens: result.completionTokenCount
+      )
+    }
+    continuation.yield(.usage(usage))
+
+    return GenerateResult(run: result, snapshotInputs: snapshotInputs)
+  }
+
+  /// Resolves the active thinking-marker pair from the per-request override
+  /// (`hints.thinkingMarkers`), then the load-time auto-detected markers.
+  /// Returns `nil` when `config.maxThinkingTokens == 0` (issue #597) or when
+  /// neither source supplied markers — both cases keep `ThinkingTransform` off.
+  ///
+  /// Lives on the driver because marker resolution is generation-time policy.
+  /// `MLXBackend.resolveThinkingMarkers` forwards to this for source-compat
+  /// with `MLXBackendHelpersTests`.
+  nonisolated static func resolveThinkingMarkers(
+    config: GenerationConfig,
+    hints: GenerationRuntimeHints,
+    autoDetected: ThinkingMarkers?
+  ) -> ThinkingMarkers? {
+    if config.maxThinkingTokens == 0 { return nil }
+    return hints.thinkingMarkers ?? autoDetected
+  }
+
+  /// Non-static, `@MainActor` forwarder so call sites already inside the
+  /// driver's actor don't need to qualify the type.
+  func resolveThinkingMarkers(
+    config: GenerationConfig,
+    hints: GenerationRuntimeHints,
+    autoDetected: ThinkingMarkers?
+  ) -> ThinkingMarkers? {
+    Self.resolveThinkingMarkers(config: config, hints: hints, autoDetected: autoDetected)
+  }
+
+  /// Drives the MLX stream:
+  ///   1. Calls `container.generate(...)` to materialise the underlying token stream.
+  ///   2. Routes each chunk through the optional tool-call parser, then the optional
+  ///      thinking parser.
+  ///   3. Enforces `config.maxOutputTokens` and `config.maxThinkingTokens`.
+  ///   4. Issues a cooperative `Task.yield()` (or the test hook) every
+  ///      `config.yieldEveryNTokens` chunks to keep the WindowServer GPU queue moving.
+  ///   5. Flushes both parsers' tail buffers on exit.
+  ///
+  /// On any thrown error the caller wraps the call in a do/catch and is
+  /// responsible for setting the `generationStream`'s failure phase. This
+  /// helper only yields events into `continuation`; it does not call
+  /// `continuation.finish()` — the caller owns lifecycle.
+  func run(
+    container: any MLXModelContainerProtocol,
+    generationInput: MLXPreparedInput,
+    cache: MLXPromptCache,
+    generateConfig: GenerateParameters,
+    config: GenerationConfig,
+    dialect: MLXToolDialect,
+    markers: ThinkingMarkers?,
+    grammar: GBNFGrammar?,
+    generationStream: GenerationStream,
+    continuation: AsyncThrowingStream<GenerationEvent, Error>.Continuation,
+    yieldHook: (@Sendable () async -> Void)?
+  ) async throws -> RunResult {
+    Self.logger.debug("MLXGenerationDriver run started")
+
+    let outputLimit = config.maxOutputTokens
+    var outputTokenCount = 0
+    var isFirstToken = true
+    var capturedCompletionInfo: GenerateCompletionInfo?
+
+    // Build the unified output-parsing chain. Order is `[tool, thinking]`:
+    // tool tags are stripped first, then the thinking transform re-scans the
+    // remaining visible `.token` text — preserving MLX's historical
+    // two-stage order exactly.
+    let useThinkingParser = markers != nil
+    // Tool-call stage activates only when tools are configured AND the model
+    // speaks a known dialect.
+    let useToolParser = !config.tools.isEmpty && dialect != .unknown
+    var stages: [Stage] = []
+    if useToolParser {
+      stages.append(.tool(ToolCallTransform(markers: MLXToolMarkers.markers(dialect: dialect))))
+    }
+    if useThinkingParser {
+      stages.append(.thinking(ThinkingTransform(markers: markers ?? .qwen3)))
+    }
+    var session = OutputParserSession(stages)
+
+    // Recover Llama's native `<|python_tag|>` tool-call channel: MLX drops
+    // the `<|eom_id|>` / `<|eot_id|>` close tokens (they are stop tokens, so
+    // the generate loop breaks before detokenising them), leaving the
+    // python-tag block unterminated. The normaliser injects a synthetic close
+    // at stream end so the `<|python_tag|>` marker can fire (issue #59 tail).
+    // Identity for every non-`.llama` dialect and for the textual
+    // `<tool_call>` wrapper, so Qwen and the steered-Llama path are unchanged.
+    var llamaNormalizer = MLXLlamaPythonTagNormalizer(dialect: dialect)
+
+    // Repair Mistral's `[TOOL_CALLS]` channel: MLX's detokenizer drops the
+    // JSON quote/space structural tokens, so the emitted call is malformed
+    // and `MLXToolMarkers.mistral` extracts 0 calls (umbrella #2005, F3 —
+    // same mechanism as #59). The normaliser buffers the whole stream and
+    // re-quotes / rebuilds canonical JSON at `finalize()`. Identity for every
+    // non-`.mistral` dialect; valid JSON passes through unchanged.
+    var mistralNormalizer = MLXMistralToolCallNormalizer(dialect: dialect)
+
+    // A thinking model that runs away on a 16 GB Mac can OOM mid-generation;
+    // the budget gate breaks out of the stream once the limit is reached.
+    var thinkingTokenCount = 0
+    var thinkingLimitReached = false
+
+    // Wrap `container.generate` in MLX's error handler so that fatal model
+    // errors (e.g. Gemma4 MoE broadcast shape mismatch — issue #802) are
+    // converted from uncatchable `fatalError` calls into thrown Swift errors
+    // that the caller can surface as InferenceError rather than crashing the app.
+    //
+    // The handler is @Sendable because MLX may invoke it from a C++ thread.
+    // MLXErrorCapture is @unchecked Sendable so it can safely cross the
+    // boundary. The body is @Sendable because all captured params (container,
+    // generationInput, cache, generateConfig) conform to Sendable; generate()
+    // handles its own actor isolation internally via ModelContainer.perform.
+    final class MLXErrorCapture: @unchecked Sendable {
+      var message: String?
+    }
+    let capture = MLXErrorCapture()
+    // swift-format-ignore: OnlyOneTrailingClosureArgument
+    // `withErrorHandler` is defined outside this repo (external MLX
+    // dependency); restructuring this call without its source in front of us
+    // risks silently changing which parameter binds the trailing closure.
+    let mlxStream = try await withErrorHandler(
+      { @Sendable in capture.message = capture.message ?? $0 }
+    ) { @Sendable in
+      try await container.generate(
+        input: generationInput,
+        cache: cache,
+        parameters: generateConfig,
+        grammar: grammar
+      )
+    }
+    if let message = capture.message {
+      throw InferenceError.inferenceFailure(message)
+    }
+
+    let yieldEvery = config.yieldEveryNTokens
+    var completionTokenCount = 0
+    outer: for await generation in mlxStream {
+      if Task.isCancelled { break }
+      if let info = generation.info {
+        capturedCompletionInfo = info
+        continue
+      }
+      // Forward tool calls that mlx-swift-lm's own `ToolCallProcessor`
+      // already parsed. For inline formats (Llama 3 `<|python_tag|>`/JSON,
+      // bare JSON) it swallows the call text upstream and emits a
+      // structured `.toolCall` instead of a `.chunk`, so the textual
+      // marker path below never sees those bytes. Without this the parsed
+      // call was silently dropped (empty answer, 0 tools dispatched).
+      // This is mutually exclusive with the chunk path — a swallowed call
+      // produces no `.chunk`, so there is no double-emit with the session
+      // parser; the `<tool_call>` text path remains a fallback for formats
+      // MLX surfaces as visible text.
+      if let nativeCall = generation.toolCall {
+        if isFirstToken {
+          generationStream.setPhase(.streaming)
+          isFirstToken = false
         }
+        continuation.yield(.toolCall(MLXToolMarkers.toolCall(fromNative: nativeCall)))
+        continue
+      }
+      guard let rawText = generation.chunk else { continue }
+      // Normalise the Llama python-tag channel (identity for other dialects).
+      // The result can be empty when the whole chunk is a held-back partial
+      // tag suffix; the ingest loop below is a no-op in that case, but the
+      // per-chunk yield cadence still counts this as real generation work.
+      let text = mistralNormalizer.process(llamaNormalizer.process(rawText))
 
-        // KV cache quantization: nil = library default (FP16). 8 / 4 map to mlx's
-        // explicit kvBits levels. Group size 64 and quantizedKVStart 0 match
-        // mlx-lm Python conventions and have no exposure on the BCK API yet.
-        let kvBits: Int? = {
-            switch loadOptions.kvCacheQuantization {
-            case .f16: return nil
-            case .q8:  return 8
-            case .q4:  return 4
-            }
-        }()
-
-        let generateConfig = GenerateParameters(
-            kvBits: kvBits,
-            temperature: config.temperature,
-            topP: config.topP,
-            topK: Int(config.topK ?? 0),
-            minP: config.minP ?? 0.0,
-            repetitionPenalty: config.repetitionPenalty ?? config.repeatPenalty,
-            repetitionContextSize: config.repetitionContextSize ?? 20,
-            presencePenalty: config.presencePenalty,
-            presenceContextSize: config.presenceContextSize ?? 20,
-            frequencyPenalty: config.frequencyPenalty,
-            frequencyContextSize: config.frequencyContextSize ?? 20,
-            prefillStepSize: loadOptions.prefillBatchSize ?? 512
-        )
-
-        let effectiveSystemPrompt: String? = MLXChatMessageEncoder.effectiveSystemPrompt(
-            systemPrompt: systemPrompt,
-            config: config,
-            dialect: dialect
-        )
-
-        let (chatMessages, messages) = try MLXChatMessageEncoder.buildChatMessages(
-            prompt: prompt,
-            effectiveSystemPrompt: effectiveSystemPrompt,
-            conversationHistory: conversationHistory,
-            toolAwareHistory: toolAwareHistory,
-            structuredHistory: structuredHistory,
-            dialect: dialect
-        )
-
-        // Structural tools: for tools-aware-template dialects (Mistral) thread
-        // the tool descriptors into `applyChatTemplate(messages:tools:)` so the
-        // model's own template renders its native tool block (`[AVAILABLE_TOOLS]`)
-        // instead of relying on a hand-built prose block (Phase 0 / #2005, F3).
-        // `nil` for Llama/Qwen/unknown — those keep the prose path unchanged.
-        let toolSpecs = MLXChatMessageEncoder.structuralToolSpecs(
-            config: config,
-            dialect: dialect
-        )
-
-        let resolvedMarkers = resolveThinkingMarkers(
-            config: config,
-            hints: hints,
-            autoDetected: autoDetectedMarkers
-        )
-
-        // Wait for any pending KV snapshot capture from the previous turn to
-        // complete before we restore from it — otherwise we'd race
-        // `Snapshot` writes against reads. Then re-read the snapshot from
-        // backend state: a value captured before the await is stale because
-        // the snapshot task writes there.
-        if kvCacheReuseEligible, let pendingSnapshotTask {
-            await pendingSnapshotTask.value
+      for finalEvent in session.ingest(text) {
+        if isFirstToken {
+          switch finalEvent {
+          case .token, .thinkingToken, .toolCall:
+            generationStream.setPhase(.streaming)
+            isFirstToken = false
+          default: break
+          }
         }
-        let resolvedSnapshot: MLXPromptCacheCoordinator.Snapshot? =
-            kvCacheReuseEligible ? currentSnapshot() : nil
-
-        let prepared = try await MLXPromptCacheCoordinator.prepareInputAndCache(
-            container: container,
-            chatMessages: chatMessages,
-            messages: messages,
-            toolSpecs: toolSpecs,
-            generateConfig: generateConfig,
-            kvCacheReuseEligible: kvCacheReuseEligible,
-            snapshot: resolvedSnapshot
-        )
-        if prepared.reuseLen > 0 {
-            continuation.yield(.kvCacheReuse(promptTokensReused: prepared.reuseLen))
-        } else if kvCacheReuseEligible {
-            // Surface *why* a reuse-eligible turn fell back to a full prefill —
-            // hybrid/recurrent layers that can't slice show up here instead of
-            // an invisible performance cliff.
-            Self.logger.debug(
-                "MLX prompt-cache reuse missed: \(prepared.reuseReason.description, privacy: .public)"
-            )
+        if case .token = finalEvent { outputTokenCount += 1 }
+        continuation.yield(finalEvent)
+        if case .thinkingToken = finalEvent {
+          thinkingTokenCount += 1
+          if let limit = config.maxThinkingTokens, thinkingTokenCount >= limit {
+            thinkingLimitReached = true
+            break
+          }
         }
+      }
+      if thinkingLimitReached { break outer }
+      if let limit = outputLimit, outputTokenCount >= limit { break }
 
-        // `defer`, not a post-call statement: MLX-5 review — a turn that
-        // throws (e.g. a tokenizer/model error) or is cancelled must still
-        // report the cache's running offset, since the cache can have already
-        // grown past a ceiling before the failure. `defer` runs on every exit
-        // path from here, including `try await run(...)` throwing. Cancellation
-        // does not throw (the inner loop `break`s and `run` returns normally),
-        // so it was already covered before this comment — this only fixes the
-        // throw path.
-        defer {
-            if let runningContext = prepared.cache.value.map(\.offset).max() {
-                onContextCheck(runningContext)
-            }
-        }
-
-        let result = try await run(
-            container: container,
-            generationInput: prepared.generationInput,
-            cache: prepared.cache,
-            generateConfig: generateConfig,
-            config: config,
-            dialect: dialect,
-            markers: resolvedMarkers,
-            grammar: grammar,
-            generationStream: generationStream,
-            continuation: continuation,
-            yieldHook: yieldHook
-        )
-
-        let snapshotInputs: MLXPromptCacheCoordinator.SnapshotCaptureInputs? =
-            if kvCacheReuseEligible,
-               result.completedNormally,
-               let ids = prepared.promptTokenIds
-            {
-                MLXPromptCacheCoordinator.SnapshotCaptureInputs(
-                    cache: prepared.cache,
-                    promptTokenIds: ids
-                )
-            } else {
-                nil
-            }
-
-        let usage: TokenUsage
-        if let info = result.completionInfo {
-            usage = TokenUsage(
-                promptTokens: info.promptTokenCount,
-                completionTokens: info.generationTokenCount
-            )
+      // Per-chunk yield: counted on every MLX-emitted chunk regardless
+      // of whether it surfaced as visible text, was swallowed by the
+      // tool-call parser, or wrapped in thinking tags — so the cadence
+      // tracks real generation work.
+      completionTokenCount += 1
+      if yieldEvery > 0 && completionTokenCount % yieldEvery == 0 {
+        if let yieldHook {
+          await yieldHook()
         } else {
-            usage = TokenUsage(
-                promptTokens: prepared.generationInput.promptTokenIds.count,
-                completionTokens: result.completionTokenCount
-            )
+          await Task.yield()
         }
-        continuation.yield(.usage(usage))
-
-        return GenerateResult(run: result, snapshotInputs: snapshotInputs)
+      }
     }
 
-    /// Resolves the active thinking-marker pair from the per-request override
-    /// (`hints.thinkingMarkers`), then the load-time auto-detected markers.
-    /// Returns `nil` when `config.maxThinkingTokens == 0` (issue #597) or when
-    /// neither source supplied markers — both cases keep `ThinkingTransform` off.
-    ///
-    /// Lives on the driver because marker resolution is generation-time policy.
-    /// `MLXBackend.resolveThinkingMarkers` forwards to this for source-compat
-    /// with `MLXBackendHelpersTests`.
-    nonisolated static func resolveThinkingMarkers(
-        config: GenerationConfig,
-        hints: GenerationRuntimeHints,
-        autoDetected: ThinkingMarkers?
-    ) -> ThinkingMarkers? {
-        if config.maxThinkingTokens == 0 { return nil }
-        return hints.thinkingMarkers ?? autoDetected
+    // Flush the python-tag normaliser first: if a `<|python_tag|>` block was
+    // left open (its `<|eom_id|>` / `<|eot_id|>` close dropped by MLX), this
+    // emits the held-back tail plus a synthetic close so the tool marker
+    // fires during the session finalize below. Identity for other dialects.
+    // Mistral runs first in the chain order at finalize: the Llama normaliser
+    // passed every Mistral chunk through untouched (it is identity for
+    // `.mistral`), so the buffered stream lives in the Mistral normaliser.
+    // Its finalize emits the repaired (or pass-through) `[TOOL_CALLS]` text;
+    // that text is then run through the Llama normaliser's finalize (identity
+    // for `.mistral`) so the two-stage tail order is preserved.
+    let normalizerTail = llamaNormalizer.finalize() + mistralNormalizer.finalize()
+    if !normalizerTail.isEmpty {
+      for event in session.ingest(normalizerTail) {
+        if isFirstToken {
+          switch event {
+          case .token, .thinkingToken, .toolCall:
+            generationStream.setPhase(.streaming)
+            Self._streamingPhaseSetInTailHook?()
+            isFirstToken = false
+          default: break
+          }
+        }
+        if case .token = event { outputTokenCount += 1 }
+        continuation.yield(event)
+      }
     }
 
-    /// Non-static, `@MainActor` forwarder so call sites already inside the
-    /// driver's actor don't need to qualify the type.
-    func resolveThinkingMarkers(
-        config: GenerationConfig,
-        hints: GenerationRuntimeHints,
-        autoDetected: ThinkingMarkers?
-    ) -> ThinkingMarkers? {
-        Self.resolveThinkingMarkers(config: config, hints: hints, autoDetected: autoDetected)
+    // Flush the chain's tail buffers. The session cascades each stage's
+    // finalize output through the stages downstream of it, so any text the
+    // tool stage releases is still scanned by the thinking stage — matching
+    // the previous two-stage finalize pipeline.
+    for event in session.finalize() {
+      continuation.yield(event)
     }
 
-    /// Drives the MLX stream:
-    ///   1. Calls `container.generate(...)` to materialise the underlying token stream.
-    ///   2. Routes each chunk through the optional tool-call parser, then the optional
-    ///      thinking parser.
-    ///   3. Enforces `config.maxOutputTokens` and `config.maxThinkingTokens`.
-    ///   4. Issues a cooperative `Task.yield()` (or the test hook) every
-    ///      `config.yieldEveryNTokens` chunks to keep the WindowServer GPU queue moving.
-    ///   5. Flushes both parsers' tail buffers on exit.
-    ///
-    /// On any thrown error the caller wraps the call in a do/catch and is
-    /// responsible for setting the `generationStream`'s failure phase. This
-    /// helper only yields events into `continuation`; it does not call
-    /// `continuation.finish()` — the caller owns lifecycle.
-    func run(
-        container: any MLXModelContainerProtocol,
-        generationInput: MLXPreparedInput,
-        cache: MLXPromptCache,
-        generateConfig: GenerateParameters,
-        config: GenerationConfig,
-        dialect: MLXToolDialect,
-        markers: ThinkingMarkers?,
-        grammar: GBNFGrammar?,
-        generationStream: GenerationStream,
-        continuation: AsyncThrowingStream<GenerationEvent, Error>.Continuation,
-        yieldHook: (@Sendable () async -> Void)?
-    ) async throws -> RunResult {
-        Self.logger.debug("MLXGenerationDriver run started")
-
-        let outputLimit = config.maxOutputTokens
-        var outputTokenCount = 0
-        var isFirstToken = true
-        var capturedCompletionInfo: GenerateCompletionInfo?
-
-        // Build the unified output-parsing chain. Order is `[tool, thinking]`:
-        // tool tags are stripped first, then the thinking transform re-scans the
-        // remaining visible `.token` text — preserving MLX's historical
-        // two-stage order exactly.
-        let useThinkingParser = markers != nil
-        // Tool-call stage activates only when tools are configured AND the model
-        // speaks a known dialect.
-        let useToolParser = !config.tools.isEmpty && dialect != .unknown
-        var stages: [Stage] = []
-        if useToolParser {
-            stages.append(.tool(ToolCallTransform(markers: MLXToolMarkers.markers(dialect: dialect))))
-        }
-        if useThinkingParser {
-            stages.append(.thinking(ThinkingTransform(markers: markers ?? .qwen3)))
-        }
-        var session = OutputParserSession(stages)
-
-        // Recover Llama's native `<|python_tag|>` tool-call channel: MLX drops
-        // the `<|eom_id|>` / `<|eot_id|>` close tokens (they are stop tokens, so
-        // the generate loop breaks before detokenising them), leaving the
-        // python-tag block unterminated. The normaliser injects a synthetic close
-        // at stream end so the `<|python_tag|>` marker can fire (issue #59 tail).
-        // Identity for every non-`.llama` dialect and for the textual
-        // `<tool_call>` wrapper, so Qwen and the steered-Llama path are unchanged.
-        var llamaNormalizer = MLXLlamaPythonTagNormalizer(dialect: dialect)
-
-        // Repair Mistral's `[TOOL_CALLS]` channel: MLX's detokenizer drops the
-        // JSON quote/space structural tokens, so the emitted call is malformed
-        // and `MLXToolMarkers.mistral` extracts 0 calls (umbrella #2005, F3 —
-        // same mechanism as #59). The normaliser buffers the whole stream and
-        // re-quotes / rebuilds canonical JSON at `finalize()`. Identity for every
-        // non-`.mistral` dialect; valid JSON passes through unchanged.
-        var mistralNormalizer = MLXMistralToolCallNormalizer(dialect: dialect)
-
-        // A thinking model that runs away on a 16 GB Mac can OOM mid-generation;
-        // the budget gate breaks out of the stream once the limit is reached.
-        var thinkingTokenCount = 0
-        var thinkingLimitReached = false
-
-        // Wrap `container.generate` in MLX's error handler so that fatal model
-        // errors (e.g. Gemma4 MoE broadcast shape mismatch — issue #802) are
-        // converted from uncatchable `fatalError` calls into thrown Swift errors
-        // that the caller can surface as InferenceError rather than crashing the app.
-        //
-        // The handler is @Sendable because MLX may invoke it from a C++ thread.
-        // MLXErrorCapture is @unchecked Sendable so it can safely cross the
-        // boundary. The body is @Sendable because all captured params (container,
-        // generationInput, cache, generateConfig) conform to Sendable; generate()
-        // handles its own actor isolation internally via ModelContainer.perform.
-        final class MLXErrorCapture: @unchecked Sendable {
-            var message: String?
-        }
-        let capture = MLXErrorCapture()
-        let mlxStream = try await withErrorHandler(
-            { @Sendable in capture.message = capture.message ?? $0 }
-        ) { @Sendable in
-            try await container.generate(
-                input: generationInput,
-                cache: cache,
-                parameters: generateConfig,
-                grammar: grammar
-            )
-        }
-        if let message = capture.message {
-            throw InferenceError.inferenceFailure(message)
-        }
-
-        let yieldEvery = config.yieldEveryNTokens
-        var completionTokenCount = 0
-        outer: for await generation in mlxStream {
-            if Task.isCancelled { break }
-            if let info = generation.info {
-                capturedCompletionInfo = info
-                continue
-            }
-            // Forward tool calls that mlx-swift-lm's own `ToolCallProcessor`
-            // already parsed. For inline formats (Llama 3 `<|python_tag|>`/JSON,
-            // bare JSON) it swallows the call text upstream and emits a
-            // structured `.toolCall` instead of a `.chunk`, so the textual
-            // marker path below never sees those bytes. Without this the parsed
-            // call was silently dropped (empty answer, 0 tools dispatched).
-            // This is mutually exclusive with the chunk path — a swallowed call
-            // produces no `.chunk`, so there is no double-emit with the session
-            // parser; the `<tool_call>` text path remains a fallback for formats
-            // MLX surfaces as visible text.
-            if let nativeCall = generation.toolCall {
-                if isFirstToken {
-                    generationStream.setPhase(.streaming)
-                    isFirstToken = false
-                }
-                continuation.yield(.toolCall(MLXToolMarkers.toolCall(fromNative: nativeCall)))
-                continue
-            }
-            guard let rawText = generation.chunk else { continue }
-            // Normalise the Llama python-tag channel (identity for other dialects).
-            // The result can be empty when the whole chunk is a held-back partial
-            // tag suffix; the ingest loop below is a no-op in that case, but the
-            // per-chunk yield cadence still counts this as real generation work.
-            let text = mistralNormalizer.process(llamaNormalizer.process(rawText))
-
-            for finalEvent in session.ingest(text) {
-                if isFirstToken {
-                    switch finalEvent {
-                    case .token, .thinkingToken, .toolCall:
-                        generationStream.setPhase(.streaming)
-                        isFirstToken = false
-                    default: break
-                    }
-                }
-                if case .token = finalEvent { outputTokenCount += 1 }
-                continuation.yield(finalEvent)
-                if case .thinkingToken = finalEvent {
-                    thinkingTokenCount += 1
-                    if let limit = config.maxThinkingTokens, thinkingTokenCount >= limit {
-                        thinkingLimitReached = true
-                        break
-                    }
-                }
-            }
-            if thinkingLimitReached { break outer }
-            if let limit = outputLimit, outputTokenCount >= limit { break }
-
-            // Per-chunk yield: counted on every MLX-emitted chunk regardless
-            // of whether it surfaced as visible text, was swallowed by the
-            // tool-call parser, or wrapped in thinking tags — so the cadence
-            // tracks real generation work.
-            completionTokenCount += 1
-            if yieldEvery > 0 && completionTokenCount % yieldEvery == 0 {
-                if let yieldHook {
-                    await yieldHook()
-                } else {
-                    await Task.yield()
-                }
-            }
-        }
-
-        // Flush the python-tag normaliser first: if a `<|python_tag|>` block was
-        // left open (its `<|eom_id|>` / `<|eot_id|>` close dropped by MLX), this
-        // emits the held-back tail plus a synthetic close so the tool marker
-        // fires during the session finalize below. Identity for other dialects.
-        // Mistral runs first in the chain order at finalize: the Llama normaliser
-        // passed every Mistral chunk through untouched (it is identity for
-        // `.mistral`), so the buffered stream lives in the Mistral normaliser.
-        // Its finalize emits the repaired (or pass-through) `[TOOL_CALLS]` text;
-        // that text is then run through the Llama normaliser's finalize (identity
-        // for `.mistral`) so the two-stage tail order is preserved.
-        let normalizerTail = llamaNormalizer.finalize() + mistralNormalizer.finalize()
-        if !normalizerTail.isEmpty {
-            for event in session.ingest(normalizerTail) {
-                if isFirstToken {
-                    switch event {
-                    case .token, .thinkingToken, .toolCall:
-                        generationStream.setPhase(.streaming)
-                        Self._streamingPhaseSetInTailHook?()
-                        isFirstToken = false
-                    default: break
-                    }
-                }
-                if case .token = event { outputTokenCount += 1 }
-                continuation.yield(event)
-            }
-        }
-
-        // Flush the chain's tail buffers. The session cascades each stage's
-        // finalize output through the stages downstream of it, so any text the
-        // tool stage releases is still scanned by the thinking stage — matching
-        // the previous two-stage finalize pipeline.
-        for event in session.finalize() {
-            continuation.yield(event)
-        }
-
-        Self.logger.debug("MLXGenerationDriver run finished")
-        return RunResult(
-            completedNormally: !Task.isCancelled,
-            completionInfo: capturedCompletionInfo,
-            completionTokenCount: completionTokenCount
-        )
-    }
+    Self.logger.debug("MLXGenerationDriver run finished")
+    return RunResult(
+      completedNormally: !Task.isCancelled,
+      completionInfo: capturedCompletionInfo,
+      completionTokenCount: completionTokenCount
+    )
+  }
 }

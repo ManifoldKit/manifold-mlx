@@ -1,9 +1,8 @@
-
 import Foundation
+import Logging
 import MLX
 import MLXNN
 import MLXRandom
-import Logging
 
 private let logger = Logger(label: "flux.swift.VAE")
 

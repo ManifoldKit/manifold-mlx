@@ -28,44 +28,44 @@ import ManifoldInference
 /// installs the real ``DiffusionGenerator`` exactly as before.
 @_spi(Testing)
 public protocol DiffusionRun: AnyObject {
-    /// Total denoise steps this run will produce (the `total` reported in
-    /// ``ImageGenerationEvent/progress(step:total:)``).
-    var totalSteps: Int { get }
+  /// Total denoise steps this run will produce (the `total` reported in
+  /// ``ImageGenerationEvent/progress(step:total:)``).
+  var totalSteps: Int { get }
 
-    /// Advance one denoise step, evaluating the produced latent to bound peak
-    /// GPU memory. Returns `false` once the iterator is exhausted.
-    func step() throws -> Bool
+  /// Advance one denoise step, evaluating the produced latent to bound peak
+  /// GPU memory. Returns `false` once the iterator is exhausted.
+  func step() throws -> Bool
 
-    /// Decode the most-recently-produced latent and write the final image to
-    /// disk under `outputDirectory` (or a temporary location when `nil`),
-    /// returning the file URL. Throws if the run produced no latents.
-    func finishImage(to outputDirectory: URL?) throws -> URL
+  /// Decode the most-recently-produced latent and write the final image to
+  /// disk under `outputDirectory` (or a temporary location when `nil`),
+  /// returning the file URL. Throws if the run produced no latents.
+  func finishImage(to outputDirectory: URL?) throws -> URL
 
-    /// Decode the most-recently-produced *intermediate* latent and return the
-    /// encoded image bytes in memory — the same representation carried by
-    /// ``ImageGenerationEvent/preview(step:total:image:)``. **No disk write.**
-    ///
-    /// The generate loop calls this only when emitting a throttled preview tick
-    /// (i.e. when `ImageGenerationConfig.previewStride` is non-nil and the
-    /// current step lands on the stride). It is never called on the `nil`-stride
-    /// path, so the no-preview behaviour stays byte-for-byte identical.
-    ///
-    /// ## GPU cost
-    ///
-    /// Each call runs a **full extra VAE decode** of the current latent (and, on
-    /// FLUX, an unpack) on top of the denoise compute the loop is already doing.
-    /// That is the dominant per-tick cost — roughly one decode's worth of GPU
-    /// work and a transient activation allocation per emitted preview. Throttle
-    /// (large `previewStride`) accordingly on memory-constrained devices; the
-    /// `nil`-stride default pays none of it.
-    func previewImage() throws -> Data
+  /// Decode the most-recently-produced *intermediate* latent and return the
+  /// encoded image bytes in memory — the same representation carried by
+  /// ``ImageGenerationEvent/preview(step:total:image:)``. **No disk write.**
+  ///
+  /// The generate loop calls this only when emitting a throttled preview tick
+  /// (i.e. when `ImageGenerationConfig.previewStride` is non-nil and the
+  /// current step lands on the stride). It is never called on the `nil`-stride
+  /// path, so the no-preview behaviour stays byte-for-byte identical.
+  ///
+  /// ## GPU cost
+  ///
+  /// Each call runs a **full extra VAE decode** of the current latent (and, on
+  /// FLUX, an unpack) on top of the denoise compute the loop is already doing.
+  /// That is the dominant per-tick cost — roughly one decode's worth of GPU
+  /// work and a transient activation allocation per emitted preview. Throttle
+  /// (large `previewStride`) accordingly on memory-constrained devices; the
+  /// `nil`-stride default pays none of it.
+  func previewImage() throws -> Data
 }
 
 /// Factory for a single ``DiffusionRun``. One per loaded model; `makeRun` is
 /// called once per `generate(...)` invocation.
 @_spi(Testing)
 public protocol DiffusionGenerator: Sendable {
-    func makeRun(prompt: String, config: ImageGenerationConfig) -> any DiffusionRun
+  func makeRun(prompt: String, config: ImageGenerationConfig) -> any DiffusionRun
 }
 
 // MARK: - Preview throttle
@@ -84,9 +84,9 @@ public protocol DiffusionGenerator: Sendable {
 /// input from a host-supplied config).
 @_spi(Testing)
 public enum DiffusionPreviewThrottle {
-    public static func shouldEmit(step: Int, total: Int, stride: Int?) -> Bool {
-        guard let stride, stride > 0 else { return false }
-        guard step < total else { return false }   // final frame = .completed
-        return step % stride == 0
-    }
+  public static func shouldEmit(step: Int, total: Int, stride: Int?) -> Bool {
+    guard let stride, stride > 0 else { return false }
+    guard step < total else { return false }  // final frame = .completed
+    return step % stride == 0
+  }
 }

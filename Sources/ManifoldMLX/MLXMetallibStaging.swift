@@ -1,6 +1,6 @@
 import Foundation
-import os
 import ManifoldInference
+import os
 
 /// Stages the bundled `mlx.metallib` next to the running binary so mlx-swift's
 /// colocated metallib lookup can find it under a plain command-line `swift
@@ -39,72 +39,76 @@ import ManifoldInference
 /// aborts at GPU init.
 public enum MLXMetallibStaging {
 
-    private static let logger = Logger(
-        subsystem: ManifoldConfiguration.shared.logSubsystem,
-        category: "mlx-metallib"
-    )
+  private static let logger = Logger(
+    subsystem: ManifoldConfiguration.shared.logSubsystem,
+    category: "mlx-metallib"
+  )
 
-    /// Runs the staging copy at most once per process. Safe and cheap to call
-    /// from any MLX entry point before the first GPU operation.
-    public static func ensureStaged() {
-        _ = stagedOnce
+  /// Runs the staging copy at most once per process. Safe and cheap to call
+  /// from any MLX entry point before the first GPU operation.
+  public static func ensureStaged() {
+    _ = stagedOnce
+  }
+
+  /// `let`-backed one-shot: the closure body runs exactly once, on first
+  /// access, with Swift's lazy-static thread-safety.
+  private static let stagedOnce: Void = {
+    performStaging()
+  }()
+
+  private static func performStaging() {
+    guard let source = Bundle.module.url(forResource: "mlx", withExtension: "metallib") else {
+      // No bundled metallib — the prebuild plugin produced nothing (Metal
+      // toolchain absent) or this is an Xcode build that supplies its own.
+      logger.debug("No bundled mlx.metallib to stage; relying on the build's own metallib.")
+      return
     }
 
-    /// `let`-backed one-shot: the closure body runs exactly once, on first
-    /// access, with Swift's lazy-static thread-safety.
-    private static let stagedOnce: Void = {
-        performStaging()
-    }()
-
-    private static func performStaging() {
-        guard let source = Bundle.module.url(forResource: "mlx", withExtension: "metallib") else {
-            // No bundled metallib — the prebuild plugin produced nothing (Metal
-            // toolchain absent) or this is an Xcode build that supplies its own.
-            logger.debug("No bundled mlx.metallib to stage; relying on the build's own metallib.")
-            return
-        }
-
-        var destinations: [URL] = []
-        // Primary: the resource bundle's parent == the binary dir for a static
-        // SwiftPM link (executable/test binary and bundle are colocated).
-        destinations.append(Bundle.module.bundleURL.deletingLastPathComponent())
-        // Defensive: the main executable's directory, when it differs.
-        if let exeDir = Bundle.main.executableURL?.resolvingSymlinksInPath().deletingLastPathComponent() {
-            destinations.append(exeDir)
-        }
-
-        let fileManager = FileManager.default
-        var seen = Set<String>()
-        for directory in destinations {
-            let key = directory.standardizedFileURL.path
-            guard seen.insert(key).inserted else { continue }
-            stage(source: source, intoDirectory: directory, using: fileManager)
-        }
+    var destinations: [URL] = []
+    // Primary: the resource bundle's parent == the binary dir for a static
+    // SwiftPM link (executable/test binary and bundle are colocated).
+    destinations.append(Bundle.module.bundleURL.deletingLastPathComponent())
+    // Defensive: the main executable's directory, when it differs.
+    if let exeDir = Bundle.main.executableURL?.resolvingSymlinksInPath().deletingLastPathComponent()
+    {
+      destinations.append(exeDir)
     }
 
-    private static func stage(source: URL, intoDirectory directory: URL, using fileManager: FileManager) {
-        let destination = directory.appendingPathComponent("mlx.metallib")
-
-        // Skip if an identically sized metallib is already in place.
-        if let existing = try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-           let incoming = try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize,
-           existing == incoming {
-            logger.debug("mlx.metallib already staged at \(destination.path, privacy: .public)")
-            return
-        }
-
-        do {
-            if fileManager.fileExists(atPath: destination.path) {
-                try fileManager.removeItem(at: destination)
-            }
-            try fileManager.copyItem(at: source, to: destination)
-            logger.info("Staged mlx.metallib → \(destination.path, privacy: .public)")
-        } catch {
-            // Read-only or otherwise unwritable destination: harmless, another
-            // candidate (or the build's own metallib) may still satisfy mlx.
-            logger.debug(
-                "Could not stage mlx.metallib to \(destination.path, privacy: .public): \(error.localizedDescription, privacy: .public)"
-            )
-        }
+    let fileManager = FileManager.default
+    var seen = Set<String>()
+    for directory in destinations {
+      let key = directory.standardizedFileURL.path
+      guard seen.insert(key).inserted else { continue }
+      stage(source: source, intoDirectory: directory, using: fileManager)
     }
+  }
+
+  private static func stage(
+    source: URL, intoDirectory directory: URL, using fileManager: FileManager
+  ) {
+    let destination = directory.appendingPathComponent("mlx.metallib")
+
+    // Skip if an identically sized metallib is already in place.
+    if let existing = try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+      let incoming = try? source.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+      existing == incoming
+    {
+      logger.debug("mlx.metallib already staged at \(destination.path, privacy: .public)")
+      return
+    }
+
+    do {
+      if fileManager.fileExists(atPath: destination.path) {
+        try fileManager.removeItem(at: destination)
+      }
+      try fileManager.copyItem(at: source, to: destination)
+      logger.info("Staged mlx.metallib → \(destination.path, privacy: .public)")
+    } catch {
+      // Read-only or otherwise unwritable destination: harmless, another
+      // candidate (or the build's own metallib) may still satisfy mlx.
+      logger.debug(
+        "Could not stage mlx.metallib to \(destination.path, privacy: .public): \(error.localizedDescription, privacy: .public)"
+      )
+    }
+  }
 }

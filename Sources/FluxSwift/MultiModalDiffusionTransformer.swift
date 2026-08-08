@@ -1,9 +1,8 @@
-
 import Foundation
+import Logging
 import MLX
 import MLXFast
 import MLXNN
-import Logging
 
 private let logger = Logger(label: "flux.swift.MultiModalDiffusionTransformer")
 
@@ -45,7 +44,7 @@ public class EmbedND: Module {
       },
       axis: -3
     )
-    
+
     return MLX.expandedDimensions(emb, axis: 1)
   }
 
@@ -150,7 +149,7 @@ public class TimeTextEmbed: Module {
       -log(maxPeriod) * MLXArray(0..<halfDim).asType(.float32)
       / Float32(halfDim)
     var emb = MLX.exp(exponent)
-      emb = timeSteps[.ellipsis, .newAxis].asType(.float32) * emb[.newAxis]
+    emb = timeSteps[.ellipsis, .newAxis].asType(.float32) * emb[.newAxis]
     emb = MLX.concatenated([MLX.sin(emb), MLX.cos(emb)], axis: -1)
     emb = MLX.concatenated([emb[.ellipsis, halfDim...], emb[.ellipsis, ..<halfDim]], axis: -1)
     return emb
@@ -293,7 +292,8 @@ public class JointAttention: Module {
     value = MLX.concatenated([encoderHiddenStatesValueProj, value], axis: 2)
     (query, key) = JointAttention.applyRope(query, key, freqsCis: imageRotaryEmb)
 
-    var hiddenStates = MLXFast.scaledDotProductAttention(queries: query, keys: key, values: value, scale: 1 / sqrt(Float(query.dim(-1))),mask: nil)
+    var hiddenStates = MLXFast.scaledDotProductAttention(
+      queries: query, keys: key, values: value, scale: 1 / sqrt(Float(query.dim(-1))), mask: nil)
 
     hiddenStates = hiddenStates.transposed(0, 2, 1, 3)
     hiddenStates = hiddenStates.reshaped(1, -1, config.numAttentionHeads * config.attentionHeadDim)
@@ -309,12 +309,14 @@ public class JointAttention: Module {
 
   static func applyRope(_ xq: MLXArray, _ xk: MLXArray, freqsCis: MLXArray) -> (MLXArray, MLXArray)
   {
-    let xq_ = xq.asType(.float32).reshaped(xq.shape.dropLast() + [-1, 1, 2])
-    let xk_ = xk.asType(.float32).reshaped(xk.shape.dropLast() + [-1, 1, 2])
+    let xqReshaped = xq.asType(.float32).reshaped(xq.shape.dropLast() + [-1, 1, 2])
+    let xkReshaped = xk.asType(.float32).reshaped(xk.shape.dropLast() + [-1, 1, 2])
     let xqOut: MLXArray =
-      freqsCis[.ellipsis, 0] * xq_[.ellipsis, 0] + freqsCis[.ellipsis, 1] * xq_[.ellipsis, 1]
+      freqsCis[.ellipsis, 0] * xqReshaped[.ellipsis, 0] + freqsCis[.ellipsis, 1]
+      * xqReshaped[.ellipsis, 1]
     let xkOut =
-      freqsCis[.ellipsis, 0] * xk_[.ellipsis, 0] + freqsCis[.ellipsis, 1] * xk_[.ellipsis, 1]
+      freqsCis[.ellipsis, 0] * xkReshaped[.ellipsis, 0] + freqsCis[.ellipsis, 1]
+      * xkReshaped[.ellipsis, 1]
 
     return (xqOut.reshaped(xq.shape).asType(.float32), xkOut.reshaped(xk.shape).asType(.float32))
   }
@@ -349,45 +351,43 @@ public class JointTransformerBlock: Module {
     rotaryEmbeddings: MLXArray
   ) -> (MLXArray, MLXArray) {
     let (normHiddenStates, gateMsa, shiftMlp, scaleMlp, gateMlp) = norm1(
-        hiddenStates, textEmbeddings)
+      hiddenStates, textEmbeddings)
 
     let (normEncoderHiddenStates, cGateMsa, cShiftMlp, cScaleMlp, cGateMlp) = norm1Context(
-        encoderHiddenStates,
-        textEmbeddings
+      encoderHiddenStates,
+      textEmbeddings
     )
-    
+
     let (attnOutput, contextAttnOutput) = attn(
-        hiddenStates: normHiddenStates,
-        encoderHiddenStates: normEncoderHiddenStates,
-        imageRotaryEmb: rotaryEmbeddings
+      hiddenStates: normHiddenStates,
+      encoderHiddenStates: normEncoderHiddenStates,
+      imageRotaryEmb: rotaryEmbeddings
     )
 
     var newHiddenStates = hiddenStates + MLX.expandedDimensions(gateMsa, axis: 1) * attnOutput
     var normNewHiddenStates = norm2(newHiddenStates)
 
     normNewHiddenStates =
-        normNewHiddenStates * (1 + MLX.expandedDimensions(scaleMlp, axis: 1))
-        + MLX.expandedDimensions(shiftMlp, axis: 1)
+      normNewHiddenStates * (1 + MLX.expandedDimensions(scaleMlp, axis: 1))
+      + MLX.expandedDimensions(shiftMlp, axis: 1)
 
     let ffOutput = ff(normNewHiddenStates)
 
     newHiddenStates = newHiddenStates + MLX.expandedDimensions(gateMlp, axis: 1) * ffOutput
 
     var newEncoderHiddenStates =
-        encoderHiddenStates + MLX.expandedDimensions(cGateMsa, axis: 1) * contextAttnOutput
+      encoderHiddenStates + MLX.expandedDimensions(cGateMsa, axis: 1) * contextAttnOutput
 
     var normNewEncoderHiddenStates = norm2Context(newEncoderHiddenStates)
 
     normNewEncoderHiddenStates =
-        normNewEncoderHiddenStates * (1 + MLX.expandedDimensions(cScaleMlp, axis: 1))
-        + MLX.expandedDimensions(cShiftMlp, axis: 1)
-
+      normNewEncoderHiddenStates * (1 + MLX.expandedDimensions(cScaleMlp, axis: 1))
+      + MLX.expandedDimensions(cShiftMlp, axis: 1)
 
     let contextFfOutput = ffContext(normNewEncoderHiddenStates)
 
-
     newEncoderHiddenStates =
-        newEncoderHiddenStates + MLX.expandedDimensions(cGateMlp, axis: 1) * contextFfOutput
+      newEncoderHiddenStates + MLX.expandedDimensions(cGateMlp, axis: 1) * contextFfOutput
 
     return (newEncoderHiddenStates, newHiddenStates)
   }
@@ -443,7 +443,7 @@ public class AdaLayerNormZeroSingle: Module {
 
     let normalizedX = norm(x)
     let output =
-      normalizedX * MLX.expandedDimensions((1+scaleMsa), axis: 1)
+      normalizedX * MLX.expandedDimensions((1 + scaleMsa), axis: 1)
       + MLX.expandedDimensions(shiftMsa, axis: 1)
     return (output, gateMsa)
   }
@@ -538,13 +538,15 @@ public class SingleBlockAttention: Module {
 
   static func applyRope(_ xq: MLXArray, _ xk: MLXArray, freqsCis: MLXArray) -> (MLXArray, MLXArray)
   {
-    let xq_ = xq.asType(.float32).reshaped(xq.shape.dropLast() + [-1, 1, 2])
-    let xk_ = xk.asType(.float32).reshaped(xk.shape.dropLast() + [-1, 1, 2])
+    let xqReshaped = xq.asType(.float32).reshaped(xq.shape.dropLast() + [-1, 1, 2])
+    let xkReshaped = xk.asType(.float32).reshaped(xk.shape.dropLast() + [-1, 1, 2])
 
     let xqOut =
-      freqsCis[.ellipsis, 0] * xq_[.ellipsis, 0] + freqsCis[.ellipsis, 1] * xq_[.ellipsis, 1]
+      freqsCis[.ellipsis, 0] * xqReshaped[.ellipsis, 0] + freqsCis[.ellipsis, 1]
+      * xqReshaped[.ellipsis, 1]
     let xkOut =
-      freqsCis[.ellipsis, 0] * xk_[.ellipsis, 0] + freqsCis[.ellipsis, 1] * xk_[.ellipsis, 1]
+      freqsCis[.ellipsis, 0] * xkReshaped[.ellipsis, 0] + freqsCis[.ellipsis, 1]
+      * xkReshaped[.ellipsis, 1]
 
     return (xqOut.reshaped(xq.shape).asType(.float32), xkOut.reshaped(xk.shape).asType(.float32))
   }
@@ -580,7 +582,7 @@ public class MultiModalDiffusionTransformer: Module {
     self._projOut.wrappedValue = Linear(innerDim, outChannels)
   }
 
-    public func callAsFunction(
+  public func callAsFunction(
     t: Int,
     promptEmbeds: MLXArray,
     pooledPromptEmbeds: MLXArray,
@@ -594,20 +596,21 @@ public class MultiModalDiffusionTransformer: Module {
     let timeStep = evaluateParameters.sigmas[t] * Float(evaluateParameters.numTrainSteps)
     let timeStepArray = MLX.broadcast(timeStep, to: [1]).asType(xType)
     var hiddenStates = xEmbedder(hiddenStates)
-    let guidance = MLXArray([evaluateParameters.guidance * Float(evaluateParameters.numTrainSteps)]).asType(xType)
+    let guidance = MLXArray([evaluateParameters.guidance * Float(evaluateParameters.numTrainSteps)])
+      .asType(xType)
 
     let textEmbeddings = timeTextEmbed(
       timeStep: timeStepArray, pooledProjection: pooledPromptEmbeds, guidance: guidance)
     var encoderHiddenStates = contextEmbedder(promptEmbeds)
     let txtIds = MultiModalDiffusionTransformer.prepareTextIds(seqLen: promptEmbeds.dim(1))
-      
+
     var imageIds = MultiModalDiffusionTransformer.prepareLatentImageIds(
       height: evaluateParameters.height, width: evaluateParameters.width)
-    
+
     if let kontextImgIds = imgIds {
       imageIds = MLX.concatenated([imageIds, kontextImgIds], axis: 1)
     }
-    
+
     let ids = MLX.concatenated([txtIds, imageIds], axis: 1)
     let imageRotaryEmb = posEmbed(ids)
 

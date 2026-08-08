@@ -1,9 +1,8 @@
-
 import Foundation
+import Logging
 import MLX
 import MLXFast
 import MLXNN
-import Logging
 
 private let logger = Logger(label: "flux.swift.CLIPEncoder")
 
@@ -61,19 +60,27 @@ public class CLIPSdpaAttention: Module {
     var key = kProj(hiddenStates)
     var value = vProj(hiddenStates)
 
-    query = CLIPSdpaAttention.reshapeAndTranspose(query, batchSize: B, numHeads: config.numAttentionHeads, headDim: config.headDimension)
-    key = CLIPSdpaAttention.reshapeAndTranspose(key, batchSize: B, numHeads: config.numAttentionHeads, headDim: config.headDimension)
-    value = CLIPSdpaAttention.reshapeAndTranspose(value, batchSize: B, numHeads: config.numAttentionHeads, headDim: config.headDimension)
+    query = CLIPSdpaAttention.reshapeAndTranspose(
+      query, batchSize: B, numHeads: config.numAttentionHeads, headDim: config.headDimension)
+    key = CLIPSdpaAttention.reshapeAndTranspose(
+      key, batchSize: B, numHeads: config.numAttentionHeads, headDim: config.headDimension)
+    value = CLIPSdpaAttention.reshapeAndTranspose(
+      value, batchSize: B, numHeads: config.numAttentionHeads, headDim: config.headDimension)
 
-    var hiddenStates = MLXFast.scaledDotProductAttention(queries: query, keys: key, values: value, scale:  1 / sqrt(Float(query.dim(-1))), mask: attentionMask)
+    var hiddenStates = MLXFast.scaledDotProductAttention(
+      queries: query, keys: key, values: value, scale: 1 / sqrt(Float(query.dim(-1))),
+      mask: attentionMask)
     hiddenStates = hiddenStates.transposed(0, 2, 1, 3)
-    hiddenStates = hiddenStates.reshaped(config.batchSize, -1, config.numAttentionHeads * config.headDimension)
+    hiddenStates = hiddenStates.reshaped(
+      config.batchSize, -1, config.numAttentionHeads * config.headDimension)
 
     hiddenStates = outProj(hiddenStates)
     return hiddenStates
   }
 
-  static func reshapeAndTranspose(_ x: MLXArray, batchSize: Int, numHeads: Int, headDim: Int) -> MLXArray {
+  static func reshapeAndTranspose(_ x: MLXArray, batchSize: Int, numHeads: Int, headDim: Int)
+    -> MLXArray
+  {
     x.reshaped(batchSize, -1, numHeads, headDim).transposed(0, 2, 1, 3)
   }
 }
@@ -153,9 +160,9 @@ public class CLIPEmbeddings: Module {
   }
 
   func callAsFunction(_ x: MLXArray) -> MLXArray {
-    let N = x.dim(-1)
+    let n = x.dim(-1)
     let inputEmbeds = tokenEmbeding(x)
-    let positionIds = MLXArray(0..<N).reshaped([1, N])
+    let positionIds = MLXArray(0..<n).reshaped([1, n])
     let poistionEmbeds = positionEmbedding(positionIds)
     return inputEmbeds + poistionEmbeds
   }
@@ -185,8 +192,8 @@ public class ClipTextModel: Module {
     return pooledOutput
   }
 
-  func mask(_ N: Int, _ dType: DType) -> MLXArray {
-    let indices = MLXArray(0..<Int32(N))
+  func mask(_ n: Int, _ dType: DType) -> MLXArray {
+    let indices = MLXArray(0..<Int32(n))
     var mask = indices[0..., .newAxis] .< indices[.newAxis]
     mask = mask.asType(dType) * (dType == .float16 || dType == .bfloat16 ? -6e4 : -1e9)
     return mask
@@ -194,13 +201,13 @@ public class ClipTextModel: Module {
 }
 
 public class CLIPEncoder: Module {
-    @ModuleInfo(key: "text_model") public var textModel: ClipTextModel
+  @ModuleInfo(key: "text_model") public var textModel: ClipTextModel
 
-    public init(_ config: CLIPConfiguration) {
-        self._textModel.wrappedValue = ClipTextModel(config)
-    }
-    
-    public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        textModel(x)
-    }
+  public init(_ config: CLIPConfiguration) {
+    self._textModel.wrappedValue = ClipTextModel(config)
+  }
+
+  public func callAsFunction(_ x: MLXArray) -> MLXArray {
+    textModel(x)
+  }
 }

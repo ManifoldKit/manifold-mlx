@@ -1,9 +1,8 @@
-import XCTest
-import ManifoldInference
 import ManifoldBackendTestKit
+import ManifoldInference
+import ManifoldMLX
 import ManifoldTestSupport
-import ManifoldMLX
-import ManifoldMLX
+import XCTest
 
 /// MLXBackend conformance against the universal backend contract.
 ///
@@ -18,80 +17,82 @@ import ManifoldMLX
 /// model and Apple Silicon hardware are present.
 @MainActor
 final class MLXBackendConformanceTests: XCTestCase,
-                                        BackendContractMixin {
+  BackendContractMixin
+{
 
-    let contractBackendName = "MLXBackend"
+  let contractBackendName = "MLXBackend"
 
-    // Instance-scoped: XCTest instantiates a fresh test case per method, so
-    // this registry starts empty for every method invocation. See
-    // BackendContractChecks.ClaimRegistry.
-    let capabilityClaimRegistry = BackendContractChecks.ClaimRegistry()
+  // Instance-scoped: XCTest instantiates a fresh test case per method, so
+  // this registry starts empty for every method invocation. See
+  // BackendContractChecks.ClaimRegistry.
+  let capabilityClaimRegistry = BackendContractChecks.ClaimRegistry()
 
-    func makeContractBackend() -> MLXBackend {
-        MLXBackend()
-    }
+  func makeContractBackend() -> MLXBackend {
+    MLXBackend()
+  }
 
-    // MARK: - Universal invariants
+  // MARK: - Universal invariants
 
-    // Sabotage-evidence: assertAllInvariants trips on invariant 1 if
-    // MLXBackend.init() incorrectly sets isModelLoaded=true.
-    func test_contract_allInvariants() {
-        assertUniversalBackendContract()
-    }
+  // Sabotage-evidence: assertAllInvariants trips on invariant 1 if
+  // MLXBackend.init() incorrectly sets isModelLoaded=true.
+  func testContractAllInvariants() {
+    assertUniversalBackendContract()
+  }
 
-    // MARK: - Per-capability claims + meta-contract
+  // MARK: - Per-capability claims + meta-contract
 
-    /// All bootstrap claims and the meta-contract assertion are collapsed into
-    /// one method so the registry is built and verified within a single process.
-    /// Under `swift test --parallel` each test method runs in an isolated worker
-    /// process; splitting claim recording across several methods meant the
-    /// meta-contract reader saw an empty registry in its worker. (#1601)
-    ///
-    /// Full behavioural proofs for each flag:
-    /// - `supportsToolCalling`: lives in ``MLXBackendGenerationTests`` against a real Qwen model.
-    /// - `supportsThinking`: lives in ``MLXBackendThinkingTests``.
-    /// - `supportsTokenCounting`: exercised in the E2E suite against a loaded model.
-    func test_contract_allCapabilityClaims() {
-        // Reset first so a prior run of this method in the same process doesn't
-        // leave stale claims that could mask a newly-removed flag.
-        BackendContractChecks.resetCapabilityClaims(capabilityClaimRegistry, forBackend: contractBackendName)
+  /// All bootstrap claims and the meta-contract assertion are collapsed into
+  /// one method so the registry is built and verified within a single process.
+  /// Under `swift test --parallel` each test method runs in an isolated worker
+  /// process; splitting claim recording across several methods meant the
+  /// meta-contract reader saw an empty registry in its worker. (#1601)
+  ///
+  /// Full behavioural proofs for each flag:
+  /// - `supportsToolCalling`: lives in ``MLXBackendGenerationTests`` against a real Qwen model.
+  /// - `supportsThinking`: lives in ``MLXBackendThinkingTests``.
+  /// - `supportsTokenCounting`: exercised in the E2E suite against a loaded model.
+  func test_contract_allCapabilityClaims() {
+    // Reset first so a prior run of this method in the same process doesn't
+    // leave stale claims that could mask a newly-removed flag.
+    BackendContractChecks.resetCapabilityClaims(
+      capabilityClaimRegistry, forBackend: contractBackendName)
 
-        BackendContractChecks.claimWithoutBehaviouralAssertion(
-            capabilityClaimRegistry,
-            backendName: contractBackendName,
-            flag: "supportsToolCalling"
-        )
-        BackendContractChecks.claimWithoutBehaviouralAssertion(
-            capabilityClaimRegistry,
-            backendName: contractBackendName,
-            flag: "supportsThinking"
-        )
-        BackendContractChecks.claimWithoutBehaviouralAssertion(
-            capabilityClaimRegistry,
-            backendName: contractBackendName,
-            flag: "supportsTokenCounting"
-        )
-        // GBNF executor (#96): parser + matcher proven in `GBNFGrammarTests`;
-        // end-to-end constrained decoding in `MLXGrammarSamplingE2ETests`.
-        BackendContractChecks.claimWithoutBehaviouralAssertion(
-            capabilityClaimRegistry,
-            backendName: contractBackendName,
-            flag: "supportsGrammarConstrainedSampling"
-        )
-        // `supportsKVCachePersistence`: on by default since prompt KV-cache
-        // reuse flipped to default-on. Behavioural proof lives in
-        // `MLXBackendGenerationTests` (mock-container reuse scenarios) and
-        // `MLXKVReuseIntegrationTests` (real-model two-turn reuse).
-        BackendContractChecks.claimWithoutBehaviouralAssertion(
-            capabilityClaimRegistry,
-            backendName: contractBackendName,
-            flag: "supportsKVCachePersistence"
-        )
+    BackendContractChecks.claimWithoutBehaviouralAssertion(
+      capabilityClaimRegistry,
+      backendName: contractBackendName,
+      flag: "supportsToolCalling"
+    )
+    BackendContractChecks.claimWithoutBehaviouralAssertion(
+      capabilityClaimRegistry,
+      backendName: contractBackendName,
+      flag: "supportsThinking"
+    )
+    BackendContractChecks.claimWithoutBehaviouralAssertion(
+      capabilityClaimRegistry,
+      backendName: contractBackendName,
+      flag: "supportsTokenCounting"
+    )
+    // GBNF executor (#96): parser + matcher proven in `GBNFGrammarTests`;
+    // end-to-end constrained decoding in `MLXGrammarSamplingE2ETests`.
+    BackendContractChecks.claimWithoutBehaviouralAssertion(
+      capabilityClaimRegistry,
+      backendName: contractBackendName,
+      flag: "supportsGrammarConstrainedSampling"
+    )
+    // `supportsKVCachePersistence`: on by default since prompt KV-cache
+    // reuse flipped to default-on. Behavioural proof lives in
+    // `MLXBackendGenerationTests` (mock-container reuse scenarios) and
+    // `MLXKVReuseIntegrationTests` (real-model two-turn reuse).
+    BackendContractChecks.claimWithoutBehaviouralAssertion(
+      capabilityClaimRegistry,
+      backendName: contractBackendName,
+      flag: "supportsKVCachePersistence"
+    )
 
-        BackendContractChecks.assertCapabilityMetaContract(
-            capabilityClaimRegistry,
-            backendName: contractBackendName,
-            capabilities: MLXBackend().capabilities
-        )
-    }
+    BackendContractChecks.assertCapabilityMetaContract(
+      capabilityClaimRegistry,
+      backendName: contractBackendName,
+      capabilities: MLXBackend().capabilities
+    )
+  }
 }

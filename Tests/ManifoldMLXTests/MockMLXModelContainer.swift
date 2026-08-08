@@ -1,6 +1,6 @@
 import Foundation
-@_spi(Testing) import ManifoldMLX
 import MLXLMCommon
+@_spi(Testing) import ManifoldMLX
 
 // MARK: - SendableLMInput
 
@@ -10,19 +10,19 @@ import MLXLMCommon
 /// marked `Sendable`. The wrapper is safe when access to the underlying value is
 /// serialised — e.g. produced and consumed within the same `Task`.
 struct SendableLMInput: @unchecked Sendable {
-    let value: LMInput
+  let value: LMInput
 
-    init(_ value: LMInput) {
-        self.value = value
-    }
+  init(_ value: LMInput) {
+    self.value = value
+  }
 }
 
 struct SendableKVCacheList: @unchecked Sendable {
-    let value: [any KVCache]
+  let value: [any KVCache]
 
-    init(_ value: [any KVCache]) {
-        self.value = value
-    }
+  init(_ value: [any KVCache]) {
+    self.value = value
+  }
 }
 
 // MARK: - MockMLXModelContainer
@@ -34,186 +34,186 @@ struct SendableKVCacheList: @unchecked Sendable {
 /// `ManifoldTestSupport`.
 final class MockMLXModelContainer: @unchecked Sendable {
 
-    // MARK: - Configuration
+  // MARK: - Configuration
 
-    /// Tokens the mock yields from `generate`. Defaults to a two-token sequence.
-    var tokensToYield: [String] = ["Hello", " world"]
+  /// Tokens the mock yields from `generate`. Defaults to a two-token sequence.
+  var tokensToYield: [String] = ["Hello", " world"]
 
-    /// Raw `Generation` values the mock yields from `generate`, in order.
-    ///
-    /// When non-empty this takes precedence over `tokensToYield` and lets a
-    /// test drive the *exact* stream shape the production detokenizer can emit —
-    /// including:
-    ///   - a marker split across chunks (`.chunk("<tool")`, `.chunk("_call>")`)
-    ///     so `MLXGenerationDriver`'s tool-call reassembly sees real
-    ///     fragmentation rather than pre-split, well-formed markers; and
-    ///   - a `.info(...)` element, whose `Generation.chunk` is `nil`, so the
-    ///     driver's `guard let text = generation.chunk else { continue }` nil
-    ///     path (run loop ~line 342) is actually exercised. The real MLX stream
-    ///     interleaves `.info` completion metadata with text chunks.
-    var generationsToYield: [Generation] = []
+  /// Raw `Generation` values the mock yields from `generate`, in order.
+  ///
+  /// When non-empty this takes precedence over `tokensToYield` and lets a
+  /// test drive the *exact* stream shape the production detokenizer can emit —
+  /// including:
+  ///   - a marker split across chunks (`.chunk("<tool")`, `.chunk("_call>")`)
+  ///     so `MLXGenerationDriver`'s tool-call reassembly sees real
+  ///     fragmentation rather than pre-split, well-formed markers; and
+  ///   - a `.info(...)` element, whose `Generation.chunk` is `nil`, so the
+  ///     driver's `guard let text = generation.chunk else { continue }` nil
+  ///     path (run loop ~line 342) is actually exercised. The real MLX stream
+  ///     interleaves `.info` completion metadata with text chunks.
+  var generationsToYield: [Generation] = []
 
-    /// When set, `generate` throws this error instead of yielding tokens.
-    var generateError: Error?
+  /// When set, `generate` throws this error instead of yielding tokens.
+  var generateError: Error?
 
-    /// Simulates a chat-template / tokenizer rejection at `apply_chat_template` time.
-    ///
-    /// When set, `generate(messages:parameters:)` throws this error before yielding
-    /// any token — modeling the failure mode where the loaded tokenizer either has
-    /// no chat template (`tokenizer_config.json` missing the `chat_template` field)
-    /// or the template rejects the supplied message set (e.g. missing
-    /// `<|assistant|>` marker, wrong role ordering). The error surfaces unwrapped
-    /// through `MLXBackend.generate`'s GenerationStream — see issue #551.
-    var simulatedTokenizerApplyFailure: Error?
+  /// Simulates a chat-template / tokenizer rejection at `apply_chat_template` time.
+  ///
+  /// When set, `generate(messages:parameters:)` throws this error before yielding
+  /// any token — modeling the failure mode where the loaded tokenizer either has
+  /// no chat template (`tokenizer_config.json` missing the `chat_template` field)
+  /// or the template rejects the supplied message set (e.g. missing
+  /// `<|assistant|>` marker, wrong role ordering). The error surfaces unwrapped
+  /// through `MLXBackend.generate`'s GenerationStream — see issue #551.
+  var simulatedTokenizerApplyFailure: Error?
 
-    /// Optional stand-in for the tokenizer's `chat_template` field. The mock does
-    /// NOT itself apply a Jinja template — production MLXModelContainer does that
-    /// internally — but tests can set this to document which template shape they
-    /// are exercising and assert the backend hands compatible messages along.
-    var simulatedChatTemplate: String?
+  /// Optional stand-in for the tokenizer's `chat_template` field. The mock does
+  /// NOT itself apply a Jinja template — production MLXModelContainer does that
+  /// internally — but tests can set this to document which template shape they
+  /// are exercising and assert the backend hands compatible messages along.
+  var simulatedChatTemplate: String?
 
-    /// Prepared prompt-token batches returned by successive `prepare` calls.
-    ///
-    /// When empty, the mock synthesizes a small token sequence from the message count.
-    var preparedTokenBatches: [[Int]] = []
+  /// Prepared prompt-token batches returned by successive `prepare` calls.
+  ///
+  /// When empty, the mock synthesizes a small token sequence from the message count.
+  var preparedTokenBatches: [[Int]] = []
 
-    /// Factory used to create the explicit cache passed to generation.
-    var cacheFactory: @Sendable () -> [any KVCache] = { [KVCacheSimple()] }
+  /// Factory used to create the explicit cache passed to generation.
+  var cacheFactory: @Sendable () -> [any KVCache] = { [KVCacheSimple()] }
 
-    /// Extra tail tokens the mock appends to the cache during generation to model
-    /// completion tokens extending beyond the prompt.
-    var simulatedCacheCompletionTokenCount = 0
+  /// Extra tail tokens the mock appends to the cache during generation to model
+  /// completion tokens extending beyond the prompt.
+  var simulatedCacheCompletionTokenCount = 0
 
-    // MARK: - Observation
+  // MARK: - Observation
 
-    /// Number of times prepared generation was called.
-    private(set) var generateCallCount = 0
+  /// Number of times prepared generation was called.
+  private(set) var generateCallCount = 0
 
-    /// Number of times `prepare(messages:)` was called.
-    private(set) var prepareCallCount = 0
+  /// Number of times `prepare(messages:)` was called.
+  private(set) var prepareCallCount = 0
 
-    /// Number of times `makeCache(parameters:)` was called.
-    private(set) var makeCacheCallCount = 0
+  /// Number of times `makeCache(parameters:)` was called.
+  private(set) var makeCacheCallCount = 0
 
-    /// Last messages passed to `prepare`.
-    private(set) var lastMessages: [[String: String]]?
+  /// Last messages passed to `prepare`.
+  private(set) var lastMessages: [[String: String]]?
 
-    /// Last structural `tools` array passed to `prepare(messages:tools:)`.
-    /// `nil` when the tools-aware overload was never hit or `tools` was `nil`
-    /// (the Llama/Qwen/unknown prose path). Lets tests assert that the
-    /// structural-tools render is threaded only for tools-aware dialects
-    /// (Phase 0 / #2005).
-    private(set) var lastTools: [[String: any Sendable]]??
+  /// Last structural `tools` array passed to `prepare(messages:tools:)`.
+  /// `nil` when the tools-aware overload was never hit or `tools` was `nil`
+  /// (the Llama/Qwen/unknown prose path). Lets tests assert that the
+  /// structural-tools render is threaded only for tools-aware dialects
+  /// (Phase 0 / #2005).
+  private(set) var lastTools: [[String: any Sendable]]??
 
-    /// Records the structural-tools argument; called from the test-target
-    /// `prepare(messages:tools:)` conformance.
-    func recordPrepareTools(_ tools: [[String: any Sendable]]?) {
-        lastTools = .some(tools)
+  /// Records the structural-tools argument; called from the test-target
+  /// `prepare(messages:tools:)` conformance.
+  func recordPrepareTools(_ tools: [[String: any Sendable]]?) {
+    lastTools = .some(tools)
+  }
+
+  /// Last structured chat messages passed to `prepare(chat:)`.
+  private(set) var lastChatMessages: [Chat.Message]?
+
+  /// Last `GenerateParameters` value passed to generation. Useful for asserting
+  /// that `MLXBackend` forwards `temperature` / `topP` / `topK` / `minP` /
+  /// `repetitionPenalty` from the caller's `GenerationConfig`.
+  private(set) var lastParameters: GenerateParameters?
+
+  /// Last prepared prompt-token batch returned by `prepare`.
+  private(set) var lastPreparedTokenIds: [Int]?
+
+  /// Cache offsets observed at the start of generation.
+  private(set) var lastInitialCacheOffsets: [Int]?
+
+  init() {}
+
+  // MARK: - Helpers consumed by MLXModelContainerProtocol conformance
+
+  func prepareForGeneration(
+    messages: [[String: String]]
+  ) async throws -> [Int] {
+    prepareCallCount += 1
+    lastMessages = messages
+    lastChatMessages = nil
+
+    let promptTokens: [Int]
+    if !preparedTokenBatches.isEmpty {
+      promptTokens = preparedTokenBatches.removeFirst()
+    } else {
+      promptTokens = Array(1...max(messages.count, 1))
     }
+    lastPreparedTokenIds = promptTokens
+    return promptTokens
+  }
 
-    /// Last structured chat messages passed to `prepare(chat:)`.
-    private(set) var lastChatMessages: [Chat.Message]?
+  func prepareForGeneration(
+    chat: [Chat.Message]
+  ) async throws -> [Int] {
+    prepareCallCount += 1
+    lastChatMessages = chat
+    lastMessages = nil
 
-    /// Last `GenerateParameters` value passed to generation. Useful for asserting
-    /// that `MLXBackend` forwards `temperature` / `topP` / `topK` / `minP` /
-    /// `repetitionPenalty` from the caller's `GenerationConfig`.
-    private(set) var lastParameters: GenerateParameters?
+    let promptTokens: [Int]
+    if !preparedTokenBatches.isEmpty {
+      promptTokens = preparedTokenBatches.removeFirst()
+    } else {
+      promptTokens = Array(1...max(chat.count, 1))
+    }
+    lastPreparedTokenIds = promptTokens
+    return promptTokens
+  }
 
-    /// Last prepared prompt-token batch returned by `prepare`.
-    private(set) var lastPreparedTokenIds: [Int]?
+  func makeCacheForGeneration(parameters: GenerateParameters) -> [any KVCache] {
+    makeCacheCallCount += 1
+    return cacheFactory()
+  }
 
-    /// Cache offsets observed at the start of generation.
-    private(set) var lastInitialCacheOffsets: [Int]?
+  func generatePreparedInput(
+    promptTokenIds: [Int],
+    cache: SendableKVCacheList?,
+    parameters: GenerateParameters
+  ) async throws -> AsyncStream<Generation> {
+    generateCallCount += 1
+    lastParameters = parameters
+    lastInitialCacheOffsets = cache?.value.map(\.offset)
+    if let error = simulatedTokenizerApplyFailure { throw error }
+    if let error = generateError { throw error }
 
-    init() {}
-
-    // MARK: - Helpers consumed by MLXModelContainerProtocol conformance
-
-    func prepareForGeneration(
-        messages: [[String: String]]
-    ) async throws -> [Int] {
-        prepareCallCount += 1
-        lastMessages = messages
-        lastChatMessages = nil
-
-        let promptTokens: [Int]
-        if !preparedTokenBatches.isEmpty {
-            promptTokens = preparedTokenBatches.removeFirst()
-        } else {
-            promptTokens = Array(1 ... max(messages.count, 1))
+    // Prefer the explicit `Generation` script when supplied (covers
+    // fragmentation + nil-chunk shapes); otherwise wrap each string token.
+    let generations: [Generation] =
+      generationsToYield.isEmpty
+      ? tokensToYield.map { .chunk($0) }
+      : generationsToYield
+    let cache = cache
+    let promptTokenCount = promptTokenIds.count
+    let completionTokenCount = simulatedCacheCompletionTokenCount
+    return AsyncStream { continuation in
+      let producerTask = Task { [generations, cache, promptTokenCount, completionTokenCount] in
+        for generation in generations {
+          if Task.isCancelled {
+            continuation.finish()
+            return
+          }
+          continuation.yield(generation)
+          await Task.yield()
         }
-        lastPreparedTokenIds = promptTokens
-        return promptTokens
-    }
-
-    func prepareForGeneration(
-        chat: [Chat.Message]
-    ) async throws -> [Int] {
-        prepareCallCount += 1
-        lastChatMessages = chat
-        lastMessages = nil
-
-        let promptTokens: [Int]
-        if !preparedTokenBatches.isEmpty {
-            promptTokens = preparedTokenBatches.removeFirst()
-        } else {
-            promptTokens = Array(1 ... max(chat.count, 1))
+        if let cache {
+          let totalTokenCount = promptTokenCount + completionTokenCount
+          for layer in cache.value {
+            Self.setCacheOffset(layer, tokenCount: totalTokenCount)
+          }
         }
-        lastPreparedTokenIds = promptTokens
-        return promptTokens
+        continuation.finish()
+      }
+      continuation.onTermination = { _ in
+        producerTask.cancel()
+      }
     }
+  }
 
-    func makeCacheForGeneration(parameters: GenerateParameters) -> [any KVCache] {
-        makeCacheCallCount += 1
-        return cacheFactory()
-    }
-
-    func generatePreparedInput(
-        promptTokenIds: [Int],
-        cache: SendableKVCacheList?,
-        parameters: GenerateParameters
-    ) async throws -> AsyncStream<Generation> {
-        generateCallCount += 1
-        lastParameters = parameters
-        lastInitialCacheOffsets = cache?.value.map(\.offset)
-        if let error = simulatedTokenizerApplyFailure { throw error }
-        if let error = generateError { throw error }
-
-        // Prefer the explicit `Generation` script when supplied (covers
-        // fragmentation + nil-chunk shapes); otherwise wrap each string token.
-        let generations: [Generation] =
-            generationsToYield.isEmpty
-                ? tokensToYield.map { .chunk($0) }
-                : generationsToYield
-        let cache = cache
-        let promptTokenCount = promptTokenIds.count
-        let completionTokenCount = simulatedCacheCompletionTokenCount
-        return AsyncStream { continuation in
-            let producerTask = Task { [generations, cache, promptTokenCount, completionTokenCount] in
-                for generation in generations {
-                    if Task.isCancelled {
-                        continuation.finish()
-                        return
-                    }
-                    continuation.yield(generation)
-                    await Task.yield()
-                }
-                if let cache {
-                    let totalTokenCount = promptTokenCount + completionTokenCount
-                    for layer in cache.value {
-                        Self.setCacheOffset(layer, tokenCount: totalTokenCount)
-                    }
-                }
-                continuation.finish()
-            }
-            continuation.onTermination = { _ in
-                producerTask.cancel()
-            }
-        }
-    }
-
-    private static func setCacheOffset(_ cache: any KVCache, tokenCount: Int) {
-        guard let cache = cache as? KVCacheSimple else { return }
-        cache.offset = max(tokenCount, 0)
-    }
+  private static func setCacheOffset(_ cache: any KVCache, tokenCount: Int) {
+    guard let cache = cache as? KVCacheSimple else { return }
+    cache.offset = max(tokenCount, 0)
+  }
 }
