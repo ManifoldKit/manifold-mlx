@@ -58,7 +58,7 @@ jobs:
     # here so the lane is ready the moment such a runner is registered.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select newest Xcode 26 toolchain
         # Same toolchain pin as ci.yml: the image default (Xcode 16.4 /
         # Swift 6.1) mis-resolves the dependency graph; Swift 6.3 (Xcode 26.3)
@@ -67,7 +67,7 @@ jobs:
           sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)/Contents/Developer"
           swift --version
       - name: Cache SwiftPM dependency material
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           # Dependency material only — same rationale as ci.yml (own-module
           # .build/debug objects are deliberately not cached).
