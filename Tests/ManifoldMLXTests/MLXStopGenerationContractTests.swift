@@ -106,7 +106,9 @@ final class MLXStopGenerationContractTests: XCTestCase {
     /// Called from the generation task.
     func wait() async {
       hasArrived = true
-      arrivalWaiters.forEach { $0.resume() }
+      for waiter in arrivalWaiters {
+        waiter.resume()
+      }
       arrivalWaiters.removeAll()
       if isOpen { return }
       await withCheckedContinuation { releaseWaiters.append($0) }
@@ -120,7 +122,9 @@ final class MLXStopGenerationContractTests: XCTestCase {
 
     func open() {
       isOpen = true
-      releaseWaiters.forEach { $0.resume() }
+      for waiter in releaseWaiters {
+        waiter.resume()
+      }
       releaseWaiters.removeAll()
     }
   }

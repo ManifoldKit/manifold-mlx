@@ -417,6 +417,10 @@ import os
       var message: String?
     }
     let capture = MLXErrorCapture()
+    // swift-format-ignore: OnlyOneTrailingClosureArgument
+    // `withErrorHandler` is defined outside this repo (external MLX
+    // dependency); restructuring this call without its source in front of us
+    // risks silently changing which parameter binds the trailing closure.
     let mlxStream = try await withErrorHandler(
       { @Sendable in capture.message = capture.message ?? $0 }
     ) { @Sendable in

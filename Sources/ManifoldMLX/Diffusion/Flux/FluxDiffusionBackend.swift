@@ -313,14 +313,14 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
 
     // Get bytes via asArray for a guaranteed contiguous copy.
     var bytes = rgba.asArray(UInt8.self)
-    let C = 4
+    let channelCount = 4
 
     return try bytes.withUnsafeMutableBytes { ptr in
       let cs = CGColorSpace(name: CGColorSpace.sRGB)!
       guard
         let ctx = CGContext(
           data: ptr.baseAddress, width: W, height: H,
-          bitsPerComponent: 8, bytesPerRow: W * C, space: cs,
+          bitsPerComponent: 8, bytesPerRow: W * channelCount, space: cs,
           bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
             | CGBitmapInfo.byteOrder32Big.rawValue
         ), let cgImage = ctx.makeImage()

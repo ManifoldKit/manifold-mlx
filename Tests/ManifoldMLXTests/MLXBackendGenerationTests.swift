@@ -1671,7 +1671,8 @@ final class MLXBackendGenerationTests: XCTestCase {
   func test_generate_noManifest_neverWarnsTrainedMaximum() async throws {
     let mock = MockMLXModelContainer()
     mock.tokensToYield = ["ok"]
-    mock.simulatedCacheCompletionTokenCount = 1_000_000  // absurdly large — would trip any real ceiling
+    // absurdly large — would trip any real ceiling
+    mock.simulatedCacheCompletionTokenCount = 1_000_000
     mock.preparedTokenBatches = [[1, 2, 3]]
 
     let backend = MLXBackend()

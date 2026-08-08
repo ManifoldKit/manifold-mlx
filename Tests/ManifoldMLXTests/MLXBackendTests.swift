@@ -487,7 +487,7 @@ final class MLXBackendTests: XCTestCase {
 // MARK: - Backend Contract
 
 extension MLXBackendTests {
-  func test_contract_allInvariants() {
+  func testContractAllInvariants() {
     BackendContractChecks.assertAllInvariants { MLXBackend() }
   }
 }

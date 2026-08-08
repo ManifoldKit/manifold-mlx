@@ -181,6 +181,10 @@ public struct FluxConfiguration: Sendable {
     try factory(hub, self, configuration) as? TextToImageGenerator
   }
 
+  // swift-format-ignore: AlwaysUseLowerCamelCase
+  // Public API; name intentionally mirrors the `ImageToImageGenerator` protocol
+  // it vends (see `textToImageGenerator` above for the sibling factory) —
+  // renaming it is a breaking change for downstream consumers.
   public func ImageToImageGenerator(hub: HubApi = HubApi(), configuration: LoadConfiguration)
     throws -> ImageToImageGenerator?
   {

@@ -309,12 +309,14 @@ public class JointAttention: Module {
 
   static func applyRope(_ xq: MLXArray, _ xk: MLXArray, freqsCis: MLXArray) -> (MLXArray, MLXArray)
   {
-    let xq_ = xq.asType(.float32).reshaped(xq.shape.dropLast() + [-1, 1, 2])
-    let xk_ = xk.asType(.float32).reshaped(xk.shape.dropLast() + [-1, 1, 2])
+    let xqReshaped = xq.asType(.float32).reshaped(xq.shape.dropLast() + [-1, 1, 2])
+    let xkReshaped = xk.asType(.float32).reshaped(xk.shape.dropLast() + [-1, 1, 2])
     let xqOut: MLXArray =
-      freqsCis[.ellipsis, 0] * xq_[.ellipsis, 0] + freqsCis[.ellipsis, 1] * xq_[.ellipsis, 1]
+      freqsCis[.ellipsis, 0] * xqReshaped[.ellipsis, 0] + freqsCis[.ellipsis, 1]
+      * xqReshaped[.ellipsis, 1]
     let xkOut =
-      freqsCis[.ellipsis, 0] * xk_[.ellipsis, 0] + freqsCis[.ellipsis, 1] * xk_[.ellipsis, 1]
+      freqsCis[.ellipsis, 0] * xkReshaped[.ellipsis, 0] + freqsCis[.ellipsis, 1]
+      * xkReshaped[.ellipsis, 1]
 
     return (xqOut.reshaped(xq.shape).asType(.float32), xkOut.reshaped(xk.shape).asType(.float32))
   }
@@ -536,13 +538,15 @@ public class SingleBlockAttention: Module {
 
   static func applyRope(_ xq: MLXArray, _ xk: MLXArray, freqsCis: MLXArray) -> (MLXArray, MLXArray)
   {
-    let xq_ = xq.asType(.float32).reshaped(xq.shape.dropLast() + [-1, 1, 2])
-    let xk_ = xk.asType(.float32).reshaped(xk.shape.dropLast() + [-1, 1, 2])
+    let xqReshaped = xq.asType(.float32).reshaped(xq.shape.dropLast() + [-1, 1, 2])
+    let xkReshaped = xk.asType(.float32).reshaped(xk.shape.dropLast() + [-1, 1, 2])
 
     let xqOut =
-      freqsCis[.ellipsis, 0] * xq_[.ellipsis, 0] + freqsCis[.ellipsis, 1] * xq_[.ellipsis, 1]
+      freqsCis[.ellipsis, 0] * xqReshaped[.ellipsis, 0] + freqsCis[.ellipsis, 1]
+      * xqReshaped[.ellipsis, 1]
     let xkOut =
-      freqsCis[.ellipsis, 0] * xk_[.ellipsis, 0] + freqsCis[.ellipsis, 1] * xk_[.ellipsis, 1]
+      freqsCis[.ellipsis, 0] * xkReshaped[.ellipsis, 0] + freqsCis[.ellipsis, 1]
+      * xkReshaped[.ellipsis, 1]
 
     return (xqOut.reshaped(xq.shape).asType(.float32), xkOut.reshaped(xk.shape).asType(.float32))
   }

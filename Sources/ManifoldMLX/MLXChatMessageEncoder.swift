@@ -255,12 +255,12 @@ import ManifoldInference
   ) -> [[String: any Sendable]]? {
     guard usesStructuralTools(dialect: dialect), !config.tools.isEmpty else { return nil }
     return config.tools.map { tool -> [String: any Sendable] in
-      var function_: [String: any Sendable] = [
+      var functionSpec: [String: any Sendable] = [
         "name": tool.name,
         "description": tool.description,
       ]
-      function_["parameters"] = sendableParametersObject(for: tool)
-      return ["type": "function", "function": function_]
+      functionSpec["parameters"] = sendableParametersObject(for: tool)
+      return ["type": "function", "function": functionSpec]
     }
   }
 
@@ -334,12 +334,12 @@ import ManifoldInference
     -> String
   {
     let toolObjects: [[String: Any]] = config.tools.map { tool -> [String: Any] in
-      var function_: [String: Any] = [
+      var functionSpec: [String: Any] = [
         "name": tool.name,
         "description": tool.description,
       ]
-      function_["parameters"] = parametersObject(for: tool)
-      return wrapInFunctionType ? ["type": "function", "function": function_] : function_
+      functionSpec["parameters"] = parametersObject(for: tool)
+      return wrapInFunctionType ? ["type": "function", "function": functionSpec] : functionSpec
     }
     if let data = try? JSONSerialization.data(
       withJSONObject: toolObjects, options: [.prettyPrinted, .sortedKeys]

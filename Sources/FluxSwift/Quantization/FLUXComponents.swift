@@ -102,7 +102,9 @@ extension FLUXComponents {
         logger.debug(
           "Removing guidance_embedder weights",
           metadata: ["count": .string(String(guidanceKeys.count)), "modelType": .string(modelType)])
-        guidanceKeys.forEach { filteredTransformerWeights.removeValue(forKey: $0) }
+        for key in guidanceKeys {
+          filteredTransformerWeights.removeValue(forKey: key)
+        }
       }
 
       transformer.update(parameters: ModuleParameters.unflattened(filteredTransformerWeights))

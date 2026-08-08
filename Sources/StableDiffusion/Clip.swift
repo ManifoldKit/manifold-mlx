@@ -97,8 +97,8 @@ class CLIPTextModel: Module {
     }
   }
 
-  func mask(_ N: Int, _ dType: DType) -> MLXArray {
-    let indices = MLXArray(0..<Int32(N))
+  func mask(_ n: Int, _ dType: DType) -> MLXArray {
+    let indices = MLXArray(0..<Int32(n))
     var mask = indices[0..., .newAxis] .< indices[.newAxis]
     mask = mask.asType(dType) * (dType == .float16 ? -6e4 : -1e9)
     return mask

@@ -3,7 +3,7 @@ import Logging
 
 private let logger = Logger(label: "flux.swift.quantization.QuantizationMetadata")
 
-private let FLUX_SWIFT_VERSION = "1.0.0"
+private let currentFluxSwiftVersion = "1.0.0"
 
 public struct QuantizationMetadata: Codable {
   public let quantizationBits: Int
@@ -34,7 +34,7 @@ public struct QuantizationMetadata: Codable {
     logger.debug("Creating metadata for \(bits)-bit quantization")
     self.quantizationBits = bits
     self.groupSize = groupSize
-    self.fluxSwiftVersion = FLUX_SWIFT_VERSION
+    self.fluxSwiftVersion = currentFluxSwiftVersion
     self.quantizationDate = Date()
     self.originalModelPath = originalPath
     self.modelType = modelType
@@ -118,7 +118,7 @@ public struct ModelMetadata: Codable {
     self.quantizationBits = quantizationBits
     self.groupSize = groupSize
     self.modelType = modelType
-    self.fluxSwiftVersion = FLUX_SWIFT_VERSION
+    self.fluxSwiftVersion = currentFluxSwiftVersion
     self.createdAt = Date()
     self.components = components
     logger.debug("Model metadata created with \(components.count) components")

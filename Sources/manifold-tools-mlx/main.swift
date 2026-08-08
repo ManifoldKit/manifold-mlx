@@ -545,6 +545,10 @@ func runCLI() async -> Int32 {
   var cleanCount = 0
   var decoyCallTotal = 0
 
+  // swift-format-ignore: OnlyOneTrailingClosureArgument
+  // `runAll` is defined outside this repo (ScenarioCLIHarness, an external
+  // dependency); restructuring this call without its source in front of us
+  // risks silently changing which parameter binds the trailing closure.
   let allPassed = await ScenarioCLIHarness.runAll(
     scenarios: filtered,
     displayName: "mlx",

@@ -35,7 +35,7 @@ final class MLXBackendConformanceTests: XCTestCase,
 
   // Sabotage-evidence: assertAllInvariants trips on invariant 1 if
   // MLXBackend.init() incorrectly sets isModelLoaded=true.
-  func test_contract_allInvariants() {
+  func testContractAllInvariants() {
     assertUniversalBackendContract()
   }
 

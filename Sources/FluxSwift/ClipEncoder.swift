@@ -160,9 +160,9 @@ public class CLIPEmbeddings: Module {
   }
 
   func callAsFunction(_ x: MLXArray) -> MLXArray {
-    let N = x.dim(-1)
+    let n = x.dim(-1)
     let inputEmbeds = tokenEmbeding(x)
-    let positionIds = MLXArray(0..<N).reshaped([1, N])
+    let positionIds = MLXArray(0..<n).reshaped([1, n])
     let poistionEmbeds = positionEmbedding(positionIds)
     return inputEmbeds + poistionEmbeds
   }
@@ -192,8 +192,8 @@ public class ClipTextModel: Module {
     return pooledOutput
   }
 
-  func mask(_ N: Int, _ dType: DType) -> MLXArray {
-    let indices = MLXArray(0..<Int32(N))
+  func mask(_ n: Int, _ dType: DType) -> MLXArray {
+    let indices = MLXArray(0..<Int32(n))
     var mask = indices[0..., .newAxis] .< indices[.newAxis]
     mask = mask.asType(dType) * (dType == .float16 || dType == .bfloat16 ? -6e4 : -1e9)
     return mask
