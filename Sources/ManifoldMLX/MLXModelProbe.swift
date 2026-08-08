@@ -4,377 +4,392 @@ import ManifoldInference
 /// Probes MLX model directories for architecture, factory routing, and manifest metadata.
 // @_spi(Testing): published only for backend test targets (companion-package split, #1749).
 @_spi(Testing) public enum MLXModelProbe {
-    /// Canonical `model_type` values that `mlx-swift-lm`'s `LLMTypeRegistry.shared`
-    /// can serve as chat/instruct LMs. Anything outside this set (or the
-    /// VLM-specific set below) — CLIP, SigLIP, Whisper, BERT embeddings, etc. —
-    /// is refused at load time via `InferenceError.unsupportedModelArchitecture`.
-    ///
-    /// Sourced from `LLMTypeRegistry.shared` in mlx-swift-lm
-    /// (`Libraries/MLXLLM/LLMModelFactory.swift`). When mlx-swift-lm adds a new
-    /// LM architecture, update this list to match so the preflight doesn't reject
-    /// a freshly supported model.
-    static let supportedLMArchitectures: Set<String> = [
-        "mistral", "llama", "phi", "phi3", "phimoe",
-        "gemma", "gemma2", "gemma3", "gemma3_text", "gemma3n", "gemma4",
-        "qwen2", "qwen3", "qwen3_moe", "qwen3_next",
-        "qwen3_5", "qwen3_5_moe", "qwen3_5_text",
-        "minicpm", "starcoder2", "cohere", "openelm", "internlm2",
-        "deepseek_v3", "granite", "granitemoehybrid",
-        "mimo", "mimo_v2_flash", "minimax",
-        "glm4", "glm4_moe", "glm4_moe_lite",
-        "acereason", "falcon_h1", "bitnet", "smollm3",
-        "ernie4_5", "lfm2", "lfm2_moe",
-        "baichuan_m1", "exaone4", "gpt_oss",
-        "lille-130m", "olmoe", "olmo2", "olmo3",
-        "bailing_moe", "nanochat", "nemotron_h",
-        "afmoe", "jamba_3b", "mistral3", "apertus",
-    ]
+  /// Canonical `model_type` values that `mlx-swift-lm`'s `LLMTypeRegistry.shared`
+  /// can serve as chat/instruct LMs. Anything outside this set (or the
+  /// VLM-specific set below) — CLIP, SigLIP, Whisper, BERT embeddings, etc. —
+  /// is refused at load time via `InferenceError.unsupportedModelArchitecture`.
+  ///
+  /// Sourced from `LLMTypeRegistry.shared` in mlx-swift-lm
+  /// (`Libraries/MLXLLM/LLMModelFactory.swift`). When mlx-swift-lm adds a new
+  /// LM architecture, update this list to match so the preflight doesn't reject
+  /// a freshly supported model.
+  static let supportedLMArchitectures: Set<String> = [
+    "mistral", "llama", "phi", "phi3", "phimoe",
+    "gemma", "gemma2", "gemma3", "gemma3_text", "gemma3n", "gemma4",
+    "qwen2", "qwen3", "qwen3_moe", "qwen3_next",
+    "qwen3_5", "qwen3_5_moe", "qwen3_5_text",
+    "minicpm", "starcoder2", "cohere", "openelm", "internlm2",
+    "deepseek_v3", "granite", "granitemoehybrid",
+    "mimo", "mimo_v2_flash", "minimax",
+    "glm4", "glm4_moe", "glm4_moe_lite",
+    "acereason", "falcon_h1", "bitnet", "smollm3",
+    "ernie4_5", "lfm2", "lfm2_moe",
+    "baichuan_m1", "exaone4", "gpt_oss",
+    "lille-130m", "olmoe", "olmo2", "olmo3",
+    "bailing_moe", "nanochat", "nemotron_h",
+    "afmoe", "jamba_3b", "mistral3", "apertus",
+  ]
 
-    static let supportedVLMArchitectures: Set<String> = [
-        "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl",
-        "qwen3_5", "qwen3_5_moe", "idefics3", "gemma3", "gemma4",
-        "smolvlm", "fastvlm", "llava_qwen2", "pixtral", "mistral3",
-        "lfm2_vl", "lfm2-vl", "glm_ocr",
-    ]
+  static let supportedVLMArchitectures: Set<String> = [
+    "paligemma", "qwen2_vl", "qwen2_5_vl", "qwen3_vl",
+    "qwen3_5", "qwen3_5_moe", "idefics3", "gemma3", "gemma4",
+    "smolvlm", "fastvlm", "llava_qwen2", "pixtral", "mistral3",
+    "lfm2_vl", "lfm2-vl", "glm_ocr",
+  ]
 
-    private static let normalizedSupportedArchitectures: Set<String> =
-        Set((supportedLMArchitectures.union(supportedVLMArchitectures)).map(normalizeArchitectureKey))
+  private static let normalizedSupportedArchitectures: Set<String> =
+    Set((supportedLMArchitectures.union(supportedVLMArchitectures)).map(normalizeArchitectureKey))
 
-    /// Reads the top-level `model_type` string from `config.json` at `url`.
-    /// Returns `nil` when the file is missing/unreadable or carries no
-    /// (non-empty) `model_type`.
-    static func readModelType(at url: URL) -> String? {
-        let configURL = url.appendingPathComponent("config.json")
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let modelType = (json["model_type"] as? String)?
-                  .trimmingCharacters(in: .whitespacesAndNewlines),
-              !modelType.isEmpty else {
-            return nil
-        }
-        return modelType
+  /// Reads the top-level `model_type` string from `config.json` at `url`.
+  /// Returns `nil` when the file is missing/unreadable or carries no
+  /// (non-empty) `model_type`.
+  static func readModelType(at url: URL) -> String? {
+    let configURL = url.appendingPathComponent("config.json")
+    guard let data = try? Data(contentsOf: configURL),
+      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let modelType = (json["model_type"] as? String)?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+      !modelType.isEmpty
+    else {
+      return nil
+    }
+    return modelType
+  }
+
+  static func normalizeArchitectureKey(_ value: String) -> String {
+    value.lowercased().unicodeScalars
+      .filter { CharacterSet.alphanumerics.contains($0) }
+      .map(String.init)
+      .joined()
+  }
+
+  /// Reads `config.json` at `url` and throws
+  /// `InferenceError.unsupportedModelArchitecture` if the declared `model_type`
+  /// is not a chat/instruct LM. If `config.json` is missing or unreadable the
+  /// check is a no-op — mlx-swift-lm's own load path will then surface the
+  /// real error (missing weights, malformed directory, etc.).
+  public static func validateArchitecture(at url: URL) throws {
+    let configURL = url.appendingPathComponent("config.json")
+    guard let data = try? Data(contentsOf: configURL),
+      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+      // Missing / malformed config.json: let the MLX load path produce the
+      // real diagnostic rather than masking it with a false architecture error.
+      return
     }
 
-    static func normalizeArchitectureKey(_ value: String) -> String {
-        value.lowercased().unicodeScalars
-            .filter { CharacterSet.alphanumerics.contains($0) }
-            .map(String.init)
-            .joined()
+    let modelType =
+      (json["model_type"] as? String)?
+      .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let normalizedModelType = normalizeArchitectureKey(modelType)
+    if !normalizedModelType.isEmpty,
+      normalizedSupportedArchitectures.contains(normalizedModelType)
+    {
+      return
     }
 
-    /// Reads `config.json` at `url` and throws
-    /// `InferenceError.unsupportedModelArchitecture` if the declared `model_type`
-    /// is not a chat/instruct LM. If `config.json` is missing or unreadable the
-    /// check is a no-op — mlx-swift-lm's own load path will then surface the
-    /// real error (missing weights, malformed directory, etc.).
-    public static func validateArchitecture(at url: URL) throws {
-        let configURL = url.appendingPathComponent("config.json")
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            // Missing / malformed config.json: let the MLX load path produce the
-            // real diagnostic rather than masking it with a false architecture error.
-            return
+    // Some HF repos omit model_type but include an `architectures` array
+    // (e.g. ["LlamaForCausalLM"]). Accept the load if any entry's snake_case
+    // prefix matches the allowlist — this keeps older snapshots working.
+    if let archs = json["architectures"] as? [String] {
+      for arch in archs {
+        let normalized = normalizeArchitectureKey(arch)
+        if Self.normalizedSupportedArchitectures.contains(where: { normalized.hasPrefix($0) }) {
+          return
         }
-
-        let modelType = (json["model_type"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let normalizedModelType = normalizeArchitectureKey(modelType)
-        if !normalizedModelType.isEmpty,
-           normalizedSupportedArchitectures.contains(normalizedModelType) {
-            return
-        }
-
-        // Some HF repos omit model_type but include an `architectures` array
-        // (e.g. ["LlamaForCausalLM"]). Accept the load if any entry's snake_case
-        // prefix matches the allowlist — this keeps older snapshots working.
-        if let archs = json["architectures"] as? [String] {
-            for arch in archs {
-                let normalized = normalizeArchitectureKey(arch)
-                if Self.normalizedSupportedArchitectures.contains(where: { normalized.hasPrefix($0) }) {
-                    return
-                }
-            }
-        }
-
-        let reported = modelType.isEmpty ? (json["architectures"] as? [String])?.joined(separator: ",") ?? "unknown" : modelType
-        throw InferenceError.unsupportedModelArchitecture(reported)
+      }
     }
 
-    /// `true` for any Gemma 4 model (`model_type: gemma4`).
-    ///
-    /// Every Gemma 4 variant crashes on this mlx-swift-lm version and there is
-    /// no released fix, so the whole family is refused at load. Confirmed
-    /// against `gemma-4-e4b-it-4bit` (dense, VLM-routed because it carries
-    /// `vision_config`/`audio_config`) and `gemma-4-26B-A4B-it-MLX-4bit` (MoE):
-    /// both load but crash on the first generation tick with a
-    /// `[broadcast_shapes] Shapes (20) and (N)` C++ abort followed by an
-    /// uncatchable Swift `Index out of range` that kills the host process (app
-    /// *or* xctest runner). Upstream issues: dense is ml-explore/mlx-swift-lm
-    /// #282 ("Gap 3"), MoE is #802 — both open, no released fix (current `main`
-    /// `Gemma4Text.swift` is unchanged). The fix shape (`layerIdxToCacheIdx`
-    /// cache-slot mapping) lives only on the VLM-side decoder and was never
-    /// ported. Callers refuse the load up front so the failure is a catchable
-    /// error instead of a process-killing crash mid-generation.
-    ///
-    /// Routing is deliberately NOT consulted: Gemma 4 crashes whether it lands
-    /// on the LLM or the VLM factory, so a routing-based exclusion would let the
-    /// multimodal `e4b` checkpoint (which routes VLM) slip through and crash.
-    public static func isUnsupportedGemma4(modelType: String?) -> Bool {
-        guard let modelType else { return false }
-        return normalizeArchitectureKey(modelType) == normalizeArchitectureKey("gemma4")
+    let reported =
+      modelType.isEmpty
+      ? (json["architectures"] as? [String])?.joined(separator: ",") ?? "unknown" : modelType
+    throw InferenceError.unsupportedModelArchitecture(reported)
+  }
+
+  /// `true` for any Gemma 4 model (`model_type: gemma4`).
+  ///
+  /// Every Gemma 4 variant crashes on this mlx-swift-lm version and there is
+  /// no released fix, so the whole family is refused at load. Confirmed
+  /// against `gemma-4-e4b-it-4bit` (dense, VLM-routed because it carries
+  /// `vision_config`/`audio_config`) and `gemma-4-26B-A4B-it-MLX-4bit` (MoE):
+  /// both load but crash on the first generation tick with a
+  /// `[broadcast_shapes] Shapes (20) and (N)` C++ abort followed by an
+  /// uncatchable Swift `Index out of range` that kills the host process (app
+  /// *or* xctest runner). Upstream issues: dense is ml-explore/mlx-swift-lm
+  /// #282 ("Gap 3"), MoE is #802 — both open, no released fix (current `main`
+  /// `Gemma4Text.swift` is unchanged). The fix shape (`layerIdxToCacheIdx`
+  /// cache-slot mapping) lives only on the VLM-side decoder and was never
+  /// ported. Callers refuse the load up front so the failure is a catchable
+  /// error instead of a process-killing crash mid-generation.
+  ///
+  /// Routing is deliberately NOT consulted: Gemma 4 crashes whether it lands
+  /// on the LLM or the VLM factory, so a routing-based exclusion would let the
+  /// multimodal `e4b` checkpoint (which routes VLM) slip through and crash.
+  public static func isUnsupportedGemma4(modelType: String?) -> Bool {
+    guard let modelType else { return false }
+    return normalizeArchitectureKey(modelType) == normalizeArchitectureKey("gemma4")
+  }
+
+  /// Disk-reading convenience for ``isUnsupportedGemma4(modelType:)`` — reads
+  /// the top-level `model_type` from `config.json` at `url`.
+  public static func isUnsupportedGemma4(at url: URL) -> Bool {
+    isUnsupportedGemma4(modelType: readModelType(at: url))
+  }
+
+  /// Returns a human-readable reason when the model at `url` is known to crash
+  /// during generation in the current mlx-swift-lm and must be refused at
+  /// load, or `nil` when it is safe to attempt. Reads `config.json` once and
+  /// dispatches on the model type.
+  ///
+  /// Qwen 3.5's gated-DeltaNet linear-attention broadcast crash (upstream
+  /// ml-explore/mlx-swift-lm#157) was fixed in mlx-swift-lm 3.31.4 — re-tested
+  /// against #157's exact failure mode (`Qwen3.5-9B-4bit` now loads and
+  /// generates, BFCL AST 22/25). The guard was removed here; see
+  /// ManifoldKit#2061 for the re-test detail. Gemma 4 remains refused.
+  public static func unsupportedGenerationReason(at url: URL) -> String? {
+    let modelType = readModelType(at: url)
+    if isUnsupportedGemma4(modelType: modelType) {
+      return "Gemma 4 (gemma4) generation crashes in mlx-swift-lm — "
+        + "sliding-window/KV-shared broadcast mismatch "
+        + "(upstream ml-explore/mlx-swift-lm#282 / #802). Unsupported until an upstream fix lands."
     }
+    return nil
+  }
 
-    /// Disk-reading convenience for ``isUnsupportedGemma4(modelType:)`` — reads
-    /// the top-level `model_type` from `config.json` at `url`.
-    public static func isUnsupportedGemma4(at url: URL) -> Bool {
-        isUnsupportedGemma4(modelType: readModelType(at: url))
+  /// Returns `true` when the model at `url` must load through the VLM factory.
+  ///
+  /// This covers both explicit multimodal models (`vision_config`) and the
+  /// Gemma 4 MoE path that only exists behind `VLMModelFactory` today.
+  ///
+  /// Falls back to `false` (LLM factory) when config.json is missing/unreadable —
+  /// matches the same conservative default used by `validateArchitecture`. Dense
+  /// Gemma 4 models intentionally stay on the LLM factory so we don't pay the
+  /// memory cost of resident vision-tower weights.
+  public static func requiresVLMFactory(at url: URL) -> Bool {
+    requiresVLMFactory(at: url, precomputedCapabilities: nil)
+  }
+
+  /// Variant that accepts pre-computed capabilities to avoid re-reading
+  /// `config.json` when the caller already ran ``ModelCapabilityProbe``.
+  /// `model_type` values that ship a multimodal (vision/audio) `config.json`
+  /// but whose only decoder in mlx-swift-lm lives on the **LLM** factory
+  /// (`LLMTypeRegistry`), not the VLM factory. These must never be routed to
+  /// `VLMModelFactory` — the VLM registry has no creator for them and would
+  /// throw `ModelFactoryError.unsupportedModelType` at load (see issue #56).
+  ///
+  /// `gemma3n`: the full `gemma-3n-E4B-it-4bit` checkpoint declares top-level
+  /// `vision_config` + `audio_config`, but mlx-swift-lm only implements the
+  /// text decoder (`Gemma3nTextModel` in `Libraries/MLXLLM/Models/Gemma3nText.swift`).
+  /// That model is purpose-built to load the VLM-shaped checkpoint as text-only:
+  /// `Gemma3nTextConfiguration` reads the nested `text_config`, and its
+  /// `sanitize(weights:)` remaps the `model.language_model.` weight prefix.
+  /// So the supported path is the LLM factory, despite the vision signals.
+  static let llmFactoryOnlyMultimodalArchitectures: Set<String> = [
+    normalizeArchitectureKey("gemma3n")
+  ]
+
+  public static func requiresVLMFactory(
+    at url: URL,
+    precomputedCapabilities capabilities: ModelCapabilities?
+  ) -> Bool {
+    // Guard: architectures that look multimodal (vision_config / audio_config)
+    // but only have an LLM-factory decoder in mlx-swift-lm must bypass every
+    // VLM-routing signal below, including the capability-probe fast path —
+    // otherwise we hand them to a VLM factory that can't serve them. See
+    // `llmFactoryOnlyMultimodalArchitectures` and issue #56.
+    if let modelType = readModelType(at: url),
+      llmFactoryOnlyMultimodalArchitectures.contains(normalizeArchitectureKey(modelType))
+    {
+      return false
     }
-
-    /// Returns a human-readable reason when the model at `url` is known to crash
-    /// during generation in the current mlx-swift-lm and must be refused at
-    /// load, or `nil` when it is safe to attempt. Reads `config.json` once and
-    /// dispatches on the model type.
-    ///
-    /// Qwen 3.5's gated-DeltaNet linear-attention broadcast crash (upstream
-    /// ml-explore/mlx-swift-lm#157) was fixed in mlx-swift-lm 3.31.4 — re-tested
-    /// against #157's exact failure mode (`Qwen3.5-9B-4bit` now loads and
-    /// generates, BFCL AST 22/25). The guard was removed here; see
-    /// ManifoldKit#2061 for the re-test detail. Gemma 4 remains refused.
-    public static func unsupportedGenerationReason(at url: URL) -> String? {
-        let modelType = readModelType(at: url)
-        if isUnsupportedGemma4(modelType: modelType) {
-            return "Gemma 4 (gemma4) generation crashes in mlx-swift-lm — "
-                + "sliding-window/KV-shared broadcast mismatch "
-                + "(upstream ml-explore/mlx-swift-lm#282 / #802). Unsupported until an upstream fix lands."
+    // Fast path: vision was already detected by the caller's probe run.
+    if let capabilities {
+      if capabilities.supportsVision { return true }
+    } else {
+      do {
+        if try ModelCapabilityProbe.probe(modelDirectory: url).supportsVision {
+          return true
         }
-        return nil
-    }
-
-    /// Returns `true` when the model at `url` must load through the VLM factory.
-    ///
-    /// This covers both explicit multimodal models (`vision_config`) and the
-    /// Gemma 4 MoE path that only exists behind `VLMModelFactory` today.
-    ///
-    /// Falls back to `false` (LLM factory) when config.json is missing/unreadable —
-    /// matches the same conservative default used by `validateArchitecture`. Dense
-    /// Gemma 4 models intentionally stay on the LLM factory so we don't pay the
-    /// memory cost of resident vision-tower weights.
-    public static func requiresVLMFactory(at url: URL) -> Bool {
-        requiresVLMFactory(at: url, precomputedCapabilities: nil)
-    }
-
-    /// Variant that accepts pre-computed capabilities to avoid re-reading
-    /// `config.json` when the caller already ran ``ModelCapabilityProbe``.
-    /// `model_type` values that ship a multimodal (vision/audio) `config.json`
-    /// but whose only decoder in mlx-swift-lm lives on the **LLM** factory
-    /// (`LLMTypeRegistry`), not the VLM factory. These must never be routed to
-    /// `VLMModelFactory` — the VLM registry has no creator for them and would
-    /// throw `ModelFactoryError.unsupportedModelType` at load (see issue #56).
-    ///
-    /// `gemma3n`: the full `gemma-3n-E4B-it-4bit` checkpoint declares top-level
-    /// `vision_config` + `audio_config`, but mlx-swift-lm only implements the
-    /// text decoder (`Gemma3nTextModel` in `Libraries/MLXLLM/Models/Gemma3nText.swift`).
-    /// That model is purpose-built to load the VLM-shaped checkpoint as text-only:
-    /// `Gemma3nTextConfiguration` reads the nested `text_config`, and its
-    /// `sanitize(weights:)` remaps the `model.language_model.` weight prefix.
-    /// So the supported path is the LLM factory, despite the vision signals.
-    static let llmFactoryOnlyMultimodalArchitectures: Set<String> = [
-        normalizeArchitectureKey("gemma3n"),
-    ]
-
-    public static func requiresVLMFactory(
-        at url: URL,
-        precomputedCapabilities capabilities: ModelCapabilities?
-    ) -> Bool {
-        // Guard: architectures that look multimodal (vision_config / audio_config)
-        // but only have an LLM-factory decoder in mlx-swift-lm must bypass every
-        // VLM-routing signal below, including the capability-probe fast path —
-        // otherwise we hand them to a VLM factory that can't serve them. See
-        // `llmFactoryOnlyMultimodalArchitectures` and issue #56.
-        if let modelType = readModelType(at: url),
-           llmFactoryOnlyMultimodalArchitectures.contains(normalizeArchitectureKey(modelType)) {
-            return false
-        }
-        // Fast path: vision was already detected by the caller's probe run.
-        if let capabilities {
-            if capabilities.supportsVision { return true }
-        } else {
-            do {
-                if try ModelCapabilityProbe.probe(modelDirectory: url).supportsVision {
-                    return true
-                }
-            } catch {
-                Log.inference.info(
-                    "MLX capability probe failed for \(url.lastPathComponent, privacy: .public); falling back to config.json routing (\(error.localizedDescription, privacy: .public))"
-                )
-            }
-        }
-        // Config.json fallback: reached when the capability probe threw (e.g. a
-        // malformed sibling file) or reported no vision. We re-derive routing
-        // directly from the durable config.json signals so a real VLM whose
-        // probe run failed still lands on the VLM factory.
-        let configURL = url.appendingPathComponent("config.json")
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return false
-        }
-        // Top-level `vision_config` is the authoritative multimodal signal that
-        // standard Qwen2-VL/Qwen2.5-VL MLX checkpoints emit at the root of
-        // config.json (#22). `ModelCapabilityProbe` keys off the same shape, but
-        // duplicating it here keeps routing correct even when that probe throws.
-        // Use `is [String: Any]` (not `!= nil`): an explicit `"vision_config": null`
-        // decodes to NSNull and must not count as vision.
-        if json["vision_config"] is [String: Any] {
-            return true
-        }
-        // Some converted VLMs nest the vision tower under `text_config` rather
-        // than the root; honor that shape too.
-        if let textConfig = json["text_config"] as? [String: Any],
-           textConfig["vision_config"] is [String: Any] {
-            return true
-        }
-        // Architecture-name fallback: VLM `model_type`s in mlx-swift-lm's
-        // registry end in `_vl` (qwen2_vl, qwen2_5_vl, qwen3_vl, …). This
-        // catches a VLM whose vision_config block was stripped by a lossy
-        // conversion but whose declared model_type still names a vision model.
-        if let modelType = (json["model_type"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-           modelType.hasSuffix("_vl") {
-            return true
-        }
-        // MoE fallback: Gemma 4 26B ships `text_config.enable_moe_block = true`
-        // and its MoE decoder only exists in the VLM factory today.
-        if let textConfig = json["text_config"] as? [String: Any],
-           textConfig["enable_moe_block"] as? Bool == true {
-            return true
-        }
-        return false
-    }
-
-    /// Reads `tokenizer_config.json` inside `url` and returns the best-matching
-    /// thinking-marker preset for the chat template it declares.
-    ///
-    /// Best-effort: a missing or unreadable `tokenizer_config.json`, or one
-    /// without a `chat_template` field, returns `nil`. The MLX tokenizer object
-    /// in `mlx-swift-lm` exposes the chat template through Hugging Face's
-    /// swift-transformers, but reaching it requires opening a `ModelContainer`
-    /// session — reading the on-disk JSON directly is faster and avoids
-    /// tying up the GPU during the load.
-    ///
-    /// - Parameter url: The model directory URL (same one passed to
-    ///   `MLXBackend.loadModel(from:plan:)`).
-    /// - Returns: The auto-detected ``ThinkingMarkers`` or `nil` if no known
-    ///   marker pair is present in the template.
-    static func detectThinkingMarkers(at url: URL) -> ThinkingMarkers? {
-        let configURL = url.appendingPathComponent("tokenizer_config.json")
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            // Missing / unreadable tokenizer_config.json is expected for some
-            // model layouts (older snapshots, partial downloads). Don't warn —
-            // callers explicitly opt out of thinking parsing when this is nil.
-            return nil
-        }
-
-        // `chat_template` is a single string for most HF tokenizers, but a
-        // small number of repos ship an array of `{name, template}` entries
-        // (multi-template configs). When that happens, sniff the first entry
-        // whose name is `default` (or the first entry overall).
-        let templateString: String? = {
-            if let s = json["chat_template"] as? String { return s }
-            if let arr = json["chat_template"] as? [[String: Any]] {
-                if let def = arr.first(where: { ($0["name"] as? String)?.lowercased() == "default" }),
-                   let s = def["template"] as? String {
-                    return s
-                }
-                if let s = arr.first?["template"] as? String { return s }
-            }
-            return nil
-        }()
-        guard let template = templateString else { return nil }
-        return ThinkingMarkers.fromChatTemplate(template)
-    }
-
-    /// Produces a ``ModelManifest`` from a freshly-loaded MLX model directory.
-    ///
-    /// Reads `config.json` to extract the true context window:
-    /// `text_config.max_position_embeddings` (preferred for VLM/MoE configs),
-    /// `max_position_embeddings`, or `model_max_length` as a final fallback.
-    /// Combines with the chat-template-detected ``ThinkingMarkers`` and the
-    /// vision-capability flag to populate the manifest.
-    ///
-    /// Falls back to ``ModelManifest/unknown(modelIdentifier:producerKind:)``
-    /// (with a `Log.warn`) when `config.json` is missing or unreadable — that
-    /// case is a producer-identity fallback, not a context-window guess.
-    /// When `config.json` is readable but carries none of the recognised
-    /// context-length keys, the manifest is still real, just with
-    /// `contextWindow: nil` (also logged) — since core PR #2404, `nil` is how
-    /// "could not determine" is represented, so this no longer substitutes a
-    /// conservative 8192 guess a caller could mistake for a measurement.
-    ///
-    /// On M5 hardware with macOS 26.2 or later, MLX activates Neural Accelerator
-    /// dispatch automatically (~3–4× TTFT speedup). Check
-    /// ``NeuralAcceleratorProbe/availability`` in ManifoldHardware for informational UI.
-    public static func produceManifest(
-        at url: URL,
-        detectedThinkingMarkers: ThinkingMarkers?,
-        supportsVision: Bool
-    ) -> ModelManifest {
-        let modelIdentifier = url.lastPathComponent
-        let configURL = url.appendingPathComponent("config.json")
-        guard let data = try? Data(contentsOf: configURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            Log.inference.warning(
-                "MLX manifest probe: config.json missing or unreadable for \(modelIdentifier, privacy: .public); falling back to ModelManifest.unknown"
-            )
-            return .unknown(modelIdentifier: modelIdentifier, producerKind: .local)
-        }
-
-        let contextWindow = extractContextWindow(from: json)
-        if contextWindow == nil {
-            Log.inference.warning(
-                "MLX manifest probe: no max_position_embeddings / model_max_length found for \(modelIdentifier, privacy: .public); contextWindow left nil"
-            )
-        }
-
-        return ModelManifest(
-            contextWindow: contextWindow,
-            supportsTools: true,
-            supportsThinking: detectedThinkingMarkers != nil,
-            thinkingMarkers: detectedThinkingMarkers,
-            supportsSeed: true,
-            supportedSamplingParameters: [
-                .temperature, .topP, .topK, .repeatPenalty,
-                .presencePenalty, .frequencyPenalty,
-            ],
-            modelIdentifier: modelIdentifier,
-            producerKind: .local
+      } catch {
+        Log.inference.info(
+          "MLX capability probe failed for \(url.lastPathComponent, privacy: .public); falling back to config.json routing (\(error.localizedDescription, privacy: .public))"
         )
+      }
+    }
+    // Config.json fallback: reached when the capability probe threw (e.g. a
+    // malformed sibling file) or reported no vision. We re-derive routing
+    // directly from the durable config.json signals so a real VLM whose
+    // probe run failed still lands on the VLM factory.
+    let configURL = url.appendingPathComponent("config.json")
+    guard let data = try? Data(contentsOf: configURL),
+      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+      return false
+    }
+    // Top-level `vision_config` is the authoritative multimodal signal that
+    // standard Qwen2-VL/Qwen2.5-VL MLX checkpoints emit at the root of
+    // config.json (#22). `ModelCapabilityProbe` keys off the same shape, but
+    // duplicating it here keeps routing correct even when that probe throws.
+    // Use `is [String: Any]` (not `!= nil`): an explicit `"vision_config": null`
+    // decodes to NSNull and must not count as vision.
+    if json["vision_config"] is [String: Any] {
+      return true
+    }
+    // Some converted VLMs nest the vision tower under `text_config` rather
+    // than the root; honor that shape too.
+    if let textConfig = json["text_config"] as? [String: Any],
+      textConfig["vision_config"] is [String: Any]
+    {
+      return true
+    }
+    // Architecture-name fallback: VLM `model_type`s in mlx-swift-lm's
+    // registry end in `_vl` (qwen2_vl, qwen2_5_vl, qwen3_vl, …). This
+    // catches a VLM whose vision_config block was stripped by a lossy
+    // conversion but whose declared model_type still names a vision model.
+    if let modelType = (json["model_type"] as? String)?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased(),
+      modelType.hasSuffix("_vl")
+    {
+      return true
+    }
+    // MoE fallback: Gemma 4 26B ships `text_config.enable_moe_block = true`
+    // and its MoE decoder only exists in the VLM factory today.
+    if let textConfig = json["text_config"] as? [String: Any],
+      textConfig["enable_moe_block"] as? Bool == true
+    {
+      return true
+    }
+    return false
+  }
+
+  /// Reads `tokenizer_config.json` inside `url` and returns the best-matching
+  /// thinking-marker preset for the chat template it declares.
+  ///
+  /// Best-effort: a missing or unreadable `tokenizer_config.json`, or one
+  /// without a `chat_template` field, returns `nil`. The MLX tokenizer object
+  /// in `mlx-swift-lm` exposes the chat template through Hugging Face's
+  /// swift-transformers, but reaching it requires opening a `ModelContainer`
+  /// session — reading the on-disk JSON directly is faster and avoids
+  /// tying up the GPU during the load.
+  ///
+  /// - Parameter url: The model directory URL (same one passed to
+  ///   `MLXBackend.loadModel(from:plan:)`).
+  /// - Returns: The auto-detected ``ThinkingMarkers`` or `nil` if no known
+  ///   marker pair is present in the template.
+  static func detectThinkingMarkers(at url: URL) -> ThinkingMarkers? {
+    let configURL = url.appendingPathComponent("tokenizer_config.json")
+    guard let data = try? Data(contentsOf: configURL),
+      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+      // Missing / unreadable tokenizer_config.json is expected for some
+      // model layouts (older snapshots, partial downloads). Don't warn —
+      // callers explicitly opt out of thinking parsing when this is nil.
+      return nil
     }
 
-    /// Pulls the model's max position embedding count out of an MLX
-    /// `config.json` payload. Returns `nil` when no recognised key is present.
-    static func extractContextWindow(from json: [String: Any]) -> Int? {
-        // Modern multi-modal configs nest the text encoder fields under
-        // `text_config`. Prefer that over the top-level keys when present.
-        if let textConfig = json["text_config"] as? [String: Any],
-           let value = positiveInt(from: textConfig["max_position_embeddings"]) {
-            return value
+    // `chat_template` is a single string for most HF tokenizers, but a
+    // small number of repos ship an array of `{name, template}` entries
+    // (multi-template configs). When that happens, sniff the first entry
+    // whose name is `default` (or the first entry overall).
+    let templateString: String? = {
+      if let s = json["chat_template"] as? String { return s }
+      if let arr = json["chat_template"] as? [[String: Any]] {
+        if let def = arr.first(where: { ($0["name"] as? String)?.lowercased() == "default" }),
+          let s = def["template"] as? String
+        {
+          return s
         }
-        if let value = positiveInt(from: json["max_position_embeddings"]) {
-            return value
-        }
-        if let value = positiveInt(from: json["model_max_length"]) {
-            return value
-        }
-        return nil
+        if let s = arr.first?["template"] as? String { return s }
+      }
+      return nil
+    }()
+    guard let template = templateString else { return nil }
+    return ThinkingMarkers.fromChatTemplate(template)
+  }
+
+  /// Produces a ``ModelManifest`` from a freshly-loaded MLX model directory.
+  ///
+  /// Reads `config.json` to extract the true context window:
+  /// `text_config.max_position_embeddings` (preferred for VLM/MoE configs),
+  /// `max_position_embeddings`, or `model_max_length` as a final fallback.
+  /// Combines with the chat-template-detected ``ThinkingMarkers`` and the
+  /// vision-capability flag to populate the manifest.
+  ///
+  /// Falls back to ``ModelManifest/unknown(modelIdentifier:producerKind:)``
+  /// (with a `Log.warn`) when `config.json` is missing or unreadable — that
+  /// case is a producer-identity fallback, not a context-window guess.
+  /// When `config.json` is readable but carries none of the recognised
+  /// context-length keys, the manifest is still real, just with
+  /// `contextWindow: nil` (also logged) — since core PR #2404, `nil` is how
+  /// "could not determine" is represented, so this no longer substitutes a
+  /// conservative 8192 guess a caller could mistake for a measurement.
+  ///
+  /// On M5 hardware with macOS 26.2 or later, MLX activates Neural Accelerator
+  /// dispatch automatically (~3–4× TTFT speedup). Check
+  /// ``NeuralAcceleratorProbe/availability`` in ManifoldHardware for informational UI.
+  public static func produceManifest(
+    at url: URL,
+    detectedThinkingMarkers: ThinkingMarkers?,
+    supportsVision: Bool
+  ) -> ModelManifest {
+    let modelIdentifier = url.lastPathComponent
+    let configURL = url.appendingPathComponent("config.json")
+    guard let data = try? Data(contentsOf: configURL),
+      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+      Log.inference.warning(
+        "MLX manifest probe: config.json missing or unreadable for \(modelIdentifier, privacy: .public); falling back to ModelManifest.unknown"
+      )
+      return .unknown(modelIdentifier: modelIdentifier, producerKind: .local)
     }
 
-    static func positiveInt(from value: Any?) -> Int? {
-        if let int = value as? Int, int > 0 { return int }
-        if let int64 = value as? Int64, int64 > 0 { return Int(int64) }
-        if let double = value as? Double, double > 0 { return Int(double) }
-        if let str = value as? String, let parsed = Int(str), parsed > 0 { return parsed }
-        return nil
+    let contextWindow = extractContextWindow(from: json)
+    if contextWindow == nil {
+      Log.inference.warning(
+        "MLX manifest probe: no max_position_embeddings / model_max_length found for \(modelIdentifier, privacy: .public); contextWindow left nil"
+      )
     }
+
+    return ModelManifest(
+      contextWindow: contextWindow,
+      supportsTools: true,
+      supportsThinking: detectedThinkingMarkers != nil,
+      thinkingMarkers: detectedThinkingMarkers,
+      supportsSeed: true,
+      supportedSamplingParameters: [
+        .temperature, .topP, .topK, .repeatPenalty,
+        .presencePenalty, .frequencyPenalty,
+      ],
+      modelIdentifier: modelIdentifier,
+      producerKind: .local
+    )
+  }
+
+  /// Pulls the model's max position embedding count out of an MLX
+  /// `config.json` payload. Returns `nil` when no recognised key is present.
+  static func extractContextWindow(from json: [String: Any]) -> Int? {
+    // Modern multi-modal configs nest the text encoder fields under
+    // `text_config`. Prefer that over the top-level keys when present.
+    if let textConfig = json["text_config"] as? [String: Any],
+      let value = positiveInt(from: textConfig["max_position_embeddings"])
+    {
+      return value
+    }
+    if let value = positiveInt(from: json["max_position_embeddings"]) {
+      return value
+    }
+    if let value = positiveInt(from: json["model_max_length"]) {
+      return value
+    }
+    return nil
+  }
+
+  static func positiveInt(from value: Any?) -> Int? {
+    if let int = value as? Int, int > 0 { return int }
+    if let int64 = value as? Int64, int64 > 0 { return Int(int64) }
+    if let double = value as? Double, double > 0 { return Int(double) }
+    if let str = value as? String, let parsed = Int(str), parsed > 0 { return parsed }
+    return nil
+  }
 }

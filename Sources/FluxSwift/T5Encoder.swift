@@ -1,9 +1,8 @@
-
 import Foundation
+import Logging
 import MLX
 import MLXFast
 import MLXNN
-import Logging
 
 private let logger = Logger(label: "flux.swift.T5Encoder")
 

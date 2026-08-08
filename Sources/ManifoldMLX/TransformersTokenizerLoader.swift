@@ -14,62 +14,62 @@ import Tokenizers
 // so TransformersTokenizerLoaderTests can drive load(from:) against fixture
 // directories without taking a @testable import on the whole module.
 @_spi(Testing) public struct TransformersTokenizerLoader: MLXLMCommon.TokenizerLoader {
-    public init() {}
+  public init() {}
 
-    public func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
-        let upstream = try await Tokenizers.AutoTokenizer.from(modelFolder: directory)
-        return TokenizerBridge(upstream)
-    }
+  public func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
+    let upstream = try await Tokenizers.AutoTokenizer.from(modelFolder: directory)
+    return TokenizerBridge(upstream)
+  }
 
-    /// Test-only seam: wraps an injected upstream `Tokenizers.Tokenizer` in the
-    /// same `TokenizerBridge` adapter `load(from:)` produces, without needing a
-    /// real on-disk tokenizer. Lets the bridge's argument/label remapping and
-    /// the `missingChatTemplate` error translation be unit-tested directly.
-    @_spi(Testing) public static func makeBridge(
-        from upstream: any Tokenizers.Tokenizer
-    ) -> any MLXLMCommon.Tokenizer {
-        TokenizerBridge(upstream)
-    }
+  /// Test-only seam: wraps an injected upstream `Tokenizers.Tokenizer` in the
+  /// same `TokenizerBridge` adapter `load(from:)` produces, without needing a
+  /// real on-disk tokenizer. Lets the bridge's argument/label remapping and
+  /// the `missingChatTemplate` error translation be unit-tested directly.
+  @_spi(Testing) public static func makeBridge(
+    from upstream: any Tokenizers.Tokenizer
+  ) -> any MLXLMCommon.Tokenizer {
+    TokenizerBridge(upstream)
+  }
 }
 
 private struct TokenizerBridge: MLXLMCommon.Tokenizer {
-    private let upstream: any Tokenizers.Tokenizer
+  private let upstream: any Tokenizers.Tokenizer
 
-    init(_ upstream: any Tokenizers.Tokenizer) {
-        self.upstream = upstream
+  init(_ upstream: any Tokenizers.Tokenizer) {
+    self.upstream = upstream
+  }
+
+  func encode(text: String, addSpecialTokens: Bool) -> [Int] {
+    upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
+  }
+
+  // swift-transformers uses `decode(tokens:)` instead of `decode(tokenIds:)`.
+  func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
+    upstream.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens)
+  }
+
+  func convertTokenToId(_ token: String) -> Int? {
+    upstream.convertTokenToId(token)
+  }
+
+  func convertIdToToken(_ id: Int) -> String? {
+    upstream.convertIdToToken(id)
+  }
+
+  var bosToken: String? { upstream.bosToken }
+  var eosToken: String? { upstream.eosToken }
+  var unknownToken: String? { upstream.unknownToken }
+
+  func applyChatTemplate(
+    messages: [[String: any Sendable]],
+    tools: [[String: any Sendable]]?,
+    additionalContext: [String: any Sendable]?
+  ) throws -> [Int] {
+    do {
+      return try upstream.applyChatTemplate(
+        messages: messages, tools: tools, additionalContext: additionalContext)
+    } catch Tokenizers.TokenizerError.missingChatTemplate {
+      throw MLXLMCommon.TokenizerError.missingChatTemplate
     }
-
-    func encode(text: String, addSpecialTokens: Bool) -> [Int] {
-        upstream.encode(text: text, addSpecialTokens: addSpecialTokens)
-    }
-
-    // swift-transformers uses `decode(tokens:)` instead of `decode(tokenIds:)`.
-    func decode(tokenIds: [Int], skipSpecialTokens: Bool) -> String {
-        upstream.decode(tokens: tokenIds, skipSpecialTokens: skipSpecialTokens)
-    }
-
-    func convertTokenToId(_ token: String) -> Int? {
-        upstream.convertTokenToId(token)
-    }
-
-    func convertIdToToken(_ id: Int) -> String? {
-        upstream.convertIdToToken(id)
-    }
-
-    var bosToken: String? { upstream.bosToken }
-    var eosToken: String? { upstream.eosToken }
-    var unknownToken: String? { upstream.unknownToken }
-
-    func applyChatTemplate(
-        messages: [[String: any Sendable]],
-        tools: [[String: any Sendable]]?,
-        additionalContext: [String: any Sendable]?
-    ) throws -> [Int] {
-        do {
-            return try upstream.applyChatTemplate(
-                messages: messages, tools: tools, additionalContext: additionalContext)
-        } catch Tokenizers.TokenizerError.missingChatTemplate {
-            throw MLXLMCommon.TokenizerError.missingChatTemplate
-        }
-    }
+  }
 }

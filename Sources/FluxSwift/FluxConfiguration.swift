@@ -1,9 +1,8 @@
-
 import Foundation
 import Hub
+import Logging
 import MLX
 import MLXNN
-import Logging
 
 private let logger = Logger(label: "flux.swift.FluxConfiguration")
 
@@ -97,15 +96,15 @@ func applyLoraWeights(
   to transform: Module, loraWeight: [String: MLXArray], loraScale: Float = 1.0
 ) {
   var layerUpdates: [String: MLXArray] = [:]
-  
+
   for (key, module) in transform.namedModules() {
     let loraAKey = "transformer." + key + ".lora_A.weight"
     let loraBKey = "transformer." + key + ".lora_B.weight"
-    
+
     if let loraA = loraWeight[loraAKey], let loraB = loraWeight[loraBKey] {
       if let quantizedLinear = module as? QuantizedLinear {
         logger.info("Applying LoRA to quantized layer: \(key)")
-        
+
         let dequantizedWeight = dequantized(
           quantizedLinear.weight,
           scales: quantizedLinear.scales,
@@ -113,25 +112,25 @@ func applyLoraWeights(
           groupSize: quantizedLinear.groupSize,
           bits: quantizedLinear.bits
         )
-        
+
         let loraDelta = matmul(loraB, loraA)
         let fusedWeight = dequantizedWeight + loraScale * loraDelta
-        
+
         let fusedLinear = Linear(
           weight: fusedWeight,
           bias: quantizedLinear.bias
         )
-        
+
         let requantized = QuantizedLinear(
           fusedLinear,
           groupSize: quantizedLinear.groupSize,
           bits: quantizedLinear.bits
         )
-        
+
         layerUpdates[key + ".weight"] = requantized.weight
         layerUpdates[key + ".scales"] = requantized.scales
         layerUpdates[key + ".biases"] = requantized.biases
-        
+
       } else if let linear = module as? Linear {
         logger.info("Fusing LoRA weights into linear layer: \(key)")
         let loraDelta = matmul(loraB, loraA)
@@ -141,7 +140,7 @@ func applyLoraWeights(
       }
     }
   }
-  
+
   if !layerUpdates.isEmpty {
     transform.update(parameters: ModuleParameters.unflattened(layerUpdates))
   }
@@ -219,15 +218,15 @@ public struct FluxConfiguration: Sendable {
       .tokenizer2: "tokenizer_2/*",
       .vaeWeights: "vae/diffusion_pytorch_model.safetensors",
       .modelIndex: "model_index.json",
-      // config.json files (optional; present for pre-quantized bundles) are
-      // downloaded by the broader `**/*.json` matcher used in FLUX.loadQuantized;
-      // for diffusers snapshots they sit alongside each component's weights.
+        // config.json files (optional; present for pre-quantized bundles) are
+        // downloaded by the broader `**/*.json` matcher used in FLUX.loadQuantized;
+        // for diffusers snapshots they sit alongside each component's weights.
     ],
     defaultParameters: { EvaluateParameters() },
     factory: { hub, fluxConfiguration, loadConfiguration in
       let flux = try Flux1Schnell(
         hub: hub, configuration: fluxConfiguration)
-      
+
       let repo = Hub.Repo(id: fluxConfiguration.id)
       let directory = hub.localRepoLocation(repo)
       try flux.loadWeights(from: directory, dtype: loadConfiguration.dType)
@@ -272,7 +271,7 @@ public struct FluxConfiguration: Sendable {
     factory: { hub, fluxConfiguration, loadConfiguration in
       let flux = try Flux1Dev(
         hub: hub, configuration: fluxConfiguration)
-      
+
       let repo = Hub.Repo(id: fluxConfiguration.id)
       let directory = hub.localRepoLocation(repo)
       try flux.loadWeights(from: directory, dtype: loadConfiguration.dType)
@@ -302,16 +301,14 @@ public struct FluxConfiguration: Sendable {
 
 }
 
-
-public extension FluxConfiguration {
-  static func schnell() -> FluxConfiguration {
+extension FluxConfiguration {
+  public static func schnell() -> FluxConfiguration {
     return flux1Schnell
   }
-  
-  static func dev() -> FluxConfiguration {
+
+  public static func dev() -> FluxConfiguration {
     return flux1Dev
   }
-  
 
 }
 

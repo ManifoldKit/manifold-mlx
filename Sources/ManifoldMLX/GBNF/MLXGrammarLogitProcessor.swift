@@ -33,115 +33,115 @@ import MLXLMCommon
 /// Accept/reject semantics are byte-identical to the reference ``GBNFMatcher``
 /// (`GBNFFastMatcherParityTests`).
 @_spi(Testing) public final class MLXGrammarLogitProcessor: LogitProcessor {
-    private var matcher: GBNFFastMatcher
-    private let tokenizer: any MLXLMCommon.Tokenizer
-    private let eosIds: Set<Int>
-    private var base: LogitProcessor?
+  private var matcher: GBNFFastMatcher
+  private let tokenizer: any MLXLMCommon.Tokenizer
+  private let eosIds: Set<Int>
+  private var base: LogitProcessor?
 
-    /// Lazily built once the vocab size is known.
-    private var vocab: MLXByteLevelVocabulary?
-    private var trie: GBNFTokenTrie?
+  /// Lazily built once the vocab size is known.
+  private var vocab: MLXByteLevelVocabulary?
+  private var trie: GBNFTokenTrie?
 
-    /// `matcher state → (allowed token ids, EOS allowed)`. The masking result is
-    /// a pure function of the matcher state, and states recur across steps, so
-    /// the (expensive, first-time-only) trie walk is reused.
-    private var maskCache: [Set<[Int]>: (ids: [Int], allowEOS: Bool)] = [:]
+  /// `matcher state → (allowed token ids, EOS allowed)`. The masking result is
+  /// a pure function of the matcher state, and states recur across steps, so
+  /// the (expensive, first-time-only) trie walk is reused.
+  private var maskCache: [Set<[Int]>: (ids: [Int], allowEOS: Bool)] = [:]
 
-    /// Circuit breaker: if the grammar is still open after this many sampled
-    /// tokens, force EOS so a looping model can't generate to `maxTokens` under
-    /// the constrained path (prose runaway, #114).
-    private var breaker: GrammarStepBreaker
+  /// Circuit breaker: if the grammar is still open after this many sampled
+  /// tokens, force EOS so a looping model can't generate to `maxTokens` under
+  /// the constrained path (prose runaway, #114).
+  private var breaker: GrammarStepBreaker
 
-    @_spi(Testing) public init(
-        grammar: GBNFGrammar,
-        tokenizer: any MLXLMCommon.Tokenizer,
-        base: LogitProcessor?,
-        maxConstrainedSteps: Int = 512
-    ) {
-        self.matcher = GBNFFastMatcher(grammar: grammar)
-        self.tokenizer = tokenizer
-        self.base = base
-        self.breaker = GrammarStepBreaker(maxSteps: maxConstrainedSteps)
-        var eos: Set<Int> = []
-        if let id = tokenizer.eosTokenId { eos.insert(id) }
-        self.eosIds = eos
+  @_spi(Testing) public init(
+    grammar: GBNFGrammar,
+    tokenizer: any MLXLMCommon.Tokenizer,
+    base: LogitProcessor?,
+    maxConstrainedSteps: Int = 512
+  ) {
+    self.matcher = GBNFFastMatcher(grammar: grammar)
+    self.tokenizer = tokenizer
+    self.base = base
+    self.breaker = GrammarStepBreaker(maxSteps: maxConstrainedSteps)
+    var eos: Set<Int> = []
+    if let id = tokenizer.eosTokenId { eos.insert(id) }
+    self.eosIds = eos
+  }
+
+  // MARK: - LogitProcessor
+
+  public func prompt(_ prompt: MLXArray) {
+    base?.prompt(prompt)
+  }
+
+  public func process(logits: MLXArray) -> MLXArray {
+    let penalised = base?.process(logits: logits) ?? logits
+    let vocabSize = penalised.shape.last ?? penalised.size
+    _ = vocabBytes(vocabSize: vocabSize)
+
+    breaker.advance()
+
+    // Circuit breaker: grammar still open after the step cap — force EOS.
+    if breaker.capExceeded && !matcher.isComplete {
+      return eosOnlyMask(penalised: penalised, vocabSize: vocabSize)
     }
 
-    // MARK: - LogitProcessor
-
-    public func prompt(_ prompt: MLXArray) {
-        base?.prompt(prompt)
+    let state = matcher.state
+    let result: (ids: [Int], allowEOS: Bool)
+    if let cached = maskCache[state] {
+      result = cached
+    } else {
+      let ids = trie!.allowedTokenIDs(from: matcher)
+      result = (ids, matcher.isComplete)
+      maskCache[state] = result
     }
 
-    public func process(logits: MLXArray) -> MLXArray {
-        let penalised = base?.process(logits: logits) ?? logits
-        let vocabSize = penalised.shape.last ?? penalised.size
-        _ = vocabBytes(vocabSize: vocabSize)
-
-        breaker.advance()
-
-        // Circuit breaker: grammar still open after the step cap — force EOS.
-        if breaker.capExceeded && !matcher.isComplete {
-            return eosOnlyMask(penalised: penalised, vocabSize: vocabSize)
-        }
-
-        let state = matcher.state
-        let result: (ids: [Int], allowEOS: Bool)
-        if let cached = maskCache[state] {
-            result = cached
-        } else {
-            let ids = trie!.allowedTokenIDs(from: matcher)
-            result = (ids, matcher.isComplete)
-            maskCache[state] = result
-        }
-
-        // Collect all allowed positions (non-EOS tokens + EOS if grammar permits).
-        var allowed = result.ids.filter { $0 < vocabSize }
-        if result.allowEOS {
-            allowed += eosIds.filter { $0 < vocabSize }
-        }
-
-        // Safety valve: grammar/vocab mismatch — nothing legal, permit EOS so
-        // generation ends cleanly rather than deadlocking the sampler.
-        if allowed.isEmpty {
-            allowed = Array(eosIds.filter { $0 < vocabSize })
-        }
-
-        return penalised + buildMask(allowed: allowed, vocabSize: vocabSize, shape: penalised.shape)
+    // Collect all allowed positions (non-EOS tokens + EOS if grammar permits).
+    var allowed = result.ids.filter { $0 < vocabSize }
+    if result.allowEOS {
+      allowed += eosIds.filter { $0 < vocabSize }
     }
 
-    public func didSample(token: MLXArray) {
-        base?.didSample(token: token)
-        let id = token.item(Int.self)
-        if eosIds.contains(id) { return }
-        if let table = vocab, id < table.bytes.count, let tokenBytes = table.bytes[id] {
-            matcher.advance(tokenBytes)
-        }
+    // Safety valve: grammar/vocab mismatch — nothing legal, permit EOS so
+    // generation ends cleanly rather than deadlocking the sampler.
+    if allowed.isEmpty {
+      allowed = Array(eosIds.filter { $0 < vocabSize })
     }
 
-    // MARK: - Helpers
+    return penalised + buildMask(allowed: allowed, vocabSize: vocabSize, shape: penalised.shape)
+  }
 
-    /// Build an on-device mask: full-vocab `-1e9`, with `allowed` positions zeroed.
-    private func buildMask(allowed: [Int], vocabSize: Int, shape: [Int]) -> MLXArray {
-        var mask = MLXArray.full([vocabSize], values: MLXArray(Float(-1e9)))
-        if !allowed.isEmpty {
-            let indices = MLXArray(allowed.map { Int32($0) })
-            mask[indices] = MLXArray(Float(0))
-        }
-        return mask.reshaped(shape)
+  public func didSample(token: MLXArray) {
+    base?.didSample(token: token)
+    let id = token.item(Int.self)
+    if eosIds.contains(id) { return }
+    if let table = vocab, id < table.bytes.count, let tokenBytes = table.bytes[id] {
+      matcher.advance(tokenBytes)
     }
+  }
 
-    /// Mask allowing only EOS — used by the circuit breaker.
-    private func eosOnlyMask(penalised: MLXArray, vocabSize: Int) -> MLXArray {
-        let allowed = Array(eosIds.filter { $0 < vocabSize })
-        return penalised + buildMask(allowed: allowed, vocabSize: vocabSize, shape: penalised.shape)
-    }
+  // MARK: - Helpers
 
-    private func vocabBytes(vocabSize: Int) -> MLXByteLevelVocabulary {
-        if let vocab, vocab.bytes.count == vocabSize { return vocab }
-        let built = MLXByteLevelVocabulary(tokenizer: tokenizer, vocabSize: vocabSize)
-        vocab = built
-        trie = GBNFTokenTrie(vocab: built)
-        return built
+  /// Build an on-device mask: full-vocab `-1e9`, with `allowed` positions zeroed.
+  private func buildMask(allowed: [Int], vocabSize: Int, shape: [Int]) -> MLXArray {
+    var mask = MLXArray.full([vocabSize], values: MLXArray(Float(-1e9)))
+    if !allowed.isEmpty {
+      let indices = MLXArray(allowed.map { Int32($0) })
+      mask[indices] = MLXArray(Float(0))
     }
+    return mask.reshaped(shape)
+  }
+
+  /// Mask allowing only EOS — used by the circuit breaker.
+  private func eosOnlyMask(penalised: MLXArray, vocabSize: Int) -> MLXArray {
+    let allowed = Array(eosIds.filter { $0 < vocabSize })
+    return penalised + buildMask(allowed: allowed, vocabSize: vocabSize, shape: penalised.shape)
+  }
+
+  private func vocabBytes(vocabSize: Int) -> MLXByteLevelVocabulary {
+    if let vocab, vocab.bytes.count == vocabSize { return vocab }
+    let built = MLXByteLevelVocabulary(tokenizer: tokenizer, vocabSize: vocabSize)
+    vocab = built
+    trie = GBNFTokenTrie(vocab: built)
+    return built
+  }
 }

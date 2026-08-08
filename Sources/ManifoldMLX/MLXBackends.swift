@@ -13,14 +13,14 @@ import ManifoldInference
 /// let kit = try await ManifoldKit.quickStart(backends: [MLXBackends.self])
 /// ```
 public enum MLXBackends: BackendRegistrar {
-    @MainActor
-    public static func register(with service: InferenceService) {
-        service.registerBackendFactory { modelType in
-            switch modelType {
-            case .mlx: return MLXBackend()
-            default:   return nil
-            }
-        }
-        service.declareSupport(for: .mlx)
+  @MainActor
+  public static func register(with service: InferenceService) {
+    service.registerBackendFactory { modelType in
+      switch modelType {
+      case .mlx: return MLXBackend()
+      default: return nil
+      }
     }
+    service.declareSupport(for: .mlx)
+  }
 }
