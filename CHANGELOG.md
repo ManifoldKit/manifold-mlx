@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.1](https://github.com/ManifoldKit/manifold-mlx/compare/v0.5.0...v0.5.1) (2026-08-09)
+
+
+### Features
+
+* **ci:** supply-chain posture — permissions, CodeQL, dependency review ([#185](https://github.com/ManifoldKit/manifold-mlx/issues/185)) ([490b841](https://github.com/ManifoldKit/manifold-mlx/commit/490b841e70f8a6d67698b55367e2c6fd096dd4c6))
+
+
+### Bug Fixes
+
+* **tools:** stop manifold-tools-mlx emitting unknown record provenance ([#182](https://github.com/ManifoldKit/manifold-mlx/issues/182)) ([279d22d](https://github.com/ManifoldKit/manifold-mlx/commit/279d22dd9461ba3e0d0e01ea62f12d001ddbda41))
+
 ## [0.5.0](https://github.com/ManifoldKit/manifold-mlx/compare/v0.4.1...v0.5.0) (2026-07-28)
 
 
