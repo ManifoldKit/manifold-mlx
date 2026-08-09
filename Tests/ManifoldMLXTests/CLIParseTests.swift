@@ -280,7 +280,19 @@ final class CLIParseTests: XCTestCase {
   /// here would abort the fan-out on the very release that bumps it — before
   /// a PR exists to fix the literal in, since that PR is bot-authored with
   /// no human in the loop).
-  private func expectedManifoldKitRevisionFromPackageResolved() throws -> String {
+  ///
+  /// Returns `nil` — never fails — when `Package.resolved` has no
+  /// `manifoldkit` pin. That is a legitimate state, not a broken fixture:
+  /// `swift package edit manifoldkit` (the shared canary's mechanism for
+  /// consuming an unreleased core checkout, and `scripts/companion-canary-check.sh`'s
+  /// mechanism locally) removes the pin from `Package.resolved` entirely.
+  /// `test_recordIdentity_defaultResolvesFromPackageResolved` below branches
+  /// on this rather than unwrapping a pin that doesn't exist under those
+  /// conditions — see ManifoldKit/manifold-mlx#189, where the original
+  /// `XCTUnwrap`-only version of this helper made the canary structurally
+  /// red on every core dispatch from 2026-08-08 onward, independent of
+  /// whether core's content actually broke anything.
+  private func expectedManifoldKitRevisionFromPackageResolved() throws -> String? {
     // Repo root == this test bundle's CWD, matching the same assumption
     // `coreCommitFromPackageResolved` makes for the binary under test.
     let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -288,7 +300,10 @@ final class CLIParseTests: XCTestCase {
     let data = try Data(contentsOf: url)
     let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
     let pins = try XCTUnwrap(root["pins"] as? [[String: Any]])
-    let manifoldKitPin = try XCTUnwrap(pins.first { ($0["identity"] as? String) == "manifoldkit" })
+    guard let manifoldKitPin = pins.first(where: { ($0["identity"] as? String) == "manifoldkit" })
+    else {
+      return nil
+    }
     let state = try XCTUnwrap(manifoldKitPin["state"] as? [String: Any])
     return try XCTUnwrap(state["revision"] as? String)
   }
@@ -301,8 +316,39 @@ final class CLIParseTests: XCTestCase {
   /// from inside this repo. Also asserts the resolved value is 40-hex (a
   /// real git SHA shape) and never the `"unknown"` placeholder — the two
   /// properties AC1 actually requires, independent of which SHA it is.
+  ///
+  /// Branches on whether `Package.resolved` actually has a `manifoldkit`
+  /// pin (ManifoldKit/manifold-mlx#189, correction comment):
+  ///
+  /// - **Pinned** (the ordinary state — a checkout resolved via SwiftPM):
+  ///   asserts the real pin resolves through, unchanged from before #189.
+  /// - **Pinless** (`swift package edit manifoldkit` — the shared canary's
+  ///   mechanism, and any local repro of it): the pin is legitimately
+  ///   absent, not malformed, so `coreCommitFromPackageResolved` finds no
+  ///   `manifoldkit` entry, priority 3 fails, and `resolveCoreCommit` falls
+  ///   through to its documented priority-4 fallback (`main.swift:322`):
+  ///   the literal `"unknown"`. This branch asserts exactly that outcome
+  ///   from the SAME hermetic invocation the pinned branch uses, instead of
+  ///   skipping — the original fix (a workflow-level `$MANIFOLD_CORE_COMMIT`
+  ///   export, ManifoldKit/.github#11) was reverted unmerged because the
+  ///   hermetic subprocess (`environment: [:]`) is deliberately immune to
+  ///   any operator-side env var, and because `expectedManifoldKitRevisionFromPackageResolved()`
+  ///   runs before the subprocess and never reads the environment either —
+  ///   no env export could have made this test pass under edit-mode.
   func test_recordIdentity_defaultResolvesFromPackageResolved() throws {
-    let expected = try expectedManifoldKitRevisionFromPackageResolved()
+    guard let expected = try expectedManifoldKitRevisionFromPackageResolved() else {
+      let result = try runBinaryHermetic(
+        args: ["record-identity", "Mistral-7B-Instruct-v0.3-4bit"],
+        environment: [:]
+      )
+      XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
+      XCTAssertTrue(
+        result.stdout.contains("coreCommit=unknown"),
+        "no manifoldkit pin in Package.resolved (edit-mode/canary) must fall through to the priority-4 'unknown' placeholder; got: \(result.stdout)"
+      )
+      return
+    }
+
     let result = try runBinaryHermetic(
       args: ["record-identity", "Mistral-7B-Instruct-v0.3-4bit"],
       environment: [:]
