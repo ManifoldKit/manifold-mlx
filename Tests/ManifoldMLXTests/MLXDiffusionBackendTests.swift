@@ -1,6 +1,7 @@
 import ManifoldInference
 import ManifoldMLX
 @_spi(Testing) import ManifoldMLX
+import StableDiffusion
 import XCTest
 
 /// Unit tests for ``MLXDiffusionBackend``.
@@ -231,6 +232,45 @@ final class MLXDiffusionBackendTests: XCTestCase {
     )
     XCTAssertEqual(params.steps, 7)
     XCTAssertEqual(params.prompt, "a fox")
+  }
+
+  func test_makeParams_stepsNil_fallsBackToTurboPresetDefault() {
+    // SDXL-Turbo is distilled for 2-step inference — a bare config (steps:
+    // nil) must resolve to the preset's own default, not a generic constant.
+    let config = ImageGenerationConfig(steps: nil, width: 512, height: 512)
+    let params = MLXDiffusionBackend.makeParams(
+      prompt: "p", config: config, preset: .presetSDXLTurbo
+    )
+    XCTAssertEqual(
+      params.steps, StableDiffusionConfiguration.presetSDXLTurbo.defaultParameters().steps)
+    XCTAssertEqual(params.steps, 2)
+  }
+
+  func test_makeParams_stepsNil_fallsBackToSD21BasePresetDefault() {
+    let config = ImageGenerationConfig(steps: nil, width: 512, height: 512)
+    let params = MLXDiffusionBackend.makeParams(
+      prompt: "p", config: config, preset: .presetStableDiffusion21Base
+    )
+    XCTAssertEqual(
+      params.steps,
+      StableDiffusionConfiguration.presetStableDiffusion21Base.defaultParameters().steps)
+    XCTAssertEqual(params.steps, 50)
+  }
+
+  func test_makeParams_stepsExplicit_overridesTurboPresetDefault() {
+    let config = ImageGenerationConfig(steps: 7, width: 512, height: 512)
+    let params = MLXDiffusionBackend.makeParams(
+      prompt: "p", config: config, preset: .presetSDXLTurbo
+    )
+    XCTAssertEqual(params.steps, 7)
+  }
+
+  func test_makeParams_stepsExplicit_overridesSD21BasePresetDefault() {
+    let config = ImageGenerationConfig(steps: 7, width: 512, height: 512)
+    let params = MLXDiffusionBackend.makeParams(
+      prompt: "p", config: config, preset: .presetStableDiffusion21Base
+    )
+    XCTAssertEqual(params.steps, 7)
   }
 
   func test_makeParams_guidanceScaleNil_fallsBackToPresetDefault() {

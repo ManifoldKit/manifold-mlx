@@ -460,13 +460,119 @@ final class FluxDiffusionBackendTests: XCTestCase {
 
   func test_imageGenerationConfig_defaults_areForwardable() {
     // Sanity that the config fields the backend reads exist with the
-    // expected defaults; the backend maps these straight onto FLUX's
-    // EvaluateParameters (width/height/steps/seed/guidance).
+    // expected defaults; the backend maps these onto FLUX's
+    // EvaluateParameters (width/height/steps/seed/guidance). `steps` is nil
+    // by default — the caller defers to the loaded model's own preset
+    // default rather than a hardcoded step count.
     let config = ImageGenerationConfig()
-    XCTAssertEqual(config.steps, 20)
+    XCTAssertNil(config.steps)
     XCTAssertEqual(config.width, 1024)
     XCTAssertEqual(config.height, 1024)
     XCTAssertNil(config.seed)
     XCTAssertNil(config.guidanceScale)
+  }
+
+  // MARK: - resolvedSteps (pure nil-resolution, no Metal)
+
+  func test_resolvedSteps_nilFallsBackToSchnellDefault() {
+    // FluxDiffusionBackend.loadModel(from:) only ever installs FLUX.1
+    // Schnell (both load paths hardcode the schnell variant) — its own
+    // default is 4 steps, not FLUX.1 Dev's 20. Deliberately does NOT compare
+    // against FluxConfiguration.flux1Schnell.defaultParameters() here:
+    // evaluating that closure constructs a FluxSwift.EvaluateParameters,
+    // whose init does real Metal work (MLXArray.linspace for `sigmas`) that
+    // aborts the whole XCTest process under this no-GPU unit suite. That
+    // cross-check lives in FluxDiffusionIntegrationTests instead, where
+    // Metal is guaranteed
+    // (test_flux1SchnellDefaultSteps_matchesFluxConfigurationDefault).
+    // The 4 here is the real pin — NOT cross-checked against
+    // FluxDiffusionBackend.flux1SchnellDefaultSteps: resolvedSteps(config:)
+    // is implemented as `config.steps ?? flux1SchnellDefaultSteps`, so
+    // comparing its output to that same constant can never fail regardless
+    // of what the constant's value is.
+    let config = ImageGenerationConfig(steps: nil)
+    XCTAssertEqual(FluxDiffusionBackend.resolvedSteps(config: config), 4)
+  }
+
+  func test_resolvedSteps_explicitValueIsHonored() {
+    let config = ImageGenerationConfig(steps: 7)
+    XCTAssertEqual(FluxDiffusionBackend.resolvedSteps(config: config), 7)
+  }
+
+  // MARK: - flux1SchnellDefaultSteps drift guard (source scan, no Metal)
+
+  /// Resolves a package-relative path from this test file's compile-time
+  /// location: `<root>/Tests/ManifoldMLXTests/<thisFile>.swift` → `<root>`.
+  /// Mirrors `MetallibStagingContractTests.packageSourceURL`.
+  private func packageSourceURL(_ relativePath: String) -> URL {
+    let root = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()  // ManifoldMLXTests
+      .deletingLastPathComponent()  // Tests
+      .deletingLastPathComponent()  // <package root>
+    return root.appendingPathComponent(relativePath)
+  }
+
+  /// Always-on (no Metal, runs in every plain `swift test`) tripwire for
+  /// `FluxDiffusionBackend.flux1SchnellDefaultSteps`.
+  ///
+  /// That constant is a hardcoded literal copy of
+  /// `FluxSwift.EvaluateParameters.init`'s `numInferenceSteps: Int = 4`
+  /// default — kept as a literal (rather than calling
+  /// `FluxConfiguration.flux1Schnell.defaultParameters()` live) specifically
+  /// to avoid touching Metal in the unit suite; see
+  /// `test_resolvedSteps_nilFallsBackToSchnellDefault`'s comment. The
+  /// Metal-gated cross-check against the real `FluxConfiguration` value
+  /// (`FluxDiffusionIntegrationTests.test_flux1SchnellDefaultSteps_matchesFluxConfigurationDefault`)
+  /// never actually runs on CI: `ci.yml`'s `integration-tests` job is
+  /// `workflow_dispatch`-only (nothing schedules it), and the test's own
+  /// `XCTSkipUnless(MANIFOLD_DISCOVER_LOCAL_MODELS)` guard is only satisfied
+  /// by `scripts/test-mlx-integration.sh`. So a FluxSwift re-vendor that
+  /// changes the default would otherwise drift silently. This scans the
+  /// vendored source directly instead — plain string matching, zero
+  /// MLX/Metal, runs on every push.
+  ///
+  /// Two independent drift vectors, two assertions: (1) the generic
+  /// `EvaluateParameters.init` default could change, and (2)
+  /// `flux1Schnell.defaultParameters` could stop invoking the bare
+  /// initializer and start overriding `numInferenceSteps` explicitly — the
+  /// exact form `flux1Dev.defaultParameters` already uses
+  /// (`EvaluateParameters(numInferenceSteps: 20, shiftSigmas: true)`). (1)
+  /// alone would stay green under (2) since the bare-`init()` call site
+  /// would simply be gone from the file it's scanning while a stale generic
+  /// default elsewhere still matched.
+  func test_flux1SchnellDefaultSteps_matchesVendoredFluxConfigurationSource() throws {
+    let url = packageSourceURL("Sources/FluxSwift/FluxConfiguration.swift")
+    let source = try String(contentsOf: url, encoding: .utf8)
+    let expected = "numInferenceSteps: Int = \(FluxDiffusionBackend.flux1SchnellDefaultSteps)"
+    XCTAssertTrue(
+      source.contains(expected),
+      """
+      FluxSwift/FluxConfiguration.swift's EvaluateParameters.init no longer declares \
+      `\(expected)` — FluxDiffusionBackend.flux1SchnellDefaultSteps has drifted from the \
+      vendored default. Update the constant (and its doc comment) to match.
+      """
+    )
+    XCTAssertTrue(
+      source.contains("defaultParameters: { EvaluateParameters() }"),
+      """
+      flux1Schnell.defaultParameters no longer invokes the bare EvaluateParameters() \
+      initializer (compare flux1Dev's `EvaluateParameters(numInferenceSteps: 20, \
+      shiftSigmas: true)`, FluxConfiguration.swift) — it may now override numInferenceSteps \
+      explicitly, which the generic-default check above cannot see. \
+      FluxDiffusionBackend.flux1SchnellDefaultSteps needs to be updated to match whatever \
+      flux1Schnell now actually resolves to.
+      """
+    )
+  }
+
+  /// Guards the audit itself: a bogus path must fail loudly (file read
+  /// throws), proving the assertion above isn't vacuously passing on an
+  /// unreadable source. Mirrors `MetallibStagingContractTests.test_auditReadsRealSources`.
+  func test_flux1SchnellDefaultStepsAudit_readsRealSource() throws {
+    let url = packageSourceURL("Sources/FluxSwift/FluxConfiguration.swift")
+    XCTAssertTrue(
+      FileManager.default.fileExists(atPath: url.path),
+      "Audit path resolution is broken: expected \(url.path) to exist."
+    )
   }
 }

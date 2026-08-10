@@ -122,6 +122,12 @@ let package = Package(
       name: "ManifoldMLXTests",
       dependencies: [
         "ManifoldMLX",
+        // MLXDiffusionBackendTests needs `StableDiffusionConfiguration`
+        // directly (to assert against `.presetSDXLTurbo` /
+        // `.presetStableDiffusion21Base`'s own `defaultParameters()`),
+        // which ManifoldMLX does not re-export. Mirrors the same
+        // dependency + rationale on ManifoldMLXIntegrationTests below.
+        "StableDiffusion",
         .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
         .product(name: "ManifoldInference", package: "ManifoldKit"),
         .product(name: "ManifoldRuntime", package: "ManifoldKit"),

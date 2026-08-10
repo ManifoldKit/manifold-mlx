@@ -256,6 +256,38 @@ public final class FluxDiffusionBackend: ImageGenerationBackend, @unchecked Send
     return transposed.reshaped(1, h * 2, w * 2, 16)
   }
 
+  /// The step count `FluxConfiguration.flux1Schnell.defaultParameters()`
+  /// (`{ EvaluateParameters() }`, `FluxConfiguration.swift`) resolves to —
+  /// i.e. `EvaluateParameters.init`'s `numInferenceSteps: Int = 4` default
+  /// (`FluxSwift/FluxConfiguration.swift`). Kept as a literal rather than
+  /// calling `defaultParameters()` directly: unlike SDXL's `EvaluateParameters`
+  /// (a plain value type), FluxSwift's `EvaluateParameters.init` eagerly
+  /// computes a `sigmas: MLXArray` via `MLXArray.linspace(...)`, i.e. real
+  /// Metal work — evaluating it inside a unit test (no GPU device) aborts the
+  /// whole XCTest process instead of failing one test (confirmed: it took out
+  /// every test after it in the suite). This constant is vendored-source
+  /// coupled — if `FluxConfiguration.flux1Schnell`'s default ever changes,
+  /// update this alongside it. Cross-checked against the real
+  /// `FluxConfiguration.flux1Schnell.defaultParameters()` value in
+  /// `FluxDiffusionIntegrationTests.test_flux1SchnellDefaultSteps_matchesFluxConfigurationDefault`
+  /// (Metal-bound, so it can't live in the unit suite).
+  @_spi(Testing) public static let flux1SchnellDefaultSteps = 4
+
+  /// Resolves ``ImageGenerationConfig/steps`` to a concrete step count.
+  ///
+  /// `nil` means the caller deferred to the loaded model's own preset default.
+  /// `FluxDiffusionBackend.loadModel(from:)` only ever installs FLUX.1 Schnell
+  /// (both the quantized `metadata.json` path and the diffusers path hardcode
+  /// `Flux1Schnell`/`modelType: "schnell"` — there is no Dev-variant load path
+  /// today), so the relevant default is ``flux1SchnellDefaultSteps`` (Schnell
+  /// is distilled for few-step inference), not FLUX.1 Dev's 20-step default.
+  /// Extracted as a pure function so the nil-resolution can be unit tested
+  /// without Metal — the rest of `RealFluxGenerator.makeRun` needs a real MLX
+  /// device.
+  @_spi(Testing) public static func resolvedSteps(config: ImageGenerationConfig) -> Int {
+    config.steps ?? flux1SchnellDefaultSteps
+  }
+
   /// Converts a decoded MLXArray [1, H, W, 3] float32 in [0, 1] to a PNG on disk.
   ///
   /// Follows the same CGContext pattern as the vendored `StableDiffusion/Image.swift`
@@ -344,7 +376,7 @@ private struct RealFluxGenerator: DiffusionGenerator {
     var params = EvaluateParameters(
       width: config.width,
       height: config.height,
-      numInferenceSteps: config.steps,
+      numInferenceSteps: FluxDiffusionBackend.resolvedSteps(config: config),
       seed: config.seed,
       prompt: prompt
     )
