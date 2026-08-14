@@ -24,7 +24,7 @@ let package = Package(
     // consumes.
     // traits: [] builds core's products trait-less (the post-C2 world).
     .package(
-      url: "https://github.com/ManifoldKit/ManifoldKit", .upToNextMinor(from: "0.75.0"), traits: []),
+      url: "https://github.com/ManifoldKit/ManifoldKit", .upToNextMinor(from: "0.76.0"), traits: []),
     // Pins copied from core's Package.swift.
     .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.3"),
     // 3.31.3 ships the decoupled MLXHuggingFace target and adds the
