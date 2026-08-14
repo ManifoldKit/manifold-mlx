@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/ManifoldKit/manifold-mlx/compare/v0.5.1...v0.5.2) (2026-08-14)
+
+
+### Dependencies
+
+* bump ManifoldKit pin to v0.76.0 ([105b8f5](https://github.com/ManifoldKit/manifold-mlx/commit/105b8f568915199c0ea5adf1f96f885a2e1caf64))
+
 ## [0.5.1](https://github.com/ManifoldKit/manifold-mlx/compare/v0.5.0...v0.5.1) (2026-08-09)
 
 
