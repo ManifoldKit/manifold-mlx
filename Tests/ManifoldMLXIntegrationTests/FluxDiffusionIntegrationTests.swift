@@ -3,6 +3,7 @@ import MLX
 import MLXNN
 import ManifoldInference
 import ManifoldMLX
+@_spi(Testing) import ManifoldMLX
 import ManifoldTestSupport
 import XCTest
 
@@ -127,6 +128,38 @@ final class FluxDiffusionIntegrationTests: XCTestCase {
     XCTAssertTrue(
       qHolder.emb is QuantizedEmbedding,
       "An Embedding with a matching .scales tensor must become a QuantizedEmbedding.")
+  }
+
+  /// Cross-checks `FluxDiffusionBackend.flux1SchnellDefaultSteps` against the
+  /// real vendored source of truth it's kept in sync with by hand.
+  ///
+  /// `resolvedSteps(config:)` (the unit-tested nil-resolution) deliberately
+  /// uses a hardcoded literal instead of calling
+  /// `FluxConfiguration.flux1Schnell.defaultParameters()` directly, because
+  /// evaluating that closure constructs a `FluxSwift.EvaluateParameters`,
+  /// whose `init` eagerly computes `sigmas: MLXArray` via
+  /// `MLXArray.linspace(...)` — real Metal work that aborts the whole XCTest
+  /// process under the unit suite's no-GPU contract. This test lives here
+  /// instead, where Metal is guaranteed, so a future edit to
+  /// `FluxConfiguration.flux1Schnell`'s default step count (or to
+  /// `EvaluateParameters.init`'s `numInferenceSteps` default) that forgets to
+  /// update the unit-suite literal is caught.
+  func test_flux1SchnellDefaultSteps_matchesFluxConfigurationDefault() throws {
+    // Metal-bound (constructs EvaluateParameters); needs no model snapshot —
+    // same gating as test_quantizedEmbedding_branch_convertsOnlyWhenScalesPresent
+    // above, for the same reason (CI's macOS runner reports a Metal device
+    // but has no metallib under plain `swift test`).
+    try XCTSkipUnless(
+      ProcessInfo.processInfo.environment["MANIFOLD_DISCOVER_LOCAL_MODELS"] == "1",
+      "Metal-bound; run via scripts/test-mlx-integration.sh")
+    try XCTSkipUnless(HardwareRequirements.isAppleSilicon, "Requires Apple Silicon")
+    try XCTSkipUnless(HardwareRequirements.hasMetalDevice, "Requires Metal GPU")
+
+    XCTAssertEqual(
+      FluxDiffusionBackend.flux1SchnellDefaultSteps,
+      FluxConfiguration.flux1Schnell.defaultParameters().numInferenceSteps,
+      "FluxDiffusionBackend.flux1SchnellDefaultSteps has drifted from FluxConfiguration.flux1Schnell's own default — update the literal alongside it."
+    )
   }
 
   func test_loadModel_realSnapshot_setsIsLoaded() async throws {

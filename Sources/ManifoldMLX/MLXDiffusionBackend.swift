@@ -321,7 +321,9 @@ public final class MLXDiffusionBackend: ImageGenerationBackend, @unchecked Senda
     let defaults = preset.defaultParameters()
     return EvaluateParameters(
       cfgWeight: config.guidanceScale ?? defaults.cfgWeight,
-      steps: config.steps,
+      // nil == caller deferred to this preset's own default (2 for Turbo,
+      // 50 for SD 2.1 base) — see ManifoldKit ImageGenerationConfig.steps.
+      steps: config.steps ?? defaults.steps,
       latentSize: [config.height / 8, config.width / 8],
       seed: config.seed ?? defaults.seed,
       prompt: prompt

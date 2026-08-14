@@ -134,11 +134,12 @@ final class SDXLDiffusionIntegrationTests: XCTestCase {
   /// assert the PNG that comes back is a real photograph-shaped image, not
   /// the classic silent-diffusion-failure degenerate output (a uniform
   /// black or single-color frame). `guidanceScale` and `steps` are left at
-  /// their `ImageGenerationConfig` init defaults deliberately — `nil`
-  /// guidanceScale lets the backend apply the turbo preset's own cfgWeight
-  /// 0 rather than a full-SD 7.5 that this distilled model was never tuned
-  /// for; `steps: 2` matches the preset. Width/height default to 1024,
-  /// SDXL's native resolution.
+  /// their `ImageGenerationConfig` init defaults (both `nil`) deliberately —
+  /// this is the one real-weight exercise of `MLXDiffusionBackend.makeParams`'s
+  /// nil-resolution path: `nil` guidanceScale resolves to the turbo preset's
+  /// own cfgWeight 0 rather than a full-SD 7.5 this distilled model was never
+  /// tuned for, and `nil` steps resolves to the same preset's own 2-step
+  /// default. Width/height default to 1024, SDXL's native resolution.
   func test_generate_realSDXLTurboSnapshot_writesNonDegeneratePNG() async throws {
     try requireMetalBoundTestMarker()
     let url = try requireSDModelURL()
@@ -150,7 +151,7 @@ final class SDXLDiffusionIntegrationTests: XCTestCase {
     try await backend.loadModel(from: url)
     defer { backend.unloadModel() }
 
-    var config = ImageGenerationConfig(steps: 2)
+    var config = ImageGenerationConfig()
     config.outputDirectory = outDir
 
     // Deadline-raced collection — same pattern as
@@ -250,12 +251,15 @@ final class SDXLDiffusionIntegrationTests: XCTestCase {
     print("[SDXLDiffusionIntegrationTests] progress: step=\(lastStep) total=\(lastTotal)")
 
     XCTAssertTrue(sawProgress, "Expected at least one progress tick")
-    // `makeParams` passes `config.steps` straight through, so these are
-    // well-defined, not a loose sanity check: a mismatch means the config
-    // path is mis-wired and this run's output doesn't mean what the test
-    // thinks it does.
-    XCTAssertEqual(lastStep, 2, "Expected the final progress step to match config.steps (2)")
-    XCTAssertEqual(lastTotal, 2, "Expected the reported total steps to match config.steps (2)")
+    // `config.steps` is nil here (see the doc comment above), so `makeParams`
+    // resolves it to `presetSDXLTurbo.defaultParameters().steps` (2) — these
+    // are well-defined, not a loose sanity check: a mismatch means the
+    // nil-resolution path is mis-wired and this run's output doesn't mean
+    // what the test thinks it does.
+    XCTAssertEqual(
+      lastStep, 2, "Expected the final progress step to match the turbo preset's default (2)")
+    XCTAssertEqual(
+      lastTotal, 2, "Expected the reported total steps to match the turbo preset's default (2)")
     let finalURL = try XCTUnwrap(producedURL, "Expected a completed image URL")
     XCTAssertTrue(
       FileManager.default.fileExists(atPath: finalURL.path),
