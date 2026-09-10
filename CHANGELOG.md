@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.1](https://github.com/ManifoldKit/manifold-mlx/compare/v0.6.0...v0.6.1) (2026-09-10)
+
+### Highlights
+
+**Tracks ManifoldKit 0.78.0** — a compatibility republish for the new core minor.
+The pin update passed the automated build/test workflow; this release adds no backend functionality.
+
+### Dependencies
+
+* Bump ManifoldKit pin to v0.78.0 ([061d8f2](https://github.com/ManifoldKit/manifold-mlx/commit/061d8f26f3ed6b65604c659d07e5cf4ff713f362))
+
 ## [0.6.0](https://github.com/ManifoldKit/manifold-mlx/compare/v0.5.2...v0.6.0) (2026-09-06)
 
 ### Highlights
