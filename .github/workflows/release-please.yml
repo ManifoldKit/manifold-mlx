@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   release-please:
-    uses: ManifoldKit/.github/.github/workflows/companion-release-please.yml@main
+    uses: ManifoldKit/.github/.github/workflows/companion-release-please.yml@ad62782801a0b817a5e269a812577826ea7f240e # main
     permissions:
       contents: write
       pull-requests: write

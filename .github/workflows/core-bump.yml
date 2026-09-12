@@ -46,7 +46,7 @@ jobs:
 
   bump:
     needs: resolve
-    uses: ManifoldKit/.github/.github/workflows/companion-core-bump.yml@main
+    uses: ManifoldKit/.github/.github/workflows/companion-core-bump.yml@ad62782801a0b817a5e269a812577826ea7f240e # main
     permissions:
       contents: write
       pull-requests: write

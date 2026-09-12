@@ -22,4 +22,4 @@ permissions:
 
 jobs:
   canary:
-    uses: ManifoldKit/.github/.github/workflows/companion-canary.yml@main
+    uses: ManifoldKit/.github/.github/workflows/companion-canary.yml@ad62782801a0b817a5e269a812577826ea7f240e # main
