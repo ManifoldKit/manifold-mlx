@@ -47,7 +47,7 @@ permissions:
 
 jobs:
   test:
-    uses: ManifoldKit/.github/.github/workflows/swift-ci.yml@main
+    uses: ManifoldKit/.github/.github/workflows/swift-ci.yml@ad62782801a0b817a5e269a812577826ea7f240e # main
 
   # Real-model MLX integration tests are NOT run in CI: they need Apple
   # Silicon Metal plus multi-GB local model snapshots that hosted runners
