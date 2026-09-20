@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.6.2](https://github.com/ManifoldKit/manifold-mlx/compare/v0.6.1...v0.6.2) (2026-09-20)
+
+### Highlights
+
+#### Require iOS 26 and macOS 26
+
+Raise the package's minimum supported OS versions to iOS 26 and macOS 26,
+matching the upcoming ManifoldKit 0.79 release. Apps that still deploy to iOS
+18 or macOS 15 must stay on the 0.6.1 line. The hosted build and core-main
+canary now run on macOS 26.
+
+#### Surface Metal shader failures during builds
+
+When a Metal compiler and linker are available, a shader compile or link error
+now fails the build instead of silently omitting `mlx.metallib`. A missing Metal
+toolchain still permits a compile-only build. The generated library is rebuilt
+when shader sources, headers, build flags, or the toolchain change; a failed
+rebuild removes any stale library so it cannot be packaged by mistake.
+
+#### Pin the Xcode 27 bridge dependencies
+
+Use signed ManifoldKit fork tags `mlx-swift` `0.31.4-manifold.1` and
+`mlx-swift-lm` `3.31.4-manifold.1` while the upstream releases do not yet carry
+the needed Xcode 27 compatibility. These exact pins keep the macOS 26 canary
+and local Xcode 27 builds on the same reviewed dependency source. See
+[#208](https://github.com/ManifoldKit/manifold-mlx/pull/208).
+
+### Features
+
+* Align the OS 26 floor and report MLX shader build failures ([#208](https://github.com/ManifoldKit/manifold-mlx/pull/208)) ([83d3e42](https://github.com/ManifoldKit/manifold-mlx/commit/83d3e42d51630178c9ee3a816c5b1860bac68cd3))
+
 ## [0.6.1](https://github.com/ManifoldKit/manifold-mlx/compare/v0.6.0...v0.6.1) (2026-09-10)
 
 ### Highlights
