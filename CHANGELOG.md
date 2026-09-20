@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.3](https://github.com/ManifoldKit/manifold-mlx/compare/v0.6.2...v0.6.3) (2026-09-20)
+
+### Highlights
+
+**Tracks ManifoldKit 0.79.0** — re-resolved, built, and tested green against the new core.
+
+
+### Dependencies
+
+* Bump ManifoldKit pin to v0.79.0 ([07621b9](https://github.com/ManifoldKit/manifold-mlx/commit/07621b971aba3a9b14d1270c29a332abe6020b2c))
+
 ## [0.6.2](https://github.com/ManifoldKit/manifold-mlx/compare/v0.6.1...v0.6.2) (2026-09-20)
 
 ### Highlights
