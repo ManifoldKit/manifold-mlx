@@ -33,23 +33,10 @@ final class RecordProvenanceIntegrationTests: XCTestCase {
   }
 
   private static let cachedBinaryPath: String? = {
-    let showBin = Process()
-    showBin.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
-    showBin.arguments = ["build", "--product", "manifold-tools-mlx", "--show-bin-path"]
-    let pipe = Pipe()
-    showBin.standardOutput = pipe
-    showBin.standardError = Pipe()
-    do {
-      try showBin.run()
-    } catch {
-      return nil
-    }
-    showBin.waitUntilExit()
-    let rawPath =
-      String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-      .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    guard !rawPath.isEmpty else { return nil }
-    let bin = (rawPath as NSString).appendingPathComponent("manifold-tools-mlx")
+    // Nested SwiftPM commands wait on the outer Swift 6.4 test process's build lock.
+    let bin = Bundle(for: RecordProvenanceIntegrationTests.self).bundleURL
+      .deletingLastPathComponent()
+      .appendingPathComponent("manifold-tools-mlx").path
     return FileManager.default.fileExists(atPath: bin) ? bin : nil
   }()
 

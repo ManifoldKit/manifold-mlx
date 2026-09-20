@@ -39,7 +39,7 @@
 # fail the whole `swift build` on a machine that only compiles (CI, Linux, a Mac
 # without `xcodebuild -downloadComponent MetalToolchain`). Such builds keep
 # today's behaviour — they compile fine and only abort at MLX GPU init, exactly
-# as before this change.
+# as before this change. Shader errors from an available compiler are fatal.
 #
 # USAGE
 #   Plugin form:
@@ -54,40 +54,32 @@
 #                  a path ending in .metallib → used verbatim. Defaults to the
 #                  SwiftPM bin dir for --config (colocated lookup #1).
 #       -v         Verbose: echo each compile.
-set -uo pipefail
+set -euo pipefail
 
 warn() { echo "build-mlx-metallib.sh: $*" >&2; }
 
-# --- Metal toolchain availability (graceful) ---------------------------------
-# We need both `metal` (compile) and `metallib` (link). `xcrun --find` only
-# proves the wrapper exists; the actual driver still fails if the Metal Toolchain
-# component is missing, so the real compile below is the authoritative check.
-if ! command -v xcrun >/dev/null 2>&1; then
-  warn "xcrun not found (not a macOS host with Xcode); skipping metallib build."
-  exit 0
-fi
-
-# --- Argument parsing --------------------------------------------------------
 GEN=""
 OUTDIR=""
 CONFIG="debug"
 DEST=""
 VERBOSE=0
 
-# Positional plugin form: exactly two non-flag args.
 if [ $# -ge 1 ] && [ "${1#-}" = "$1" ]; then
-  GEN="${1:-}"
-  OUTDIR="${2:-}"
-  if [ -z "$GEN" ] || [ -z "$OUTDIR" ]; then
+  if [ $# -ne 2 ] || [ -z "${1:-}" ] || [ -z "${2:-}" ]; then
     warn "plugin form requires: <generated-metal-dir> <output-dir>"
     exit 2
   fi
+  GEN="$1"
+  OUTDIR="$2"
 else
-  # Legacy manual flag form.
   while [ $# -gt 0 ]; do
     case "$1" in
-      --config) CONFIG="$2"; shift 2 ;;
-      --dest)   DEST="$2"; shift 2 ;;
+      --config|--dest)
+        if [ $# -lt 2 ] || [ -z "$2" ]; then
+          warn "$1 requires a value"; exit 2
+        fi
+        if [ "$1" = --config ]; then CONFIG="$2"; else DEST="$2"; fi
+        shift 2 ;;
       -v|--verbose) VERBOSE=1; shift ;;
       -h|--help) sed -n '2,60p' "$0"; exit 0 ;;
       *) warn "unknown arg '$1'"; exit 2 ;;
@@ -95,97 +87,94 @@ else
   done
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-  ( cd "$ROOT" && swift package resolve >/dev/null 2>&1 ) || true
-  MLX_CHECKOUT="$ROOT/.build/checkouts/mlx-swift"
-  if [ ! -d "$MLX_CHECKOUT" ]; then
-    MLX_CHECKOUT="$(find "$ROOT/.build" -maxdepth 3 -type d -name mlx-swift -path '*checkouts*' 2>/dev/null | head -1)"
-  fi
-  GEN="$MLX_CHECKOUT/Source/Cmlx/mlx-generated/metal"
+  (cd "$ROOT" && swift package resolve)
+  GEN="$ROOT/.build/checkouts/mlx-swift/Source/Cmlx/mlx-generated/metal"
   if [ -z "$DEST" ]; then
-    DEST="$(cd "$ROOT" && swift build -c "$CONFIG" --show-bin-path 2>/dev/null)"
+    DEST="$(cd "$ROOT" && swift build -c "$CONFIG" --show-bin-path)"
   fi
 fi
 
-# --- Validate generated kernel dir -------------------------------------------
-if [ ! -d "$GEN" ]; then
-  warn "mlx-swift generated metal sources not found at: $GEN"
-  warn "run 'swift package resolve' / 'swift build' first; skipping."
-  exit 0
-fi
-
-# --- Resolve output path -----------------------------------------------------
-if [ -n "${OUTDIR:-}" ]; then
-  mkdir -p "$OUTDIR" || { warn "cannot create output dir $OUTDIR; skipping."; exit 0; }
+if [ -n "$OUTDIR" ]; then
   OUT="${OUTDIR%/}/mlx.metallib"
 else
   case "$DEST" in
     *.metallib) OUT="$DEST" ;;
-    *)          OUT="${DEST%/}/mlx.metallib" ;;
+    *) OUT="${DEST%/}/mlx.metallib" ;;
   esac
-  mkdir -p "$(dirname "$OUT")" || { warn "cannot create dir for $OUT; skipping."; exit 0; }
+fi
+mkdir -p "$(dirname "$OUT")"
+STAMP="$(dirname "$OUT")/.$(basename "$OUT").inputs.sha256"
+TMP="$(mktemp -d "$(dirname "$OUT")/.mlx-air.XXXXXX")"
+# A failed build must never leave a stale or partial library that a later build
+# can package. Temporary output also keeps partially linked files invisible.
+SUCCEEDED=0
+cleanup() {
+  rm -rf "$TMP"
+  if [ "$SUCCEEDED" -ne 1 ]; then rm -f "$OUT" "$STAMP"; fi
+}
+trap cleanup EXIT
+
+if [ ! -d "$GEN" ]; then
+  warn "mlx-swift generated metal sources not found at: $GEN"
+  exit 1
+fi
+find "$GEN" -type f -name '*.metal' -print | LC_ALL=C sort > "$TMP/kernels"
+if [ ! -s "$TMP/kernels" ]; then
+  warn "no .metal kernels found under $GEN"
+  exit 1
 fi
 
-# --- Up-to-date check --------------------------------------------------------
-# Skip recompilation if the metallib is newer than every kernel source. Keeps
-# the prebuild command cheap on incremental builds (prebuild runs every build).
-if [ -f "$OUT" ]; then
-  NEWEST_SRC="$(find "$GEN" -name '*.metal' -newer "$OUT" -print -quit 2>/dev/null)"
-  if [ -z "$NEWEST_SRC" ]; then
-    [ "$VERBOSE" -eq 1 ] && warn "up to date: $OUT"
-    echo "$OUT"
-    exit 0
-  fi
+# Probe availability separately. Once the installed drivers report their
+# versions, shader or linker errors are build failures, never missing-tool skips.
+if ! command -v xcrun >/dev/null 2>&1; then
+  warn "xcrun unavailable; compile-only build, no MLX GPU library produced."
+  exit 0
 fi
+if ! COMPILER="$(xcrun --sdk macosx metal --version 2>&1)"; then
+  warn "Metal compiler unavailable; compile-only build, no MLX GPU library produced."
+  warn "$COMPILER"
+  exit 0
+fi
+if ! LINKER="$(xcrun --sdk macosx metallib --version 2>&1)"; then
+  warn "Metal linker unavailable; compile-only build, no MLX GPU library produced."
+  warn "$LINKER"
+  exit 0
+fi
+SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
 
-# --- Compile + link ----------------------------------------------------------
-# Write intermediate .air files under the output dir when one was given (the
-# SwiftPM plugin sandbox only permits writes there); fall back to mktemp for the
-# manual form.
-if [ -n "${OUTDIR:-}" ]; then
-  TMP="${OUTDIR%/}/.air"
-  rm -rf "$TMP"; mkdir -p "$TMP"
-else
-  TMP="$(mktemp -d)"
+# Content hashing catches header-only patches and preserved checkout timestamps.
+# The script itself covers flags; compiler/linker + SDK cover toolchain changes.
+find "$GEN" -type f \( -name '*.metal' -o -name '*.h' \) -print | LC_ALL=C sort > "$TMP/inputs"
+{
+  shasum -a 256 "$0"
+  printf '%s\n' "$COMPILER" "$LINKER" "$SDK_PATH" "$SDK_VERSION"
+  while IFS= read -r source; do shasum -a 256 "$source"; done < "$TMP/inputs"
+} > "$TMP/input-hashes"
+shasum -a 256 "$TMP/input-hashes" | awk '{print $1}' > "$TMP/fingerprint"
+if [ -s "$OUT" ] && [ -f "$STAMP" ] && cmp -s "$STAMP" "$TMP/fingerprint"; then
+  SUCCEEDED=1
+  if [ "$VERBOSE" -eq 1 ]; then warn "up to date: $OUT"; fi
+  echo "$OUT"
+  exit 0
 fi
-trap 'rm -rf "$TMP"' EXIT
 
 AIRS=()
-COMPILE_FAILED=0
-while IFS= read -r f; do
-  rel="${f#"$GEN"/}"
-  name="$(echo "$rel" | tr '/' '_' | sed 's/\.metal$//')"
-  air="$TMP/$name.air"
-  [ "$VERBOSE" -eq 1 ] && warn "metal -c $rel"
-  # -I "$GEN": kernels #include their flattened sibling headers from here.
-  # No explicit -std: let the toolchain pick its default Metal language version;
-  # pinning an older -std collides with the newer toolchain's stdlib.
-  if ! xcrun --sdk macosx metal -O2 -c "$f" -I "$GEN" -o "$air" 2>"$TMP/metal.err"; then
-    # First compile failure is almost always "missing Metal Toolchain" — treat
-    # as graceful skip rather than failing the build.
-    warn "metal compile unavailable or failed; skipping metallib build."
-    warn "  (install with: xcodebuild -downloadComponent MetalToolchain)"
-    [ -s "$TMP/metal.err" ] && sed 's/^/    /' "$TMP/metal.err" >&2
-    COMPILE_FAILED=1
-    break
-  fi
+while IFS= read -r source; do
+  air="$TMP/${#AIRS[@]}.air"
+  if [ "$VERBOSE" -eq 1 ]; then warn "metal -c ${source#"$GEN"/}"; fi
+  # Stock language selection is intentional: the dependency must support the
+  # selected Xcode compiler, including its native app-target Metal build phase.
+  xcrun --sdk macosx metal -O2 -c "$source" -I "$GEN" -o "$air"
   AIRS+=("$air")
-done < <(find "$GEN" -name '*.metal' | sort)
-
-if [ "$COMPILE_FAILED" -eq 1 ]; then
-  exit 0
+done < "$TMP/kernels"
+xcrun --sdk macosx metallib "${AIRS[@]}" -o "$TMP/mlx.metallib"
+if [ ! -s "$TMP/mlx.metallib" ]; then
+  warn "Metal linker produced no library"
+  exit 1
 fi
-if [ ${#AIRS[@]} -eq 0 ]; then
-  warn "no .metal kernels found under $GEN; skipping."
-  exit 0
-fi
-
-if ! xcrun --sdk macosx metallib "${AIRS[@]}" -o "$OUT" 2>"$TMP/lib.err"; then
-  warn "metallib link unavailable or failed; skipping."
-  [ -s "$TMP/lib.err" ] && sed 's/^/    /' "$TMP/lib.err" >&2
-  rm -f "$OUT"
-  exit 0
-fi
-
-SIZE="$(stat -f%z "$OUT" 2>/dev/null || echo '?')"
-warn "wrote $OUT (${SIZE} bytes, ${#AIRS[@]} kernels)"
+mv "$TMP/mlx.metallib" "$OUT"
+mv "$TMP/fingerprint" "$STAMP"
+SUCCEEDED=1
+warn "wrote $OUT (${#AIRS[@]} kernels)"
 echo "$OUT"
