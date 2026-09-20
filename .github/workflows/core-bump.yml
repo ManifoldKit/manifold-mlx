@@ -46,11 +46,12 @@ jobs:
 
   bump:
     needs: resolve
-    uses: ManifoldKit/.github/.github/workflows/companion-core-bump.yml@ad62782801a0b817a5e269a812577826ea7f240e # main
+    uses: ManifoldKit/.github/.github/workflows/companion-core-bump.yml@7aab2cfd25b44b2abf1b48107ec9f41d6b75c591 # main
     permissions:
       contents: write
       pull-requests: write
     with:
       version: ${{ needs.resolve.outputs.version }}
       pin-mode: upToNextMinor
+      runner: macos-26
     secrets: inherit

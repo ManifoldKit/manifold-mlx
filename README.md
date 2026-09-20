@@ -8,6 +8,9 @@ It provides Apple-Silicon-native text generation (mlx-swift-lm model families in
 
 ## Install
 
+Requires iOS 26 or macOS 26. Apps supporting older systems should stay on the
+ManifoldKit 0.78-compatible release line until they can raise their deployment target.
+
 ```swift
 // Package.swift
 dependencies: [

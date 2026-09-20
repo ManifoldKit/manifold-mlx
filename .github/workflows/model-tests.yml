@@ -56,7 +56,7 @@ jobs:
     # macos-15 mirrors ci.yml. NOTE: hosted runners lack Metal — this job only
     # produces real coverage on a self-hosted Apple Silicon runner. It is kept
     # here so the lane is ready the moment such a runner is registered.
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select newest Xcode 26 toolchain
