@@ -25,11 +25,14 @@ let package = Package(
     // traits: [] builds core's products trait-less (the post-C2 world).
     .package(
       url: "https://github.com/ManifoldKit/ManifoldKit", .upToNextMinor(from: "0.78.0"), traits: []),
-    // Pins copied from core's Package.swift.
-    .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.3"),
-    // 3.31.3 ships the decoupled MLXHuggingFace target and adds the
-    // `gemma4` model_type to LLMTypeRegistry.
-    .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.4"),
+    // OS 26 bridge releases carry the Xcode 27 Metal fix while upstream
+    // remains on toolchains incompatible with the Xcode 26 canary.
+    .package(
+      url: "https://github.com/ManifoldKit/mlx-swift.git",
+      exact: "0.31.4-manifold.1"),
+    .package(
+      url: "https://github.com/ManifoldKit/mlx-swift-lm.git",
+      exact: "3.31.4-manifold.1"),
     // Explicit dep required: mlx-swift-lm no longer pulls
     // swift-transformers transitively.
     .package(url: "https://github.com/huggingface/swift-transformers", from: "1.2.0"),
