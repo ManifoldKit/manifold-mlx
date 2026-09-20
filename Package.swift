@@ -24,7 +24,7 @@ let package = Package(
     // consumes.
     // traits: [] builds core's products trait-less (the post-C2 world).
     .package(
-      url: "https://github.com/ManifoldKit/ManifoldKit", .upToNextMinor(from: "0.78.0"), traits: []),
+      url: "https://github.com/ManifoldKit/ManifoldKit", .upToNextMinor(from: "0.79.0"), traits: []),
     // OS 26 bridge releases carry the Xcode 27 Metal fix while upstream
     // remains on toolchains incompatible with the Xcode 26 canary.
     .package(
