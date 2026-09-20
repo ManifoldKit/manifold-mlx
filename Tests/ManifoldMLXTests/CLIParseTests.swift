@@ -8,9 +8,8 @@ import XCTest
 /// built binary via `Process`, testing only pure arg-parse / scenario-match
 /// behaviour that does NOT require a model or GPU.
 ///
-/// The binary path is resolved from the SwiftPM build directory via
-/// `swift build --show-bin-path`.  If the binary is absent the tests are
-/// skipped (so CI that runs only `swift test` without a prior build will
+/// The binary is resolved beside the running XCTest bundle. Do not launch
+/// nested SwiftPM commands: Swift 6.4 holds its build lock for the test run. If the binary is absent the tests are skipped (so CI that runs only `swift test` without a prior build will
 /// report "skipped" rather than "failed").
 ///
 /// **Exit-code contract under test**
@@ -33,27 +32,9 @@ final class CLIParseTests: XCTestCase {
 
   /// Resolve the path to the built manifold-tools-mlx binary, or nil if missing.
   private static let cachedBinaryPath: String? = {
-    let showBin = Process()
-    showBin.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
-    showBin.arguments = ["build", "--product", "manifold-tools-mlx", "--show-bin-path"]
-
-    let pipe = Pipe()
-    showBin.standardOutput = pipe
-    showBin.standardError = Pipe()  // suppress build output
-
-    do {
-      try showBin.run()
-    } catch {
-      return nil
-    }
-    showBin.waitUntilExit()
-
-    let rawPath =
-      String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-      .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    guard !rawPath.isEmpty else { return nil }
-
-    let bin = (rawPath as NSString).appendingPathComponent("manifold-tools-mlx")
+    let bin = Bundle(for: CLIParseTests.self).bundleURL
+      .deletingLastPathComponent()
+      .appendingPathComponent("manifold-tools-mlx").path
     return FileManager.default.fileExists(atPath: bin) ? bin : nil
   }()
 

@@ -58,3 +58,5 @@ something that cost real diagnosis time.
   `fatal: failed to write commit object`** → the 1Password SSH agent has locked;
   commit signing can't reach the key. Unlock the 1Password app and retry. Do
   **not** work around it with `--no-gpg-sign`. Staged work is safe meanwhile.
+
+- **Swift 6.4's full test run hangs in CLIParseTests or RecordProvenanceIntegrationTests** → the test launches `swift build --show-bin-path`, which waits in `flock` for the outer `swift test` build lock while the outer command waits for the test → locate the already-built CLI beside each running XCTest bundle instead. A process sample confirmed the nested SwiftPM lock wait on Xcode 27 (27A266a), 2026-09-20.
