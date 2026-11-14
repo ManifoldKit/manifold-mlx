@@ -2,11 +2,15 @@
 
 ## [0.6.4](https://github.com/ManifoldKit/manifold-mlx/compare/v0.6.3...v0.6.4) (2026-11-14)
 
+### Highlights
+
+#### Track ManifoldKit 0.80
+
+Update the core dependency to the 0.80 minor line. This compatibility release retains the existing iOS 26 and macOS 26 deployment floors, MLX dependency pins and backend implementation.
 
 ### Dependencies
 
-* bump ManifoldKit pin to v0.79.1 ([f4e3150](https://github.com/ManifoldKit/manifold-mlx/commit/f4e3150805fe11c46598c3f6bb7de37e01fbe1a0))
-* bump ManifoldKit pin to v0.80.0 ([a0578ef](https://github.com/ManifoldKit/manifold-mlx/commit/a0578efcf9d303551879d91403f62fad31ab5d3a))
+- Advance the ManifoldKit dependency from the published 0.79 line to 0.80.0, including the previously unreleased 0.79.1 pin update.
 
 ## [0.6.3](https://github.com/ManifoldKit/manifold-mlx/compare/v0.6.2...v0.6.3) (2026-09-20)
 
