@@ -298,19 +298,19 @@ import os
     }
   }
 
-  /// Applies the tokenizer chat template to a `[[String: String]]` message
-  /// array, recovering from templates that reject a standalone `system` role.
+  /// Applies the tokenizer chat template to a text conversation, recovering
+  /// from templates that reject a standalone system role or adjacent users.
   ///
   /// Some chat templates (Mistral v0.3) have no `system` branch and enforce
   /// strict user/assistant alternation, so a leading `system` turn raises a
-  /// Jinja `TemplateException` at render time — before any generation. Rather
-  /// than maintain a model-type allowlist, we attempt the real template first
-  /// and, only if it throws, retry once with the system text folded into the
-  /// first user message (see ``MLXChatMessageEncoder/foldSystemIntoFirstUser``).
-  /// If the fold changes nothing (no system turn) or the retry also throws,
-  /// the original error is surfaced — so this never masks an unrelated failure.
+  /// Jinja `TemplateException` at render time. An early Stop also leaves two
+  /// consecutive users in the next prompt: the interrupted user message stays
+  /// in history without an empty assistant turn. Try the original template
+  /// input first so compatible templates keep both message boundaries. Only
+  /// on failure, try folding the system text, joining adjacent users, or both.
+  /// If no adapted input renders successfully, preserve the original error.
   @MainActor
-  private static func prepareMessagesWithSystemFallback(
+  private static func prepareMessagesWithTemplateFallback(
     container: any MLXModelContainerProtocol,
     messages: [[String: String]],
     tools: [[String: any Sendable]]?
@@ -318,13 +318,25 @@ import os
     do {
       return try await container.prepare(messages: messages, tools: tools)
     } catch let originalError {
+      if originalError is CancellationError { throw originalError }
       let folded = MLXChatMessageEncoder.foldSystemIntoFirstUser(messages)
-      guard folded != messages else { throw originalError }
-      do {
-        return try await container.prepare(messages: folded, tools: tools)
-      } catch {
-        throw originalError
+      let joined = MLXChatMessageEncoder.joinAdjacentUserMessages(messages)
+      let joinedAndFolded = MLXChatMessageEncoder.foldSystemIntoFirstUser(joined)
+      var attempted = [messages]
+      for candidate in [folded, joined, joinedAndFolded] where !attempted.contains(candidate) {
+        try Task.checkCancellation()
+        attempted.append(candidate)
+        do {
+          return try await container.prepare(messages: candidate, tools: tools)
+        } catch let cancellation as CancellationError {
+          throw cancellation
+        } catch {
+          // The template can require both adaptations. Keep the original
+          // failure as the user-facing error if none of the candidates work.
+          continue
+        }
       }
+      throw originalError
     }
   }
 
@@ -355,7 +367,7 @@ import os
         // the structural-tools render today — Phase 0 / #2005).
         try await container.prepare(chat: SendableChatMessages(chatMessages))
       } else {
-        try await Self.prepareMessagesWithSystemFallback(
+        try await Self.prepareMessagesWithTemplateFallback(
           container: container, messages: messages, tools: toolSpecs
         )
       }

@@ -72,6 +72,9 @@ final class MockMLXModelContainer: @unchecked Sendable {
   /// are exercising and assert the backend hands compatible messages along.
   var simulatedChatTemplate: String?
 
+  /// Validates the message sequence at prompt preparation time, before generation.
+  var validateMessages: (@Sendable ([[String: String]]) throws -> Void)?
+
   /// Prepared prompt-token batches returned by successive `prepare` calls.
   ///
   /// When empty, the mock synthesizes a small token sequence from the message count.
@@ -135,6 +138,7 @@ final class MockMLXModelContainer: @unchecked Sendable {
     prepareCallCount += 1
     lastMessages = messages
     lastChatMessages = nil
+    try validateMessages?(messages)
 
     let promptTokens: [Int]
     if !preparedTokenBatches.isEmpty {

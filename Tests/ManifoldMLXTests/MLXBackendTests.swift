@@ -360,6 +360,53 @@ final class MLXBackendTests: XCTestCase {
     XCTAssertNoThrow(try MLXModelProbe.validateArchitecture(at: dir))
   }
 
+  func test_loadModel_rejectsBonsaiOneBitQuantizationBeforeLoadingWeights() async throws {
+    // Bonsai-1.7B-1bit declares qwen3 with implicit affine quantization.
+    // A config-only fixture proves the backend rejects the metadata before
+    // it can enter MLX's weight loader.
+    let url = try writeTempConfig([
+      "model_type": "qwen3",
+      "quantization": ["group_size": 128, "bits": 1],
+    ])
+    let backend = MLXBackend()
+    do {
+      try await backend.loadModel(from: url, plan: .testStub(effectiveContextSize: 512))
+      XCTFail("Expected a compatibility error for one-bit affine weights")
+    } catch InferenceError.modelLoadFailed(let underlying) {
+      XCTAssertTrue(underlying.localizedDescription.contains("1-bit affine quantization"))
+      XCTAssertTrue(underlying.localizedDescription.contains("Choose a model"))
+    }
+    XCTAssertFalse(backend.isModelLoaded)
+  }
+
+  func test_unsupportedGenerationReason_rejectsOneBitLayerOverride() throws {
+    let url = try writeTempConfig([
+      "model_type": "qwen3",
+      "quantization": [
+        "group_size": 64,
+        "bits": 4,
+        "model.layers.0.self_attn.q_proj": ["group_size": 128, "bits": 1],
+      ],
+    ])
+    let reason = try XCTUnwrap(MLXModelProbe.unsupportedGenerationReason(at: url))
+    XCTAssertTrue(reason.contains("1-bit affine quantization"))
+  }
+
+  func test_unsupportedGenerationReason_acceptsSupportedWeightQuantization() throws {
+    for bits in [2, 4] {
+      let url = try writeTempConfig([
+        "model_type": "qwen3",
+        "quantization": [
+          "group_size": 128,
+          "bits": bits,
+          "model.embed_tokens": ["group_size": 64, "bits": 8],
+          "lm_head": false,
+        ],
+      ])
+      XCTAssertNil(MLXModelProbe.unsupportedGenerationReason(at: url))
+    }
+  }
+
   // MARK: - VLM Factory Routing (issue #752, no hardware gate)
 
   func test_requiresVLMFactory_whenTextConfigEnablesMoE_returnsTrue() throws {
