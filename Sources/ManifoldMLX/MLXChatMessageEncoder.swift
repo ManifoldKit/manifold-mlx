@@ -125,6 +125,23 @@ import ManifoldInference
     return result
   }
 
+  /// Retains both messages' text for templates that require alternating roles.
+  /// This is a wire-only retry; the stored messages remain separate.
+  static func joinAdjacentUserMessages(_ messages: [[String: String]]) -> [[String: String]] {
+    var result: [[String: String]] = []
+    for message in messages {
+      if message["role"] == "user", let content = message["content"],
+        let previous = result.last, previous["role"] == "user",
+        let previousContent = previous["content"]
+      {
+        result[result.count - 1]["content"] = previousContent + "\n\n" + content
+      } else {
+        result.append(message)
+      }
+    }
+    return result
+  }
+
   /// `Chat.Message` analogue of ``normalizeSystemMessages(_:)``: folds every
   /// `.system` turn into a single leading message so the vision / structured
   /// history path obeys the same "system message must be first" contract.

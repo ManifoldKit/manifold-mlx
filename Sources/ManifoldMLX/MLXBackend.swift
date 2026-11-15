@@ -497,12 +497,9 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     // explicit and lets `ChatError` map it to `.selectModel`.
     try MLXModelProbe.validateArchitecture(at: url)
 
-    // Refuse architectures that load fine but crash on the first generation
-    // tick in mlx-swift-lm — a tensor is broadcast against the prompt length,
-    // raising an uncatchable C++ abort + Swift fatal that takes down the
-    // whole process. Covers Gemma 4 (sliding-window/KV-shared cache, upstream
-    // #282/#802), which has no released fix. Throwing here turns a
-    // process-killing mid-generation crash into a catchable load error.
+    // Refuse known native crashes before starting the model factory. This
+    // covers unsupported affine weight quantization and the Gemma 4
+    // sliding-window/KV-shared generation failure.
     if let reason = MLXModelProbe.unsupportedGenerationReason(at: url) {
       throw InferenceError.modelLoadFailed(
         underlying: NSError(

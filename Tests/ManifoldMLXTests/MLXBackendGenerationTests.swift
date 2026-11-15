@@ -857,6 +857,64 @@ final class MLXBackendGenerationTests: XCTestCase {
 
   // MARK: - Structural tools threading (Phase 0 / umbrella #2005, F3)
 
+  func test_generate_mistral_recoversFromConsecutiveUsersAfterEarlyStop() async throws {
+    struct InvalidRoleOrder: Error {}
+
+    let mock = MockMLXModelContainer()
+    mock.validateMessages = { messages in
+      for (index, message) in messages.enumerated() {
+        guard message["role"] == (index.isMultiple(of: 2) ? "user" : "assistant") else {
+          throw InvalidRoleOrder()
+        }
+      }
+    }
+    let backend = MLXBackend()
+    backend._inject(mock, dialect: .mistral)
+
+    let stream = try backend.generate(
+      prompt: "Next request",
+      systemPrompt: "Be concise.",
+      config: GenerationConfig(),
+      hints: GenerationRuntimeHints(history: [
+        StructuredMessage(role: "user", parts: [.text("First request")]),
+        StructuredMessage(role: "assistant", parts: [.text("Completed reply")]),
+        StructuredMessage(role: "user", parts: [.text("Interrupted request")]),
+        StructuredMessage(role: "user", parts: [.text("Next request")]),
+      ])
+    )
+
+    let tokens = try await collectTokens(from: stream)
+    XCTAssertEqual(tokens.joined(), "Hello world")
+    XCTAssertEqual(mock.lastMessages, [
+      ["role": "user", "content": "Be concise.\n\nFirst request"],
+      ["role": "assistant", "content": "Completed reply"],
+      ["role": "user", "content": "Interrupted request\n\nNext request"],
+    ])
+  }
+
+  func test_generate_templateAcceptingConsecutiveUsersPreservesBoundaries() async throws {
+    let mock = MockMLXModelContainer()
+    let backend = MLXBackend()
+    backend._inject(mock)
+
+    let stream = try backend.generate(
+      prompt: "Next request",
+      systemPrompt: nil,
+      config: GenerationConfig(),
+      hints: GenerationRuntimeHints(history: [
+        StructuredMessage(role: "user", parts: [.text("First request")]),
+        StructuredMessage(role: "user", parts: [.text("Next request")]),
+      ])
+    )
+    _ = try await collectTokens(from: stream)
+
+    XCTAssertEqual(mock.prepareCallCount, 1)
+    XCTAssertEqual(mock.lastMessages, [
+      ["role": "user", "content": "First request"],
+      ["role": "user", "content": "Next request"],
+    ])
+  }
+
   /// Mistral (a tools-aware-template dialect) must thread the structural
   /// `tools` array into `prepare(messages:tools:)` so the model's own chat
   /// template renders its native `[AVAILABLE_TOOLS]` block.

@@ -1,4 +1,5 @@
 import Foundation
+import MLXLMCommon
 import ManifoldInference
 
 /// Probes MLX model directories for architecture, factory routing, and manifest metadata.
@@ -136,10 +137,9 @@ import ManifoldInference
     isUnsupportedGemma4(modelType: readModelType(at: url))
   }
 
-  /// Returns a human-readable reason when the model at `url` is known to crash
-  /// during generation in the current mlx-swift-lm and must be refused at
-  /// load, or `nil` when it is safe to attempt. Reads `config.json` once and
-  /// dispatches on the model type.
+  /// Returns a human-readable reason to refuse a model that is known to crash
+  /// during weight loading or text generation. Other load errors remain the
+  /// responsibility of the model factory.
   ///
   /// Qwen 3.5's gated-DeltaNet linear-attention broadcast crash (upstream
   /// ml-explore/mlx-swift-lm#157) was fixed in mlx-swift-lm 3.31.4 — re-tested
@@ -153,7 +153,33 @@ import ManifoldInference
         + "sliding-window/KV-shared broadcast mismatch "
         + "(upstream ml-explore/mlx-swift-lm#282 / #802). Unsupported until an upstream fix lands."
     }
-    return nil
+    return unsupportedAffineQuantizationReason(at: url)
+  }
+
+  private static func unsupportedAffineQuantizationReason(at url: URL) -> String? {
+    // Use the same decoder as the LLM and VLM factories so the check includes
+    // their default mode and mixed-precision layer overrides.
+    guard let data = try? Data(contentsOf: url.appendingPathComponent("config.json")),
+      let config = try? JSONDecoder.json5().decode(BaseConfiguration.self, from: data),
+      let quantization = config.perLayerQuantization
+    else { return nil }
+
+    // MLX's affine_quantize rejects all other bit depths. Cmlx routes that
+    // exception to a Swift fatal error, so it must be checked before loading.
+    let supportedBits = [2, 3, 4, 5, 6, 8]
+    var settings = quantization.quantization.map { [$0] } ?? []
+    for option in quantization.perLayerQuantization.values {
+      if case .quantize(let setting) = option {
+        settings.append(setting)
+      }
+    }
+    guard let bits = settings
+      .filter({ $0.mode == .affine && !supportedBits.contains($0.bits) })
+      .map(\.bits)
+      .min()
+    else { return nil }
+    return "This MLX model uses \(bits)-bit affine quantization, which MLX does not support. "
+      + "Choose a model with a supported bit depth (2, 3, 4, 5, 6, or 8)."
   }
 
   /// Returns `true` when the model at `url` must load through the VLM factory.
