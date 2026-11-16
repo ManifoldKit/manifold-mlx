@@ -177,6 +177,131 @@ final class MLXBackendGenerationTests: XCTestCase {
       "Vision turns should go through UserInput(chat:) instead of text-only message dictionaries")
   }
 
+  private enum VisionTemplateError: Error {
+    case adjacentUsers
+    case retryRejected
+  }
+
+  private func adjacentVisionUsers() throws -> [StructuredMessage] {
+    let first = try XCTUnwrap(Data(base64Encoded:
+      "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAADUlEQVR4nGP4z8AARAAI/gH/xp559wAAAABJRU5ErkJggg=="))
+    let second = try XCTUnwrap(Data(base64Encoded:
+      "iVBORw0KGgoAAAANSUhEUgAAAAMAAAABCAIAAACUgoPjAAAADUlEQVR4nGP4z8AAQQAR+AL+4+XvtgAAAABJRU5ErkJggg=="))
+    return [
+      StructuredMessage(role: "user", content: "Earlier question"),
+      StructuredMessage(role: "assistant", content: "Earlier answer"),
+      StructuredMessage(
+        role: "user", parts: [.text("Cancelled request"), .image(data: first, mimeType: "image/png")]),
+      StructuredMessage(
+        role: "user", parts: [.text("Compare these"), .image(data: second, mimeType: "image/png")]),
+    ]
+  }
+
+  private func prepareAdjacentVisionUsers(
+    using mock: MockMLXModelContainer, history: [StructuredMessage]? = nil
+  ) async throws -> [String] {
+    let backend = MLXBackend()
+    backend._inject(mock, supportsVision: true)
+    let history = try history ?? adjacentVisionUsers()
+    let stream = try backend.generate(
+      prompt: history.last?.textContent ?? "fallback", systemPrompt: nil, config: GenerationConfig(),
+      hints: GenerationRuntimeHints(history: history))
+    return try await collectTokens(from: stream)
+  }
+
+  private func strictVisionMock() -> MockMLXModelContainer {
+    let mock = MockMLXModelContainer()
+    mock.validateChat = { chat in
+      if zip(chat, chat.dropFirst()).contains(where: { $0.0.role == .user && $0.1.role == .user }) {
+        throw VisionTemplateError.adjacentUsers
+      }
+    }
+    return mock
+  }
+
+  func test_generate_strictVisionTemplate_retriesAdjacentUsersWithBothImages() async throws {
+    let mock = strictVisionMock()
+    let tokens = try await prepareAdjacentVisionUsers(using: mock)
+    let rendered = try XCTUnwrap(mock.lastChatMessages)
+
+    XCTAssertEqual(tokens.joined(), "Hello world")
+    XCTAssertEqual(mock.prepareCallCount, 2)
+    XCTAssertNil(mock.lastMessages, "A structured retry must not flatten the images to text.")
+    XCTAssertEqual(rendered.map(\.role), [.user, .assistant, .user])
+    XCTAssertEqual(rendered.map(\.content), [
+      "Earlier question", "Earlier answer", "Cancelled request\n\nCompare these",
+    ])
+    let images = try XCTUnwrap(rendered.last).images
+    XCTAssertEqual(try images.map { try $0.asCIImage().extent.width }, [2, 3])
+  }
+
+  func test_generate_strictVisionTemplate_preservesEarlierImageAndAnswerAfterTextStop() async throws {
+    let mock = strictVisionMock()
+    let history: [StructuredMessage] = [
+      StructuredMessage(
+        role: "user",
+        parts: [
+          .text("Describe this image."),
+          .image(data: ImageFixtures.oneByOnePNGData, mimeType: "image/png"),
+        ]),
+      StructuredMessage(role: "assistant", content: "Earlier image description"),
+      StructuredMessage(role: "user", content: "Cancelled text request"),
+      StructuredMessage(role: "user", content: "What was in the image?"),
+    ]
+    let tokens = try await prepareAdjacentVisionUsers(using: mock, history: history)
+    let rendered = try XCTUnwrap(mock.lastChatMessages)
+
+    XCTAssertEqual(tokens.joined(), "Hello world")
+    XCTAssertEqual(mock.prepareCallCount, 2)
+    XCTAssertNil(mock.lastMessages)
+    XCTAssertEqual(rendered.map(\.role), [.user, .assistant, .user])
+    XCTAssertEqual(rendered.map(\.content), [
+      "Describe this image.", "Earlier image description",
+      "Cancelled text request\n\nWhat was in the image?",
+    ])
+    XCTAssertEqual(rendered.map { $0.images.count }, [1, 0, 0])
+  }
+
+  func test_generate_permissiveVisionTemplate_keepsAdjacentUsersSeparate() async throws {
+    let mock = MockMLXModelContainer()
+    let tokens = try await prepareAdjacentVisionUsers(using: mock)
+    let rendered = try XCTUnwrap(mock.lastChatMessages)
+
+    XCTAssertEqual(tokens.joined(), "Hello world")
+    XCTAssertEqual(mock.prepareCallCount, 1)
+    XCTAssertEqual(rendered.map(\.role), [.user, .assistant, .user, .user])
+    XCTAssertEqual(rendered.suffix(2).map(\.content), ["Cancelled request", "Compare these"])
+    XCTAssertEqual(rendered.map { $0.images.count }, [0, 0, 1, 1])
+  }
+
+  func test_generate_visionRetryFailure_surfacesOriginalError() async throws {
+    let mock = MockMLXModelContainer()
+    mock.validateChat = { chat in
+      throw chat.count == 4 ? VisionTemplateError.adjacentUsers : VisionTemplateError.retryRejected
+    }
+
+    do {
+      _ = try await prepareAdjacentVisionUsers(using: mock)
+      XCTFail("An invalid prompt must not enter generation")
+    } catch VisionTemplateError.adjacentUsers {
+      XCTAssertEqual(mock.prepareCallCount, 2)
+      XCTAssertEqual(mock.generateCallCount, 0)
+    }
+  }
+
+  func test_generate_cancelledVisionPreparation_isNotRetried() async throws {
+    let mock = MockMLXModelContainer()
+    mock.validateChat = { _ in throw CancellationError() }
+
+    do {
+      _ = try await prepareAdjacentVisionUsers(using: mock)
+      XCTFail("Cancelled preparation must not enter generation")
+    } catch is CancellationError {
+      XCTAssertEqual(mock.prepareCallCount, 1)
+      XCTAssertEqual(mock.generateCallCount, 0)
+    }
+  }
+
   func test_generate_toolAwareVisionHistory_preservesOriginalImages() async throws {
     let mock = MockMLXModelContainer()
     mock.tokensToYield = ["ok"]
