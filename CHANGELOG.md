@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.5](https://github.com/ManifoldKit/manifold-mlx/compare/v0.6.4...v0.6.5) (2026-11-16)
+
+
+### Bug Fixes
+
+* **mlx:** continue Gemma image chat after Stop ([#219](https://github.com/ManifoldKit/manifold-mlx/issues/219)) ([a93ece6](https://github.com/ManifoldKit/manifold-mlx/commit/a93ece6c51baca70c613a4d1531187f806e09c96))
+* **mlx:** recover stopped chats and reject unsupported weights ([#216](https://github.com/ManifoldKit/manifold-mlx/issues/216)) ([105a92a](https://github.com/ManifoldKit/manifold-mlx/commit/105a92a9b02b159863ec66a5b2ae0c467d7156b1))
+
 ## [0.6.4](https://github.com/ManifoldKit/manifold-mlx/compare/v0.6.3...v0.6.4) (2026-11-14)
 
 ### Highlights
