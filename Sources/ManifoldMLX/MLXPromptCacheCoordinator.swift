@@ -340,6 +340,31 @@ import os
     }
   }
 
+  /// Vision history has its own preparation path so a retry must retain its
+  /// media instead of falling back to the text-only message dictionaries.
+  @MainActor
+  private static func prepareChatWithTemplateFallback(
+    container: any MLXModelContainerProtocol,
+    chat: [Chat.Message]
+  ) async throws -> MLXPreparedInput {
+    do {
+      return try await container.prepare(chat: SendableChatMessages(chat))
+    } catch let originalError {
+      if originalError is CancellationError { throw originalError }
+      try Task.checkCancellation()
+      let joined = MLXChatMessageEncoder.joinAdjacentUserMessages(chat)
+      guard joined.count < chat.count else { throw originalError }
+      do {
+        return try await container.prepare(chat: SendableChatMessages(joined))
+      } catch let cancellation as CancellationError {
+        throw cancellation
+      } catch {
+        try Task.checkCancellation()
+        throw originalError
+      }
+    }
+  }
+
   /// Prepares the model input, allocates a KV cache, and applies the
   /// longest-common-prefix reuse heuristic when an eligible snapshot exists.
   ///
@@ -365,7 +390,7 @@ import os
         // Vision/structured history path: tools are not threaded
         // structurally here (only the text-only `messages` path carries
         // the structural-tools render today — Phase 0 / #2005).
-        try await container.prepare(chat: SendableChatMessages(chatMessages))
+        try await Self.prepareChatWithTemplateFallback(container: container, chat: chatMessages)
       } else {
         try await Self.prepareMessagesWithTemplateFallback(
           container: container, messages: messages, tools: toolSpecs

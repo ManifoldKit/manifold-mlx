@@ -75,6 +75,9 @@ final class MockMLXModelContainer: @unchecked Sendable {
   /// Validates the message sequence at prompt preparation time, before generation.
   var validateMessages: (@Sendable ([[String: String]]) throws -> Void)?
 
+  /// Validates structured messages during vision prompt preparation.
+  var validateChat: (@Sendable ([Chat.Message]) throws -> Void)?
+
   /// Prepared prompt-token batches returned by successive `prepare` calls.
   ///
   /// When empty, the mock synthesizes a small token sequence from the message count.
@@ -156,6 +159,7 @@ final class MockMLXModelContainer: @unchecked Sendable {
     prepareCallCount += 1
     lastChatMessages = chat
     lastMessages = nil
+    try validateChat?(chat)
 
     let promptTokens: [Int]
     if !preparedTokenBatches.isEmpty {
