@@ -14,8 +14,8 @@ ManifoldKit 0.78-compatible release line until they can raise their deployment t
 ```swift
 // Package.swift
 dependencies: [
-    .package(url: "https://github.com/ManifoldKit/ManifoldKit", branch: "main"),
-    .package(url: "https://github.com/ManifoldKit/manifold-mlx", branch: "main"),
+    .package(url: "https://github.com/ManifoldKit/ManifoldKit", .upToNextMinor(from: "0.80.0")),
+    .package(url: "https://github.com/ManifoldKit/manifold-mlx", .upToNextMinor(from: "0.6.5")),
 ],
 targets: [
     .target(name: "MyApp", dependencies: [
@@ -43,10 +43,7 @@ let kit = try await ManifoldKit.quickStart(backends: [MLXBackends.self])
 
 | manifold-mlx | ManifoldKit |
 |---|---|
-| `main` | `main` (pre-0.48) |
-| `0.1.0` (not yet tagged) | `0.48.x` (`.upToNextMinor` pin) |
-
-Pre-tag, this package tracks core `main` by branch; the pin flips to `.upToNextMinor(from: "0.48.0")` at the 0.48 release train.
+| `0.6.5` | `0.80.x` (`.upToNextMinor` pin) |
 
 ## Tests
 
