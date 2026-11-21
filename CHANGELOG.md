@@ -2,16 +2,21 @@
 
 ## [0.6.6](https://github.com/ManifoldKit/manifold-mlx/compare/v0.6.5...v0.6.6) (2026-11-21)
 
+### Highlights
 
-### Bug Fixes
+#### Keep the next image question separate after Stop
 
-* **mlx:** preserve Gemma turns after early Stop ([#225](https://github.com/ManifoldKit/manifold-mlx/issues/225)) ([29a61b5](https://github.com/ManifoldKit/manifold-mlx/commit/29a61b5291a92be5ac56c6b986e68c0066820040)), closes [#224](https://github.com/ManifoldKit/manifold-mlx/issues/224)
-
+The structured retry for Gemma's strict chat template preserves the stopped
+request and the next question as separate user turns. Images stay attached to
+their original turns, and the empty assistant boundary is sent only to the
+model. [#224](https://github.com/ManifoldKit/manifold-mlx/issues/224),
+[#225](https://github.com/ManifoldKit/manifold-mlx/pull/225)
 
 ### Dependencies
 
-* bump ManifoldKit pin to v0.80.1 ([7c1146c](https://github.com/ManifoldKit/manifold-mlx/commit/7c1146ce061b005449cee76b6a385e13ce15da02))
-* bump ManifoldKit pin to v0.80.2 ([70b11db](https://github.com/ManifoldKit/manifold-mlx/commit/70b11dbe9e21aed1006bfaafa3a5e630f244bd3b))
+This release requires ManifoldKit 0.80.2 or later in the 0.80 series.
+[0.80.1 pin update](https://github.com/ManifoldKit/manifold-mlx/commit/7c1146ce061b005449cee76b6a385e13ce15da02),
+[0.80.2 pin update](https://github.com/ManifoldKit/manifold-mlx/commit/70b11dbe9e21aed1006bfaafa3a5e630f244bd3b)
 
 ## [0.6.5](https://github.com/ManifoldKit/manifold-mlx/compare/v0.6.4...v0.6.5) (2026-11-16)
 
