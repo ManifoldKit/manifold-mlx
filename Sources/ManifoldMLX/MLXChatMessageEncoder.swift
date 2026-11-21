@@ -142,22 +142,17 @@ import ManifoldInference
     return result
   }
 
-  /// Joins adjacent user turns for a structured prompt retry, preserving the
-  /// original order of each media array. Tool metadata cannot be combined.
-  static func joinAdjacentUserMessages(_ messages: [Chat.Message]) -> [Chat.Message] {
+  /// Preserves distinct user turns and their original media in strict vision
+  /// templates. The empty assistant message exists only in the model input.
+  static func insertAssistantBoundariesBetweenUsers(_ messages: [Chat.Message]) -> [Chat.Message] {
     var result: [Chat.Message] = []
     for message in messages {
-      guard message.role == .user, message.tool == nil,
-        var previous = result.last, previous.role == .user, previous.tool == nil
-      else {
-        result.append(message)
-        continue
+      if message.role == .user, message.tool == nil,
+        let previous = result.last, previous.role == .user, previous.tool == nil
+      {
+        result.append(.assistant(""))
       }
-      previous.content += "\n\n" + message.content
-      previous.images.append(contentsOf: message.images)
-      previous.videos.append(contentsOf: message.videos)
-      previous.audios.append(contentsOf: message.audios)
-      result[result.count - 1] = previous
+      result.append(message)
     }
     return result
   }

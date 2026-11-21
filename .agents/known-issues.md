@@ -38,6 +38,14 @@ something that cost real diagnosis time.
   before assuming the workflow is broken (e.g. core v0.75.0's optional
   `contextWindow` needed manifold-mlx#167).
 
+## Vision chat
+
+- **Gemma continues the cancelled request after Stop** → strict templates
+  require alternating roles, and joining consecutive user messages puts the
+  cancelled request and the next question in one turn → insert an empty
+  assistant boundary in the structured retry while keeping each user
+  message and its media intact. Keep the boundary within the model input.
+
 ## Tests
 
 - **`ManifoldMLXIntegrationTests` crashes with "Failed to load the default
