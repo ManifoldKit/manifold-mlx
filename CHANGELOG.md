@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.6](https://github.com/ManifoldKit/manifold-mlx/compare/v0.6.5...v0.6.6) (2026-11-21)
+
+
+### Bug Fixes
+
+* **mlx:** preserve Gemma turns after early Stop ([#225](https://github.com/ManifoldKit/manifold-mlx/issues/225)) ([29a61b5](https://github.com/ManifoldKit/manifold-mlx/commit/29a61b5291a92be5ac56c6b986e68c0066820040)), closes [#224](https://github.com/ManifoldKit/manifold-mlx/issues/224)
+
+
+### Dependencies
+
+* bump ManifoldKit pin to v0.80.1 ([7c1146c](https://github.com/ManifoldKit/manifold-mlx/commit/7c1146ce061b005449cee76b6a385e13ce15da02))
+* bump ManifoldKit pin to v0.80.2 ([70b11db](https://github.com/ManifoldKit/manifold-mlx/commit/70b11dbe9e21aed1006bfaafa3a5e630f244bd3b))
+
 ## [0.6.5](https://github.com/ManifoldKit/manifold-mlx/compare/v0.6.4...v0.6.5) (2026-11-16)
 
 ### Highlights
