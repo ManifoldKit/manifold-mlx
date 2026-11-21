@@ -221,18 +221,25 @@ final class MLXBackendGenerationTests: XCTestCase {
 
   func test_generate_strictVisionTemplate_retriesAdjacentUsersWithBothImages() async throws {
     let mock = strictVisionMock()
-    let tokens = try await prepareAdjacentVisionUsers(using: mock)
+    let history = try adjacentVisionUsers() + [
+      StructuredMessage(role: "user", content: "Answer the latest question")
+    ]
+    let tokens = try await prepareAdjacentVisionUsers(using: mock, history: history)
     let rendered = try XCTUnwrap(mock.lastChatMessages)
 
     XCTAssertEqual(tokens.joined(), "Hello world")
     XCTAssertEqual(mock.prepareCallCount, 2)
     XCTAssertNil(mock.lastMessages, "A structured retry must not flatten the images to text.")
-    XCTAssertEqual(rendered.map(\.role), [.user, .assistant, .user])
+    XCTAssertEqual(rendered.map(\.role), [.user, .assistant, .user, .assistant, .user, .assistant, .user])
     XCTAssertEqual(rendered.map(\.content), [
-      "Earlier question", "Earlier answer", "Cancelled request\n\nCompare these",
+      "Earlier question", "Earlier answer", "Cancelled request", "", "Compare these", "",
+      "Answer the latest question",
     ])
-    let images = try XCTUnwrap(rendered.last).images
-    XCTAssertEqual(try images.map { try $0.asCIImage().extent.width }, [2, 3])
+    XCTAssertEqual(
+      try rendered.map { message in try message.images.map { try $0.asCIImage().extent.width } },
+      [[], [], [2], [], [3], [], []]
+    )
+    XCTAssertTrue(rendered.allSatisfy { $0.tool == nil })
   }
 
   func test_generate_strictVisionTemplate_preservesEarlierImageAndAnswerAfterTextStop() async throws {
@@ -254,12 +261,12 @@ final class MLXBackendGenerationTests: XCTestCase {
     XCTAssertEqual(tokens.joined(), "Hello world")
     XCTAssertEqual(mock.prepareCallCount, 2)
     XCTAssertNil(mock.lastMessages)
-    XCTAssertEqual(rendered.map(\.role), [.user, .assistant, .user])
+    XCTAssertEqual(rendered.map(\.role), [.user, .assistant, .user, .assistant, .user])
     XCTAssertEqual(rendered.map(\.content), [
-      "Describe this image.", "Earlier image description",
-      "Cancelled text request\n\nWhat was in the image?",
+      "Describe this image.", "Earlier image description", "Cancelled text request", "",
+      "What was in the image?",
     ])
-    XCTAssertEqual(rendered.map { $0.images.count }, [1, 0, 0])
+    XCTAssertEqual(rendered.map { $0.images.count }, [1, 0, 0, 0, 0])
   }
 
   func test_generate_permissiveVisionTemplate_keepsAdjacentUsersSeparate() async throws {

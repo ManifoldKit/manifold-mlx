@@ -352,10 +352,10 @@ import os
     } catch let originalError {
       if originalError is CancellationError { throw originalError }
       try Task.checkCancellation()
-      let joined = MLXChatMessageEncoder.joinAdjacentUserMessages(chat)
-      guard joined.count < chat.count else { throw originalError }
+      let separated = MLXChatMessageEncoder.insertAssistantBoundariesBetweenUsers(chat)
+      guard separated.count > chat.count else { throw originalError }
       do {
-        return try await container.prepare(chat: SendableChatMessages(joined))
+        return try await container.prepare(chat: SendableChatMessages(separated))
       } catch let cancellation as CancellationError {
         throw cancellation
       } catch {
