@@ -216,13 +216,11 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
   /// Set by `loadModel(from:plan:)` via `MLXToolDialect.detect(at:)`.
   /// Access only under `stateLock`.
   private var _dialect: MLXToolDialect = .unknown
-  /// Thinking-marker pair auto-detected from the loaded model's
-  /// `tokenizer_config.json` chat template. `nil` when the model is not
-  /// loaded, the chat template is missing, or no known marker pair was
-  /// found in the template. `GenerationRuntimeHints.thinkingMarkers` always
-  /// overrides this — see the generate path below.
+  /// Thinking markers detected from the loaded tokenizer's chat templates.
+  /// `GenerationRuntimeHints.thinkingMarkers` takes precedence at generation time.
   /// Access only under `stateLock`.
-  private var _autoDetectedThinkingMarkers: ThinkingMarkers?
+  private var _autoDetectedThinkingMarkers: MLXModelProbe.TemplateThinkingMarkers?
+  private let thinkingDefault: MLXThinkingDefault
   /// Prompt KV-cache reuse state. Access only under `stateLock`.
   private var _promptCacheState = MLXPromptCacheCoordinator.State()
   /// Whether the currently loaded model/config is eligible for prompt-cache reuse.
@@ -404,12 +402,24 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
 
   // MARK: - Init
 
-  public init(
+  public convenience init(
     cachePolicy: MLXCachePolicy = .auto,
     enableKVCacheReuse: Bool = true
   ) {
+    self.init(
+      cachePolicy: cachePolicy, enableKVCacheReuse: enableKVCacheReuse,
+      thinkingDefault: .modelDefault
+    )
+  }
+
+  public init(
+    cachePolicy: MLXCachePolicy = .auto,
+    enableKVCacheReuse: Bool = true,
+    thinkingDefault: MLXThinkingDefault
+  ) {
     self.cachePolicy = cachePolicy
     self.enableKVCacheReuse = enableKVCacheReuse
+    self.thinkingDefault = thinkingDefault
   }
 
   deinit {
@@ -566,7 +576,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
       let detectedThinkingMarkers = MLXModelProbe.detectThinkingMarkers(at: url)
       let producedManifest = MLXModelProbe.produceManifest(
         at: url,
-        detectedThinkingMarkers: detectedThinkingMarkers,
+        detectedThinkingMarkers: detectedThinkingMarkers.forManifest(dialect: detectedDialect),
         supportsVision: supportsVision
       )
       let kvCacheReuseEligible = enableKVCacheReuse && !routeThroughVLMFactory
@@ -715,7 +725,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     let (stream, continuation) = AsyncThrowingStream.makeStream(of: GenerationEvent.self)
     let generationStream = GenerationStream(stream)
 
-    let task = Task { @MainActor [weak self, generationStream] in
+    let task = Task { @MainActor [weak self, generationStream, thinkingDefault] in
       defer {
         Self.logger.debug("MLX generate finished")
       }
@@ -733,6 +743,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
           structuredHistory: snapshot.structuredHistory,
           dialect: snapshot.dialect,
           autoDetectedMarkers: snapshot.autoDetectedMarkers,
+          thinkingDefault: thinkingDefault,
           kvCacheReuseEligible: snapshot.kvCacheReuseEligible,
           pendingSnapshotTask: snapshot.pendingSnapshotTask,
           // Closure re-reads the snapshot AFTER the driver awaits
@@ -913,7 +924,7 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
     let toolAwareHistory: [ToolAwareHistoryEntry]?
     let structuredHistory: [StructuredMessage]?
     let dialect: MLXToolDialect
-    let autoDetectedMarkers: ThinkingMarkers?
+    let autoDetectedMarkers: MLXModelProbe.TemplateThinkingMarkers?
     let kvCacheReuseEligible: Bool
     let pendingSnapshotTask: Task<Void, Never>?
     let grammar: GBNFGrammar?
@@ -1050,12 +1061,14 @@ public final class MLXBackend: InferenceBackend, @unchecked Sendable {
   }
 
   /// Test-only seam: forces the auto-detected thinking markers to a specific
-  /// value, simulating what the load path would have read from
-  /// `tokenizer_config.json`. Tests use this to verify that
+  /// value, simulating what the load path would have detected from the
+  /// tokenizer's chat template. Tests use this to verify that
   /// `hints.thinkingMarkers` correctly overrides auto-detection without
   /// having to stage a real model directory.
   @_spi(Testing) public func _injectAutoDetectedThinkingMarkers(_ markers: ThinkingMarkers?) {
-    withStateLock { _autoDetectedThinkingMarkers = markers }
+    withStateLock {
+      _autoDetectedThinkingMarkers = .init(standard: markers, withTools: markers)
+    }
   }
 
   /// Test-only seam: forces `_manifest` to a specific value, simulating

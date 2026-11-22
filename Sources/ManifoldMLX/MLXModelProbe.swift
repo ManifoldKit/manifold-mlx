@@ -1,4 +1,5 @@
 import Foundation
+import Hub
 import MLXLMCommon
 import ManifoldInference
 
@@ -289,49 +290,63 @@ import ManifoldInference
     return false
   }
 
-  /// Reads `tokenizer_config.json` inside `url` and returns the best-matching
-  /// thinking-marker preset for the chat template it declares.
-  ///
-  /// Best-effort: a missing or unreadable `tokenizer_config.json`, or one
-  /// without a `chat_template` field, returns `nil`. The MLX tokenizer object
-  /// in `mlx-swift-lm` exposes the chat template through Hugging Face's
-  /// swift-transformers, but reaching it requires opening a `ModelContainer`
-  /// session — reading the on-disk JSON directly is faster and avoids
-  /// tying up the GPU during the load.
-  ///
-  /// - Parameter url: The model directory URL (same one passed to
-  ///   `MLXBackend.loadModel(from:plan:)`).
-  /// - Returns: The auto-detected ``ThinkingMarkers`` or `nil` if no known
-  ///   marker pair is present in the template.
-  static func detectThinkingMarkers(at url: URL) -> ThinkingMarkers? {
+  struct TemplateThinkingMarkers: Sendable {
+    let standard: ThinkingMarkers?
+    let withTools: ThinkingMarkers?
+
+    func forManifest(dialect: MLXToolDialect) -> ThinkingMarkers? {
+      standard ?? (MLXChatMessageEncoder.usesStructuralTools(dialect: dialect) ? withTools : nil)
+    }
+  }
+
+  /// Mirrors the tokenizer loader's local chat template lookup, including
+  /// the template chosen when a non-empty structural tool list is supplied.
+  static func detectThinkingMarkers(at url: URL) -> TemplateThinkingMarkers {
+    let jinjaURL = url.appendingPathComponent("chat_template.jinja")
+    let externalTemplate: String?
+    if FileManager.default.fileExists(atPath: jinjaURL.path) {
+      // When Jinja exists but cannot be read, the loader keeps the embedded
+      // template and does not try the external JSON.
+      do {
+        externalTemplate = try String(contentsOf: jinjaURL, encoding: .utf8)
+      } catch {
+        Log.inference.debug("Could not read chat_template.jinja: \(error, privacy: .private)")
+        externalTemplate = nil
+      }
+    } else {
+      let jsonURL = url.appendingPathComponent("chat_template.json")
+      externalTemplate = readTokenizerConfig(at: jsonURL)?.chatTemplate.string()
+    }
     let configURL = url.appendingPathComponent("tokenizer_config.json")
-    guard let data = try? Data(contentsOf: configURL),
-      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-    else {
-      // Missing / unreadable tokenizer_config.json is expected for some
-      // model layouts (older snapshots, partial downloads). Don't warn —
-      // callers explicitly opt out of thinking parsing when this is nil.
-      return nil
+    let embedded = readTokenizerConfig(at: configURL)?.chatTemplate
+    if let template = externalTemplate ?? embedded?.string() {
+      let markers = ThinkingMarkers.fromChatTemplate(template)
+      return TemplateThinkingMarkers(standard: markers, withTools: markers)
     }
 
-    // `chat_template` is a single string for most HF tokenizers, but a
-    // small number of repos ship an array of `{name, template}` entries
-    // (multi-template configs). When that happens, sniff the first entry
-    // whose name is `default` (or the first entry overall).
-    let templateString: String? = {
-      if let s = json["chat_template"] as? String { return s }
-      if let arr = json["chat_template"] as? [[String: Any]] {
-        if let def = arr.first(where: { ($0["name"] as? String)?.lowercased() == "default" }),
-          let s = def["template"] as? String
-        {
-          return s
-        }
-        if let s = arr.first?["template"] as? String { return s }
-      }
+    let templates = embedded?.array() ?? []
+    func template(named name: String) -> String? {
+      templates.lazy.compactMap { entry in
+        entry["name"].string() == name ? entry["template"].string() : nil
+      }.first
+    }
+
+    let standard = template(named: "default")
+    let withTools = template(named: "tool_use") ?? standard
+    return TemplateThinkingMarkers(
+      standard: standard.flatMap(ThinkingMarkers.fromChatTemplate),
+      withTools: withTools.flatMap(ThinkingMarkers.fromChatTemplate)
+    )
+  }
+
+  private static func readTokenizerConfig(at url: URL) -> Config? {
+    guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+    do {
+      return try HubApi.shared.configuration(fileURL: url)
+    } catch {
+      Log.inference.debug("Could not read \(url.lastPathComponent, privacy: .public): \(error, privacy: .private)")
       return nil
-    }()
-    guard let template = templateString else { return nil }
-    return ThinkingMarkers.fromChatTemplate(template)
+    }
   }
 
   /// Produces a ``ModelManifest`` from a freshly-loaded MLX model directory.

@@ -287,54 +287,207 @@ final class MLXBackendThinkingTests: XCTestCase {
     // surface as raw .token events and thinkingTexts.isEmpty would fail.
   }
 
-  // MARK: - 5. maxThinkingTokens parity with LlamaGenerationDriver (#514)
+  // MARK: - Thinking budget
 
-  /// Verifies that `GenerationConfig.maxThinkingTokens` terminates MLX generation the
-  /// same way it does in `LlamaGenerationDriver`.
-  ///
-  /// Today `MLXBackend.generate` does NOT track or enforce the thinking-token budget —
-  /// the test is skipped with a pointer to the backend gap so the divergence is visible
-  /// in the CI output rather than silently ignored.
-  func test_maxThinkingTokens_terminatesGeneration_parity_with_llama() async throws {
+  func test_maxThinkingTokens_limitsReasoningAndPreservesAnswer() async throws {
     let mock = MockMLXModelContainer()
-    // Feed more thinking tokens than the budget allows, then a visible "answer".
-    // With maxThinkingTokens=2 the backend should emit at most 2 .thinkingToken
-    // events and must terminate before the "answer" visible token is yielded.
-    mock.tokensToYield = ["<think>", "a", "b", "c", "d", "</think>", "answer"]
+    mock.tokensToYield = ["<think>", "a", "b", "c", "</th", "ink>answer"]
 
     let backend = MLXBackend()
     backend._inject(mock)
 
     var config = GenerationConfig()
-    config.maxThinkingTokens = 2
-
+    config.maxThinkingTokens = 1
     let stream = try backend.generate(
-      prompt: "hi",
-      systemPrompt: nil,
-      config: config,
-      hints: thinkingHints()
+      prompt: "hi", systemPrompt: nil, config: config, hints: thinkingHints()
     )
 
     let events = try await collectAllEvents(from: stream)
-
-    let thinkingTokens = events.compactMap { ev -> String? in
-      if case .thinkingToken(let t) = ev { return t } else { return nil }
+    let thinking = events.compactMap { event -> String? in
+      if case .thinkingToken(let text) = event { return text }
+      return nil
     }
-    let visibleTokens = events.compactMap { ev -> String? in
-      if case .token(let t) = ev { return t } else { return nil }
+    let visible = events.compactMap { event -> String? in
+      if case .token(let text) = event { return text }
+      return nil
+    }
+    XCTAssertEqual(thinking, ["a"])
+    XCTAssertEqual(visible, ["answer"])
+    let completions = events.filter {
+      if case .thinkingCompleted = $0 { return true }
+      return false
+    }
+    XCTAssertEqual(completions.count, 1)
+    XCTAssertEqual(mock.thinkingOverrides, [true])
+  }
+
+  func test_prefilledOpenerSeparatesReasoningBeforeVisibleAnswer() async throws {
+    let mock = MockMLXModelContainer()
+    mock.decodePromptTokens = { _ in "<|im_start|>assistant\n<think>\n" }
+    mock.tokensToYield = ["reason", "</th", "ink>answer"]
+
+    let backend = MLXBackend()
+    backend._inject(mock)
+    backend._injectAutoDetectedThinkingMarkers(.qwen3)
+
+    let stream = try backend.generate(prompt: "hi", systemPrompt: nil, config: GenerationConfig())
+    let events = try await collectAllEvents(from: stream)
+    let textEvents = events.compactMap { event -> String? in
+      switch event {
+      case .thinkingToken(let text): return "thinking " + text
+      case .thinkingCompleted: return "thinking completed"
+      case .token(let text): return "visible " + text
+      default: return nil
+      }
+    }
+    XCTAssertEqual(textEvents, ["thinking reason", "thinking completed", "visible answer"])
+    XCTAssertEqual(mock.thinkingOverrides, [nil])
+  }
+
+  func test_prefilledOpenerIsFoundPastLongWhitespaceSuffix() async throws {
+    let mock = MockMLXModelContainer()
+    mock.preparedTokenBatches = [[1, 2] + Array(repeating: 3, count: 129)]
+    mock.decodePromptTokens = { ids in
+      ids.map { $0 == 2 ? "<think>" : $0 == 3 ? " " : "assistant\n" }.joined()
+    }
+    mock.tokensToYield = ["reason", "</th", "ink>answer"]
+
+    let backend = MLXBackend()
+    backend._inject(mock)
+    backend._injectAutoDetectedThinkingMarkers(.qwen3)
+    let stream = try backend.generate(prompt: "hi", systemPrompt: nil, config: GenerationConfig())
+    let reasoning = try await collectThinkingTokens(from: stream)
+
+    XCTAssertEqual(reasoning, ["reason"])
+  }
+
+  func test_explicitGrammarProducesVisiblePayloadWhenTemplateIgnoresThinkingFlag() async throws {
+    let mock = MockMLXModelContainer()
+    mock.decodePromptTokens = { _ in "<think>\n" }
+    mock.tokensToYield = ["4", "3"]
+
+    let backend = MLXBackend()
+    backend._inject(mock)
+    backend._injectAutoDetectedThinkingMarkers(.qwen3)
+    let config = GenerationConfig(maxThinkingTokens: 1, grammar: #"root ::= "43""#)
+    let stream = try backend.generate(prompt: "hi", systemPrompt: nil, config: config)
+    let visible = try await collectTokens(from: stream)
+
+    XCTAssertEqual(visible.joined(), "43")
+    XCTAssertEqual(mock.thinkingOverrides, [false])
+  }
+
+  func test_grammarPreservesLiteralThinkingTagsInJSONPayload() async throws {
+    let mock = MockMLXModelContainer()
+    mock.tokensToYield = [#"{"label":""#, "<thi", "nk>", "demo", "</think>", #""}"#]
+
+    let backend = MLXBackend()
+    backend._inject(mock)
+    backend._injectAutoDetectedThinkingMarkers(.qwen3)
+    let config = GenerationConfig(grammar: #"root ::= "{\"label\":\"<think>demo</think>\"}""#)
+    let stream = try backend.generate(prompt: "hi", systemPrompt: nil, config: config)
+    let events = try await collectAllEvents(from: stream)
+    let visible = events.compactMap { event -> String? in
+      if case .token(let text) = event { return text }
+      return nil
+    }
+    let thinking = events.filter {
+      switch $0 {
+      case .thinkingToken, .thinkingCompleted: return true
+      default: return false
+      }
     }
 
-    XCTAssertLessThanOrEqual(
-      thinkingTokens.count, 2,
-      "maxThinkingTokens=2 must cap .thinkingToken events at 2, matching LlamaGenerationDriver")
-    XCTAssertFalse(
-      visibleTokens.joined().contains("answer"),
-      "Generation must terminate before post-think visible tokens are emitted when the budget is exhausted"
+    XCTAssertEqual(visible.joined(), #"{"label":"<think>demo</think>"}"#)
+    XCTAssertTrue(thinking.isEmpty)
+  }
+
+  func test_prefilledClosedBlockDoesNotStartThinkingAndPositiveBudgetOverridesDefault() async throws {
+    let mock = MockMLXModelContainer()
+    mock.decodePromptTokens = { ids in
+      ids == [1] ? "<think>\n\n</think>\n\n" : "<think>\n"
+    }
+    mock.preparedTokenBatches = [[1], [2]]
+    mock.tokensToYield = ["answer"]
+
+    let backend = MLXBackend(thinkingDefault: .disabled)
+    backend._inject(mock)
+    backend._injectAutoDetectedThinkingMarkers(.qwen3)
+
+    let ordinary = try backend.generate(prompt: "hi", systemPrompt: nil, config: GenerationConfig())
+    let ordinaryEvents = try await collectAllEvents(from: ordinary)
+    let visible = ordinaryEvents.compactMap { event -> String? in
+      if case .token(let text) = event { return text }
+      return nil
+    }
+    XCTAssertEqual(visible, ["answer"])
+    XCTAssertFalse(ordinaryEvents.contains {
+      switch $0 {
+      case .thinkingToken, .thinkingCompleted: return true
+      default: return false
+      }
+    })
+
+    mock.tokensToYield = ["reason", "</think>", "answer"]
+    let enabled = try backend.generate(
+      prompt: "hi", systemPrompt: nil, config: GenerationConfig(maxThinkingTokens: 32)
     )
+    let reasoning = try await collectThinkingTokens(from: enabled)
+    XCTAssertEqual(reasoning, ["reason"])
+    XCTAssertEqual(mock.thinkingOverrides, [false, true])
+  }
 
-    // Sabotage confirmation: removing the `thinkingLimitReached` short-circuit in
-    // MLXBackend.generate (or ignoring config.maxThinkingTokens entirely) would let
-    // all 4 thinking tokens plus "answer" through, failing both assertions.
+  func test_prefilledManualMarkerIncludesItsSignificantNewline() async throws {
+    let mock = MockMLXModelContainer()
+    mock.decodePromptTokens = { _ in "<|turn>think\n" }
+    mock.tokensToYield = ["reason", "<|end_of_", "turn>answer"]
+
+    let backend = MLXBackend()
+    backend._inject(mock)
+    backend._injectAutoDetectedThinkingMarkers(.qwen3)
+
+    let stream = try backend.generate(
+      prompt: "hi", systemPrompt: nil, config: GenerationConfig(),
+      hints: GenerationRuntimeHints(thinkingMarkers: .gemma4)
+    )
+    let reasoning = try await collectThinkingTokens(from: stream)
+    XCTAssertEqual(reasoning, ["reason"])
+  }
+
+  func test_prefilledThinkingOpenerIsDetectedBeforeCachePrefixIsRemoved() async throws {
+    let mock = MockMLXModelContainer()
+    mock.decodePromptTokens = { ids in ids.contains(22) ? "<think>\n" : "\n" }
+    mock.preparedTokenBatches = [[11, 12, 22], [11, 12, 22, 13]]
+    mock.tokensToYield = ["reason", "</think>", "answer"]
+
+    let backend = MLXBackend()
+    backend._inject(mock)
+    backend._injectAutoDetectedThinkingMarkers(.qwen3)
+    let config = GenerationConfig()
+
+    _ = try await collectAllEvents(from: backend.generate(
+      prompt: "first", systemPrompt: nil, config: config
+    ))
+    let secondTurn = try backend.generate(prompt: "second", systemPrompt: nil, config: config)
+    let reasoning = try await collectThinkingTokens(from: secondTurn)
+
+    XCTAssertEqual(mock.lastInitialCacheOffsets, [3])
+    XCTAssertEqual(reasoning, ["reason"])
+  }
+
+  func test_maxThinkingTokens_alsoCapsUnclosedParserTail() async throws {
+    let mock = MockMLXModelContainer()
+    mock.decodePromptTokens = { _ in "<think>" }
+    mock.tokensToYield = ["reason", "</th"]
+    let backend = MLXBackend()
+    backend._inject(mock)
+    backend._injectAutoDetectedThinkingMarkers(.qwen3)
+
+    let stream = try backend.generate(
+      prompt: "hi", systemPrompt: nil, config: GenerationConfig(maxThinkingTokens: 1)
+    )
+    let reasoning = try await collectThinkingTokens(from: stream)
+    XCTAssertEqual(reasoning, ["reason"])
   }
 
   // MARK: - 6. Auto-detected markers used when config.thinkingMarkers is nil (#479)
@@ -484,6 +637,7 @@ final class MLXBackendThinkingTests: XCTestCase {
     )
 
     let events = try await collectAllEvents(from: stream)
+    XCTAssertEqual(mock.thinkingOverrides, [false])
 
     let thinkingTokenCount = events.reduce(0) { acc, ev in
       if case .thinkingToken = ev { return acc + 1 }

@@ -83,6 +83,8 @@ final class MockMLXModelContainer: @unchecked Sendable {
   /// When empty, the mock synthesizes a small token sequence from the message count.
   var preparedTokenBatches: [[Int]] = []
 
+  var decodePromptTokens: @Sendable ([Int]) -> String = { _ in "" }
+
   /// Factory used to create the explicit cache passed to generation.
   var cacheFactory: @Sendable () -> [any KVCache] = { [KVCacheSimple()] }
 
@@ -97,6 +99,12 @@ final class MockMLXModelContainer: @unchecked Sendable {
 
   /// Number of times `prepare(messages:)` was called.
   private(set) var prepareCallCount = 0
+
+  private(set) var thinkingOverrides: [Bool?] = []
+
+  func recordThinkingOverride(_ thinkingEnabled: Bool?) {
+    thinkingOverrides.append(thinkingEnabled)
+  }
 
   /// Number of times `makeCache(parameters:)` was called.
   private(set) var makeCacheCallCount = 0

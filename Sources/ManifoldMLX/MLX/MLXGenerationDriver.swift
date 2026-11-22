@@ -122,7 +122,8 @@ import os
     toolAwareHistory: [ToolAwareHistoryEntry]?,
     structuredHistory: [StructuredMessage]?,
     dialect: MLXToolDialect,
-    autoDetectedMarkers: ThinkingMarkers?,
+    autoDetectedMarkers: MLXModelProbe.TemplateThinkingMarkers?,
+    thinkingDefault: MLXThinkingDefault,
     kvCacheReuseEligible: Bool,
     pendingSnapshotTask: Task<Void, Never>?,
     // Re-reading the snapshot AFTER awaiting `pendingSnapshotTask` is load-bearing:
@@ -209,11 +210,29 @@ import os
       dialect: dialect
     )
 
-    let resolvedMarkers = resolveThinkingMarkers(
-      config: config,
-      hints: hints,
-      autoDetected: autoDetectedMarkers
-    )
+    // Grammar-constrained sampling generates a payload from the first token.
+    // Preserve its literal text even if it contains thinking marker syntax.
+    let usesGrammar = grammar != nil
+    let passesStructuralTools = chatMessages == nil && toolSpecs?.isEmpty == false
+    let resolvedMarkers: ThinkingMarkers? =
+      if usesGrammar {
+        nil
+      } else {
+        Self.resolveThinkingMarkers(
+          config: config,
+          hints: hints,
+          autoDetected: passesStructuralTools
+            ? autoDetectedMarkers?.withTools : autoDetectedMarkers?.standard
+        )
+      }
+    let thinkingEnabled: Bool? =
+      if usesGrammar || config.maxThinkingTokens == 0 {
+        false
+      } else if (config.maxThinkingTokens ?? 0) > 0 {
+        true
+      } else {
+        thinkingDefault == .disabled ? false : nil
+      }
 
     // Wait for any pending KV snapshot capture from the previous turn to
     // complete before we restore from it — otherwise we'd race
@@ -231,6 +250,8 @@ import os
       chatMessages: chatMessages,
       messages: messages,
       toolSpecs: toolSpecs,
+      thinkingEnabled: thinkingEnabled,
+      thinkingOpenMarker: resolvedMarkers?.open,
       generateConfig: generateConfig,
       kvCacheReuseEligible: kvCacheReuseEligible,
       snapshot: resolvedSnapshot
@@ -268,6 +289,7 @@ import os
       config: config,
       dialect: dialect,
       markers: resolvedMarkers,
+      startsInThinking: prepared.startsInThinking,
       grammar: grammar,
       generationStream: generationStream,
       continuation: continuation,
@@ -321,16 +343,6 @@ import os
     return hints.thinkingMarkers ?? autoDetected
   }
 
-  /// Non-static, `@MainActor` forwarder so call sites already inside the
-  /// driver's actor don't need to qualify the type.
-  func resolveThinkingMarkers(
-    config: GenerationConfig,
-    hints: GenerationRuntimeHints,
-    autoDetected: ThinkingMarkers?
-  ) -> ThinkingMarkers? {
-    Self.resolveThinkingMarkers(config: config, hints: hints, autoDetected: autoDetected)
-  }
-
   /// Drives the MLX stream:
   ///   1. Calls `container.generate(...)` to materialise the underlying token stream.
   ///   2. Routes each chunk through the optional tool-call parser, then the optional
@@ -352,6 +364,7 @@ import os
     config: GenerationConfig,
     dialect: MLXToolDialect,
     markers: ThinkingMarkers?,
+    startsInThinking: Bool,
     grammar: GBNFGrammar?,
     generationStream: GenerationStream,
     continuation: AsyncThrowingStream<GenerationEvent, Error>.Continuation,
@@ -368,7 +381,6 @@ import os
     // tool tags are stripped first, then the thinking transform re-scans the
     // remaining visible `.token` text — preserving MLX's historical
     // two-stage order exactly.
-    let useThinkingParser = markers != nil
     // Tool-call stage activates only when tools are configured AND the model
     // speaks a known dialect.
     let useToolParser = !config.tools.isEmpty && dialect != .unknown
@@ -376,8 +388,13 @@ import os
     if useToolParser {
       stages.append(.tool(ToolCallTransform(markers: MLXToolMarkers.markers(dialect: dialect))))
     }
-    if useThinkingParser {
-      stages.append(.thinking(ThinkingTransform(markers: markers ?? .qwen3)))
+    if let markers {
+      var transform = ThinkingTransform(markers: markers)
+      if startsInThinking {
+        // The opener was consumed by prefill, so the stream starts inside it.
+        _ = transform.process([.token(markers.open)])
+      }
+      stages.append(.thinking(transform))
     }
     var session = OutputParserSession(stages)
 
@@ -398,10 +415,17 @@ import os
     // non-`.mistral` dialect; valid JSON passes through unchanged.
     var mistralNormalizer = MLXMistralToolCallNormalizer(dialect: dialect)
 
-    // A thinking model that runs away on a 16 GB Mac can OOM mid-generation;
-    // the budget gate breaks out of the stream once the limit is reached.
+    // The reasoning budget limits emitted events. Keep parsing after the
+    // budget is spent so the closing marker and visible answer still arrive.
     var thinkingTokenCount = 0
-    var thinkingLimitReached = false
+    func shouldEmit(_ event: GenerationEvent) -> Bool {
+      guard case .thinkingToken = event, let limit = config.maxThinkingTokens, limit > 0 else {
+        return true
+      }
+      guard thinkingTokenCount < limit else { return false }
+      thinkingTokenCount += 1
+      return true
+    }
 
     // Wrap `container.generate` in MLX's error handler so that fatal model
     // errors (e.g. Gemma4 MoE broadcast shape mismatch — issue #802) are
@@ -437,7 +461,7 @@ import os
 
     let yieldEvery = config.yieldEveryNTokens
     var completionTokenCount = 0
-    outer: for await generation in mlxStream {
+    for await generation in mlxStream {
       if Task.isCancelled { break }
       if let info = generation.info {
         capturedCompletionInfo = info
@@ -468,7 +492,7 @@ import os
       // per-chunk yield cadence still counts this as real generation work.
       let text = mistralNormalizer.process(llamaNormalizer.process(rawText))
 
-      for finalEvent in session.ingest(text) {
+      for finalEvent in session.ingest(text) where shouldEmit(finalEvent) {
         if isFirstToken {
           switch finalEvent {
           case .token, .thinkingToken, .toolCall:
@@ -479,15 +503,7 @@ import os
         }
         if case .token = finalEvent { outputTokenCount += 1 }
         continuation.yield(finalEvent)
-        if case .thinkingToken = finalEvent {
-          thinkingTokenCount += 1
-          if let limit = config.maxThinkingTokens, thinkingTokenCount >= limit {
-            thinkingLimitReached = true
-            break
-          }
-        }
       }
-      if thinkingLimitReached { break outer }
       if let limit = outputLimit, outputTokenCount >= limit { break }
 
       // Per-chunk yield: counted on every MLX-emitted chunk regardless
@@ -516,7 +532,7 @@ import os
     // for `.mistral`) so the two-stage tail order is preserved.
     let normalizerTail = llamaNormalizer.finalize() + mistralNormalizer.finalize()
     if !normalizerTail.isEmpty {
-      for event in session.ingest(normalizerTail) {
+      for event in session.ingest(normalizerTail) where shouldEmit(event) {
         if isFirstToken {
           switch event {
           case .token, .thinkingToken, .toolCall:
@@ -535,7 +551,7 @@ import os
     // finalize output through the stages downstream of it, so any text the
     // tool stage releases is still scanned by the thinking stage — matching
     // the previous two-stage finalize pipeline.
-    for event in session.finalize() {
+    for event in session.finalize() where shouldEmit(event) {
       continuation.yield(event)
     }
 

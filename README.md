@@ -39,6 +39,17 @@ let kit = try await ManifoldKit.quickStart(backends: [MLXBackends.self])
 >
 > The plugin needs the **Metal Toolchain** component (`xcodebuild -downloadComponent MetalToolchain`, or Xcode → Settings → Components). Without it the build still succeeds but emits no metallib, and the generate step aborts exactly as before — backend registration, model discovery/classification, and the load *plan* keep working regardless. A normal SwiftUI **app** target is an Xcode build and works out of the box. For a fully toolchain-free headless backend, the GGUF/llama.cpp companion ([manifold-llama](https://github.com/ManifoldKit/manifold-llama)) runs from `swift run` with no Metal step. See ManifoldKit's [`docs/QUICKSTART-CLI.md` §4](https://github.com/ManifoldKit/ManifoldKit/blob/main/docs/QUICKSTART-CLI.md).
 
+When a request leaves `maxThinkingTokens` unset, MLX uses the loaded tokenizer's
+default thinking behavior. To ask compatible templates for direct answers by
+default, use `MLXBackends.register(with: service, thinkingDefault: .disabled)`
+in your backend registrar, or initialize `MLXBackend(thinkingDefault: .disabled)`.
+Per-request zero asks the template to disable thinking. A positive budget asks
+the template to enable thinking and caps the emitted reasoning while allowing
+the visible answer to continue. Template control requires a template that
+accepts `enable_thinking`. A grammar takes precedence over thinking settings.
+MLX asks the template for direct output and preserves thinking markers as
+literal text in the constrained payload.
+
 ## Compatibility
 
 | manifold-mlx | ManifoldKit |
