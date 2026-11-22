@@ -1,6 +1,5 @@
 import ManifoldInference
-import ManifoldMLX
-@_spi(Testing) import ManifoldMLX
+@_spi(Testing) @testable import ManifoldMLX
 import XCTest
 
 /// Unit tests for ``MLXModelProbe/produceManifest(at:detectedThinkingMarkers:supportsVision:)``.
@@ -26,6 +25,152 @@ final class MLXManifestProbeTests: XCTestCase {
   private func writeConfig(_ json: [String: Any], in dir: URL) throws {
     let data = try JSONSerialization.data(withJSONObject: json, options: [])
     try data.write(to: dir.appendingPathComponent("config.json"))
+  }
+
+  // MARK: - Effective tokenizer chat template
+
+  private func writeTokenizerConfig(_ template: Any? = nil, in dir: URL) throws {
+    var config: [String: Any] = ["tokenizer_class": "PreTrainedTokenizerFast"]
+    config["chat_template"] = template
+    try JSONSerialization.data(withJSONObject: config)
+      .write(to: dir.appendingPathComponent("tokenizer_config.json"))
+    let data = #"""
+      {
+        "model": {"type": "BPE", "merges": [], "vocab": {"\n": 0, "x": 1}},
+        "added_tokens": [
+          {"id": 2, "content": "<think>", "special": true},
+          {"id": 3, "content": "</think>", "special": true},
+          {"id": 4, "content": "<reasoning>", "special": true},
+          {"id": 5, "content": "</reasoning>", "special": true}
+        ]
+      }
+      """#
+    try Data(data.utf8).write(to: dir.appendingPathComponent("tokenizer.json"))
+  }
+
+  private func writeExternalJSONTemplate(_ template: String, in dir: URL) throws {
+    try JSONSerialization.data(withJSONObject: ["chat_template": template])
+      .write(to: dir.appendingPathComponent("chat_template.json"))
+  }
+
+  private func renderTemplate(
+    in dir: URL, thinkingEnabled: Bool? = nil, withTools: Bool = false
+  ) async throws -> String {
+    let tokenizer = try await TransformersTokenizerLoader().load(from: dir)
+    let ids = try tokenizer.applyChatTemplate(
+      messages: [["role": "user", "content": "x"]],
+      tools: withTools ? [["type": "function"]] : nil,
+      additionalContext: thinkingEnabled.map { ["enable_thinking": $0] }
+    )
+    return tokenizer.decode(tokenIds: ids, skipSpecialTokens: false)
+  }
+
+  func test_detectsThinkingMarkersInExternalJinjaTemplate() async throws {
+    let dir = try makeTempDir()
+    try writeTokenizerConfig("{{ '<reasoning></reasoning>' }}", in: dir)
+    try writeExternalJSONTemplate("{{ 'x' }}", in: dir)
+    // Default-on branch used by Qwen3.5-9B.
+    let template = #"""
+      {%- if enable_thinking is defined and enable_thinking is false -%}
+      {{- '<think>\n\n</think>\n\n' -}}
+      {%- else -%}
+      {{- '<think>\n' -}}
+      {%- endif -%}
+      """#
+    try Data(template.utf8).write(to: dir.appendingPathComponent("chat_template.jinja"))
+
+    let markers = MLXModelProbe.detectThinkingMarkers(at: dir)
+    XCTAssertEqual(markers.standard, .qwen3)
+    XCTAssertEqual(markers.withTools, .qwen3)
+    let modelDefault = try await renderTemplate(in: dir)
+    let enabled = try await renderTemplate(in: dir, thinkingEnabled: true)
+    let disabled = try await renderTemplate(in: dir, thinkingEnabled: false)
+    XCTAssertEqual(modelDefault, "<think>\n")
+    XCTAssertEqual(enabled, "<think>\n")
+    XCTAssertEqual(disabled, "<think>\n\n</think>\n\n")
+  }
+
+  func test_externalJSONTemplateOverridesEmbeddedAndCanDefaultToDisabled() async throws {
+    let dir = try makeTempDir()
+    try writeTokenizerConfig("{{ '<reasoning></reasoning>' }}", in: dir)
+    // Default-off branch used by Qwen3.5-2B.
+    try writeExternalJSONTemplate(#"""
+      {%- if enable_thinking is defined and enable_thinking is true -%}
+      {{- '<think>\n' -}}
+      {%- else -%}
+      {{- '<think>\n\n</think>\n\n' -}}
+      {%- endif -%}
+      """#, in: dir)
+
+    XCTAssertEqual(MLXModelProbe.detectThinkingMarkers(at: dir).standard, .qwen3)
+    let modelDefault = try await renderTemplate(in: dir)
+    let enabled = try await renderTemplate(in: dir, thinkingEnabled: true)
+    let disabled = try await renderTemplate(in: dir, thinkingEnabled: false)
+    XCTAssertEqual(modelDefault, "<think>\n\n</think>\n\n")
+    XCTAssertEqual(enabled, "<think>\n")
+    XCTAssertEqual(disabled, modelDefault)
+  }
+
+  func test_existingUnreadableJinjaFallsBackToEmbeddedTemplate() async throws {
+    let dir = try makeTempDir()
+    try writeTokenizerConfig("{{ '<reasoning></reasoning>' }}", in: dir)
+    try writeExternalJSONTemplate("{{ '<think></think>' }}", in: dir)
+    try Data([0xFF]).write(to: dir.appendingPathComponent("chat_template.jinja"))
+
+    XCTAssertEqual(MLXModelProbe.detectThinkingMarkers(at: dir).standard, .phi4)
+    let rendered = try await renderTemplate(in: dir)
+    XCTAssertEqual(rendered, "<reasoning></reasoning>")
+  }
+
+  func test_embeddedMultiTemplateUsesDefaultAndExactToolUseName() async throws {
+    let dir = try makeTempDir()
+    try writeTokenizerConfig([
+      ["name": "Default", "template": "{{ 'x' }}"],
+      ["name": "default", "template": "{{ '<think></think>' }}"],
+      ["name": "tool_use", "template": "{{ '<reasoning></reasoning>' }}"],
+    ], in: dir)
+
+    let markers = MLXModelProbe.detectThinkingMarkers(at: dir)
+    XCTAssertEqual(markers.standard, .qwen3)
+    XCTAssertEqual(markers.withTools, .phi4)
+    let plain = try await renderTemplate(in: dir)
+    let withTools = try await renderTemplate(in: dir, withTools: true)
+    XCTAssertEqual(plain, "<think></think>")
+    XCTAssertEqual(withTools, "<reasoning></reasoning>")
+  }
+
+  func test_manifestDescribesOnlyReachableThinkingTemplates() throws {
+    let dir = try makeTempDir()
+    try writeConfig(["model_type": "fixture", "max_position_embeddings": 2048], in: dir)
+    try writeTokenizerConfig([
+      ["name": "default", "template": "{{ 'x' }}"],
+      ["name": "tool_use", "template": "{{ '<thinking></thinking>' }}"],
+    ], in: dir)
+
+    let markers = MLXModelProbe.detectThinkingMarkers(at: dir)
+    let mistral = MLXModelProbe.produceManifest(
+      at: dir, detectedThinkingMarkers: markers.forManifest(dialect: .mistral), supportsVision: false
+    )
+    let qwen = MLXModelProbe.produceManifest(
+      at: dir, detectedThinkingMarkers: markers.forManifest(dialect: .qwen25), supportsVision: false
+    )
+
+    XCTAssertTrue(mistral.supportsThinking)
+    XCTAssertEqual(mistral.thinkingMarkers, .mistralReasoning)
+    XCTAssertFalse(qwen.supportsThinking)
+    XCTAssertNil(qwen.thinkingMarkers)
+  }
+
+  func test_doesNotInventThinkingMarkersForMissingOrUnselectedTemplate() throws {
+    let dir = try makeTempDir()
+    XCTAssertNil(MLXModelProbe.detectThinkingMarkers(at: dir).standard)
+    try writeTokenizerConfig([
+      ["name": "Default", "template": "{{ '<think></think>' }}"]
+    ], in: dir)
+
+    let markers = MLXModelProbe.detectThinkingMarkers(at: dir)
+    XCTAssertNil(markers.standard)
+    XCTAssertNil(markers.withTools)
   }
 
   // MARK: - Context window extraction

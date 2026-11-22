@@ -201,6 +201,7 @@ import os
   /// Result of `prepareInputAndCache(...)`.
   struct PreparedGenerationInputs {
     let generationInput: MLXPreparedInput
+    let startsInThinking: Bool
     let cache: MLXPromptCache
     /// Captured prompt token IDs when KV-cache reuse is eligible — used to
     /// snapshot the cache after generation finishes. `nil` otherwise.
@@ -313,10 +314,13 @@ import os
   private static func prepareMessagesWithTemplateFallback(
     container: any MLXModelContainerProtocol,
     messages: [[String: String]],
-    tools: [[String: any Sendable]]?
+    tools: [[String: any Sendable]]?,
+    thinkingEnabled: Bool?
   ) async throws -> MLXPreparedInput {
     do {
-      return try await container.prepare(messages: messages, tools: tools)
+      return try await container.prepare(
+        messages: messages, tools: tools, thinkingEnabled: thinkingEnabled
+      )
     } catch let originalError {
       if originalError is CancellationError { throw originalError }
       let folded = MLXChatMessageEncoder.foldSystemIntoFirstUser(messages)
@@ -327,7 +331,9 @@ import os
         try Task.checkCancellation()
         attempted.append(candidate)
         do {
-          return try await container.prepare(messages: candidate, tools: tools)
+          return try await container.prepare(
+            messages: candidate, tools: tools, thinkingEnabled: thinkingEnabled
+          )
         } catch let cancellation as CancellationError {
           throw cancellation
         } catch {
@@ -345,23 +351,54 @@ import os
   @MainActor
   private static func prepareChatWithTemplateFallback(
     container: any MLXModelContainerProtocol,
-    chat: [Chat.Message]
+    chat: [Chat.Message],
+    thinkingEnabled: Bool?
   ) async throws -> MLXPreparedInput {
     do {
-      return try await container.prepare(chat: SendableChatMessages(chat))
+      return try await container.prepare(
+        chat: SendableChatMessages(chat), thinkingEnabled: thinkingEnabled
+      )
     } catch let originalError {
       if originalError is CancellationError { throw originalError }
       try Task.checkCancellation()
       let separated = MLXChatMessageEncoder.insertAssistantBoundariesBetweenUsers(chat)
       guard separated.count > chat.count else { throw originalError }
       do {
-        return try await container.prepare(chat: SendableChatMessages(separated))
+        return try await container.prepare(
+          chat: SendableChatMessages(separated), thinkingEnabled: thinkingEnabled
+        )
       } catch let cancellation as CancellationError {
         throw cancellation
       } catch {
         try Task.checkCancellation()
         throw originalError
       }
+    }
+  }
+
+  /// Look beyond the usual short prompt tail only while whitespace or a
+  /// partial opener could hide a match at the decode boundary.
+  @MainActor
+  private static func promptEndsInThinkingOpener(
+    _ input: MLXPreparedInput,
+    container: any MLXModelContainerProtocol,
+    openingMarker: String?
+  ) async -> Bool {
+    let total = input.promptTokenCount
+    guard let openingMarker, !openingMarker.isEmpty, total > 0 else { return false }
+
+    let markerBody = openingMarker.trimmingCharacters(in: .whitespacesAndNewlines)
+    var tokenCount = min(total, max(128, openingMarker.utf8.count + 16))
+    while true {
+      let tail = await container.decodePromptTail(input, maxTokens: tokenCount)
+      if let range = tail.range(of: openingMarker, options: .backwards) {
+        return tail[range.upperBound...].allSatisfy(\.isWhitespace)
+      }
+      let tailBody = tail.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard tokenCount < total, tailBody.isEmpty || markerBody.hasSuffix(tailBody) else {
+        return false
+      }
+      tokenCount += min(tokenCount, total - tokenCount)
     }
   }
 
@@ -381,6 +418,8 @@ import os
     chatMessages: [Chat.Message]?,
     messages: [[String: String]],
     toolSpecs: [[String: any Sendable]]?,
+    thinkingEnabled: Bool?,
+    thinkingOpenMarker: String?,
     generateConfig: GenerateParameters,
     kvCacheReuseEligible: Bool,
     snapshot: Snapshot?
@@ -390,12 +429,20 @@ import os
         // Vision/structured history path: tools are not threaded
         // structurally here (only the text-only `messages` path carries
         // the structural-tools render today — Phase 0 / #2005).
-        try await Self.prepareChatWithTemplateFallback(container: container, chat: chatMessages)
+        try await Self.prepareChatWithTemplateFallback(
+          container: container, chat: chatMessages, thinkingEnabled: thinkingEnabled
+        )
       } else {
         try await Self.prepareMessagesWithTemplateFallback(
-          container: container, messages: messages, tools: toolSpecs
+          container: container, messages: messages, tools: toolSpecs, thinkingEnabled: thinkingEnabled
         )
       }
+    // Inspect the successfully rendered full prompt. Prefix reuse below may
+    // leave only a newline in generationInput, with the opener in the cache.
+    let startsInThinking = await promptEndsInThinkingOpener(
+      preparedInput, container: container, openingMarker: thinkingOpenMarker
+    )
+
     var cache = try await container.makeCache(parameters: generateConfig)
     let promptTokenIds: [Int]? =
       if kvCacheReuseEligible {
@@ -413,6 +460,7 @@ import os
         // reuseReason already .noSnapshot
         return PreparedGenerationInputs(
           generationInput: generationInput,
+          startsInThinking: startsInThinking,
           cache: cache,
           promptTokenIds: promptTokenIds,
           reuseLen: reuseLen,
@@ -423,6 +471,7 @@ import os
         reuseReason = .promptTooShort
         return PreparedGenerationInputs(
           generationInput: generationInput,
+          startsInThinking: startsInThinking,
           cache: cache,
           promptTokenIds: promptTokenIds,
           reuseLen: reuseLen,
@@ -455,6 +504,7 @@ import os
 
     return PreparedGenerationInputs(
       generationInput: generationInput,
+      startsInThinking: startsInThinking,
       cache: cache,
       promptTokenIds: promptTokenIds,
       reuseLen: reuseLen,

@@ -10,23 +10,28 @@ import XCTest
 // Conform MockMLXModelContainer to the internal protocol in this test target,
 // where both the internal protocol and the public mock type are visible.
 extension MockMLXModelContainer: MLXModelContainerProtocol {
-  func prepare(messages: [[String: String]]) async throws -> MLXPreparedInput {
+  func prepare(
+    messages: [[String: String]],
+    tools: [[String: any Sendable]]?,
+    thinkingEnabled: Bool?
+  ) async throws -> MLXPreparedInput {
+    recordPrepareTools(tools)
+    recordThinkingOverride(thinkingEnabled)
     let promptTokenIds = try await prepareForGeneration(messages: messages)
     return MLXPreparedInput(promptTokenIds: promptTokenIds)
   }
 
   func prepare(
-    messages: [[String: String]],
-    tools: [[String: any Sendable]]?
+    chat: SendableChatMessages,
+    thinkingEnabled: Bool?
   ) async throws -> MLXPreparedInput {
-    recordPrepareTools(tools)
-    let promptTokenIds = try await prepareForGeneration(messages: messages)
+    recordThinkingOverride(thinkingEnabled)
+    let promptTokenIds = try await prepareForGeneration(chat: chat.value)
     return MLXPreparedInput(promptTokenIds: promptTokenIds)
   }
 
-  func prepare(chat: SendableChatMessages) async throws -> MLXPreparedInput {
-    let promptTokenIds = try await prepareForGeneration(chat: chat.value)
-    return MLXPreparedInput(promptTokenIds: promptTokenIds)
+  func decodePromptTail(_ input: MLXPreparedInput, maxTokens: Int) async -> String {
+    decodePromptTokens(Array(input.promptTokenIds.suffix(maxTokens)))
   }
 
   func makeCache(parameters: GenerateParameters) async throws -> MLXPromptCache {
@@ -198,13 +203,14 @@ final class MLXBackendGenerationTests: XCTestCase {
   }
 
   private func prepareAdjacentVisionUsers(
-    using mock: MockMLXModelContainer, history: [StructuredMessage]? = nil
+    using mock: MockMLXModelContainer, history: [StructuredMessage]? = nil,
+    config: GenerationConfig = GenerationConfig()
   ) async throws -> [String] {
     let backend = MLXBackend()
     backend._inject(mock, supportsVision: true)
     let history = try history ?? adjacentVisionUsers()
     let stream = try backend.generate(
-      prompt: history.last?.textContent ?? "fallback", systemPrompt: nil, config: GenerationConfig(),
+      prompt: history.last?.textContent ?? "fallback", systemPrompt: nil, config: config,
       hints: GenerationRuntimeHints(history: history))
     return try await collectTokens(from: stream)
   }
@@ -224,11 +230,14 @@ final class MLXBackendGenerationTests: XCTestCase {
     let history = try adjacentVisionUsers() + [
       StructuredMessage(role: "user", content: "Answer the latest question")
     ]
-    let tokens = try await prepareAdjacentVisionUsers(using: mock, history: history)
+    let tokens = try await prepareAdjacentVisionUsers(
+      using: mock, history: history, config: GenerationConfig(maxThinkingTokens: 32)
+    )
     let rendered = try XCTUnwrap(mock.lastChatMessages)
 
     XCTAssertEqual(tokens.joined(), "Hello world")
     XCTAssertEqual(mock.prepareCallCount, 2)
+    XCTAssertEqual(mock.thinkingOverrides, [true, true])
     XCTAssertNil(mock.lastMessages, "A structured retry must not flatten the images to text.")
     XCTAssertEqual(rendered.map(\.role), [.user, .assistant, .user, .assistant, .user, .assistant, .user])
     XCTAssertEqual(rendered.map(\.content), [
@@ -1000,7 +1009,7 @@ final class MLXBackendGenerationTests: XCTestCase {
         }
       }
     }
-    let backend = MLXBackend()
+    let backend = MLXBackend(thinkingDefault: .disabled)
     backend._inject(mock, dialect: .mistral)
 
     let stream = try backend.generate(
@@ -1017,6 +1026,7 @@ final class MLXBackendGenerationTests: XCTestCase {
 
     let tokens = try await collectTokens(from: stream)
     XCTAssertEqual(tokens.joined(), "Hello world")
+    XCTAssertEqual(mock.thinkingOverrides, [false, false, false, false])
     XCTAssertEqual(mock.lastMessages, [
       ["role": "user", "content": "Be concise.\n\nFirst request"],
       ["role": "assistant", "content": "Completed reply"],
